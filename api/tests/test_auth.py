@@ -98,7 +98,9 @@ def test_password_hash() -> str:
 
 @pytest.fixture
 def auth_settings(settings):
-    return SimpleNamespace(**vars(settings), secure_cookie=False)
+    values = vars(settings).copy()
+    values["secure_cookie"] = False
+    return SimpleNamespace(**values)
 
 
 @pytest.fixture
@@ -175,7 +177,8 @@ def test_temporary_password_login_returns_public_session_state(
     assert response.json()["role"] == "reviewer"
     assert response.json()["must_change_password"] is True
     assert response.json()["csrf_token"]
-    assert "password" not in response.text.lower()
+    assert "password_hash" not in response.text.lower()
+    assert TEST_PASSWORD not in response.text
 
 
 def test_mao_is_the_only_admin(auth_client, seeded_users):
@@ -235,6 +238,10 @@ def test_database_stores_only_password_hash_and_session_token_digest(
     assert len(sessions) == 1
     assert sessions[0].token_hash == session_digest(raw_token)
     assert sessions[0].token_hash != raw_token
+    created_at = sessions[0].created_at.replace(tzinfo=timezone.utc)
+    expires_at = sessions[0].expires_at.replace(tzinfo=timezone.utc)
+    assert timedelta(hours=11, minutes=59) < expires_at - created_at
+    assert expires_at - created_at < timedelta(hours=12, minutes=1)
 
 
 def test_cookie_session_survives_me_and_me_returns_session_bound_csrf(
@@ -515,6 +522,13 @@ def test_reset_password_command_is_random_and_revokes_sessions(settings):
     assert run_command(settings, "app.commands.seed_users").returncode == 0
     asyncio.run(add_live_mao_session(settings.DATABASE_URL))
 
+    first_reset = run_command(settings, "app.commands.reset_password", "Mao")
+    first_reset_lines = [
+        line for line in first_reset.stdout.splitlines() if line.strip()
+    ]
+    assert first_reset.returncode == 0
+    assert len(first_reset_lines) == 1
+    _, first_temporary_password = first_reset_lines[0].split(": ", 1)
     reset = run_command(settings, "app.commands.reset_password", "Mao")
     users, sessions = asyncio.run(load_auth_rows(settings.DATABASE_URL))
     mao = next(user for user in users if user.name == "Mao")
@@ -526,8 +540,43 @@ def test_reset_password_command_is_random_and_revokes_sessions(settings):
     assert len(reset_lines) == 1
     assert reset_lines[0].startswith("Mao: ")
     assert len(temporary_password) >= 20
+    assert first_temporary_password != temporary_password
     assert verify_password(temporary_password, mao.password_hash)
     assert mao.must_change_password is True
     assert sessions[0].revoked_at is not None
     assert rejected.returncode != 0
     assert rejected.stdout == ""
+
+
+@pytest.mark.parametrize(
+    ("module_name", "arguments"),
+    [
+        ("app.commands.seed_users", []),
+        ("app.commands.reset_password", ["Mao"]),
+    ],
+)
+def test_command_failures_do_not_echo_exception_secrets(
+    module_name, arguments, monkeypatch, capsys
+):
+    if module_name.endswith("seed_users"):
+        from app.commands import seed_users as command
+
+        async def fail(*_):
+            raise RuntimeError("test-only-database-password")
+
+        monkeypatch.setattr(command, "seed_users", fail)
+    else:
+        from app.commands import reset_password as command
+
+        async def fail(*_):
+            raise RuntimeError("test-only-database-password")
+
+        monkeypatch.setattr(command, "reset_password", fail)
+
+    result = command.main(arguments)
+    captured = capsys.readouterr()
+
+    assert result == 1
+    assert captured.out == ""
+    assert "test-only-database-password" not in captured.err
+    assert "failed" in captured.err.lower() or "unable" in captured.err.lower()

@@ -1,0 +1,188 @@
+from datetime import timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.dependencies import (
+    CurrentAuth,
+    get_current_auth,
+    get_runtime_settings,
+    require_csrf,
+)
+from app.config import Settings
+from app.database import get_db
+from app.models import Session, User
+from app.schemas.auth import AuthState, ChangePasswordRequest, LoginName, LoginRequest
+from app.services.auth import (
+    FIXED_USERS,
+    LOGIN_FAILURE_LIMIT,
+    LOGIN_LOCK_MINUTES,
+    as_utc,
+    csrf_token,
+    generate_session_token,
+    hash_password,
+    session_digest,
+    utc_now,
+    verify_dummy_password,
+    verify_password,
+)
+
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+INVALID_CREDENTIALS = "Invalid credentials"
+TEMPORARILY_UNAVAILABLE = "Authentication temporarily unavailable"
+
+
+def public_state(auth: CurrentAuth, settings: Settings) -> AuthState:
+    return AuthState(
+        id=auth.user.id,
+        name=auth.user.name,
+        role=auth.user.role,
+        must_change_password=auth.user.must_change_password,
+        csrf_token=csrf_token(auth.session.token_hash, settings.CSRF_SECRET),
+    )
+
+
+def client_address(request: Request) -> str:
+    return request.client.host if request.client is not None else "unknown"
+
+
+def set_session_cookie(
+    response: Response, settings: Settings, token: str
+) -> None:
+    response.set_cookie(
+        key=settings.SESSION_COOKIE_NAME,
+        value=token,
+        max_age=settings.SESSION_HOURS * 60 * 60,
+        path="/sukaseafood",
+        secure=settings.secure_cookie,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def clear_session_cookie(response: Response, settings: Settings) -> None:
+    response.delete_cookie(
+        key=settings.SESSION_COOKIE_NAME,
+        path="/sukaseafood",
+        secure=settings.secure_cookie,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+@router.get("/names", response_model=list[LoginName])
+async def names() -> list[LoginName]:
+    return [LoginName(name=name) for name, _ in FIXED_USERS]
+
+
+@router.post("/login", response_model=AuthState)
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_runtime_settings),
+) -> AuthState:
+    now = utc_now()
+    address = client_address(request)
+    limiter = request.app.state.login_limiter
+    if limiter.is_limited(address, now):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=TEMPORARILY_UNAVAILABLE,
+        )
+
+    user = await db.scalar(select(User).where(User.name == payload.name))
+    account_locked = bool(
+        user is not None
+        and user.locked_until is not None
+        and as_utc(user.locked_until) > now
+    )
+    if user is None:
+        verify_dummy_password(payload.password)
+        password_valid = False
+    else:
+        password_valid = verify_password(payload.password, user.password_hash)
+
+    if user is None or not user.active or account_locked or not password_valid:
+        client_limited = limiter.record_failure(address, now)
+        account_limited = account_locked
+        if user is not None:
+            if not account_locked:
+                user.failed_login_count += 1
+                if user.failed_login_count >= LOGIN_FAILURE_LIMIT:
+                    user.locked_until = now + timedelta(minutes=LOGIN_LOCK_MINUTES)
+                    account_limited = True
+            await db.commit()
+        if client_limited or account_limited:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=TEMPORARILY_UNAVAILABLE,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=INVALID_CREDENTIALS
+        )
+
+    user.failed_login_count = 0
+    user.locked_until = None
+    limiter.clear(address)
+    raw_token = generate_session_token()
+    session = Session(
+        user_id=user.id,
+        token_hash=session_digest(raw_token),
+        expires_at=now + timedelta(hours=settings.SESSION_HOURS),
+    )
+    db.add(session)
+    await db.commit()
+    set_session_cookie(response, settings, raw_token)
+    return public_state(CurrentAuth(user=user, session=session), settings)
+
+
+@router.get("/me", response_model=AuthState)
+async def me(
+    auth: CurrentAuth = Depends(get_current_auth),
+    settings: Settings = Depends(get_runtime_settings),
+) -> AuthState:
+    return public_state(auth, settings)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    response: Response,
+    auth: CurrentAuth = Depends(require_csrf),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_runtime_settings),
+) -> None:
+    auth.session.revoked_at = utc_now()
+    await db.commit()
+    clear_session_cookie(response, settings)
+
+
+@router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(
+    payload: ChangePasswordRequest,
+    response: Response,
+    auth: CurrentAuth = Depends(require_csrf),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_runtime_settings),
+) -> None:
+    if not verify_password(payload.current_password, auth.user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is invalid",
+        )
+
+    now = utc_now()
+    auth.user.password_hash = hash_password(payload.new_password)
+    auth.user.must_change_password = False
+    auth.user.failed_login_count = 0
+    auth.user.locked_until = None
+    await db.execute(
+        update(Session)
+        .where(Session.user_id == auth.user.id, Session.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    await db.commit()
+    clear_session_cookie(response, settings)

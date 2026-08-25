@@ -11,6 +11,7 @@ class Settings:
     SESSION_SECRET: str
     CSRF_SECRET: str
     APP_ENV: str
+    secure_cookie: bool = True
     app_name: str = "SukaSeafood Review API"
 
     def __post_init__(self) -> None:
