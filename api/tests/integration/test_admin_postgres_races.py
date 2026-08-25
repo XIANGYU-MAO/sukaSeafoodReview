@@ -304,6 +304,9 @@ def test_transfer_current_waits_for_species_lock_then_rolls_back_inactive_confli
         seeded = await seed_admin_assignment_paths(engine)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         candidate_id = seeded["candidates"][0]
+        async with factory() as initial:
+            initial_candidate = await initial.get(Candidate, candidate_id)
+            initial_started_at = initial_candidate.current_started_at
 
         async def transfer():
             async with factory() as db:
@@ -332,13 +335,14 @@ def test_transfer_current_waits_for_species_lock_then_rolls_back_inactive_confli
             blocked,
             conflict_code,
             candidate.current_reviewer_id == seeded["users"]["Hassan"],
+            candidate.current_started_at == initial_started_at,
             candidate.version,
             audit_count,
         )
 
     result = asyncio.run(in_isolated_schema(operation))
 
-    assert result == (True, "SPECIES_NOT_ACTIVE", True, 1, 0)
+    assert result == (True, "SPECIES_NOT_ACTIVE", True, True, 1, 0)
 
 
 def test_reopen_review_waits_for_species_lock_then_preserves_review_on_conflict():
@@ -347,6 +351,9 @@ def test_reopen_review_waits_for_species_lock_then_preserves_review_on_conflict(
         factory = async_sessionmaker(engine, expire_on_commit=False)
         candidate_id = seeded["candidates"][1]
         review_id = seeded["reviews"][0]
+        async with factory() as initial:
+            initial_candidate = await initial.get(Candidate, candidate_id)
+            initial_started_at = initial_candidate.current_started_at
 
         async def reopen():
             async with factory() as db:
@@ -380,6 +387,7 @@ def test_reopen_review_waits_for_species_lock_then_preserves_review_on_conflict(
             blocked,
             conflict_code,
             candidate.current_reviewer_id,
+            candidate.current_started_at == initial_started_at,
             candidate.version,
             review.is_current,
             review.version,
@@ -389,7 +397,17 @@ def test_reopen_review_waits_for_species_lock_then_preserves_review_on_conflict(
 
     result = asyncio.run(in_isolated_schema(operation))
 
-    assert result == (True, "SPECIES_NOT_ACTIVE", None, 1, True, 1, 0, 0)
+    assert result == (
+        True,
+        "SPECIES_NOT_ACTIVE",
+        None,
+        True,
+        1,
+        True,
+        1,
+        0,
+        0,
+    )
 
 
 def test_reviewed_candidate_patch_waits_for_target_species_then_rolls_back():
@@ -398,6 +416,9 @@ def test_reviewed_candidate_patch_waits_for_target_species_then_rolls_back():
         factory = async_sessionmaker(engine, expire_on_commit=False)
         candidate_id = seeded["candidates"][2]
         review_id = seeded["reviews"][1]
+        async with factory() as initial:
+            initial_candidate = await initial.get(Candidate, candidate_id)
+            initial_started_at = initial_candidate.current_started_at
 
         async def change_species():
             async with factory() as db:
@@ -433,6 +454,7 @@ def test_reviewed_candidate_patch_waits_for_target_species_then_rolls_back():
             conflict_code,
             candidate.species_id == seeded["source_species"],
             candidate.current_reviewer_id,
+            candidate.current_started_at == initial_started_at,
             candidate.version,
             review.is_current,
             review.version,
@@ -447,6 +469,7 @@ def test_reviewed_candidate_patch_waits_for_target_species_then_rolls_back():
         "SPECIES_NOT_ACTIVE",
         True,
         None,
+        True,
         1,
         True,
         1,
@@ -461,10 +484,12 @@ def test_concurrent_admin_transfers_to_one_target_return_success_and_stable_conf
         factory = async_sessionmaker(engine, expire_on_commit=False)
         candidate_ids = seeded["candidates"][3:5]
         target_id = seeded["users"]["Xinhui"]
+        entered = [asyncio.Event(), asyncio.Event()]
 
-        async def transfer(candidate_id):
+        async def transfer(index, candidate_id):
             async with factory() as db:
                 try:
+                    entered[index].set()
                     await transfer_current(
                         db,
                         seeded["users"]["Mao"],
@@ -479,10 +504,46 @@ def test_concurrent_admin_transfers_to_one_target_return_success_and_stable_conf
                 except AdminConflict as exc:
                     return "conflict", exc.code
 
-        results = await asyncio.wait_for(
-            asyncio.gather(*(transfer(value) for value in candidate_ids)),
-            timeout=3.0,
-        )
+        tasks = []
+        blocked = []
+        try:
+            async with factory() as barrier:
+                await barrier.scalar(
+                    select(User)
+                    .where(User.id == target_id)
+                    .with_for_update()
+                )
+                tasks = [
+                    asyncio.create_task(transfer(index, candidate_id))
+                    for index, candidate_id in enumerate(candidate_ids)
+                ]
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*(event.wait() for event in entered)),
+                        timeout=1.0,
+                    )
+                    for task in tasks:
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(task), timeout=0.25
+                            )
+                            blocked.append(False)
+                        except TimeoutError:
+                            blocked.append(True)
+                finally:
+                    if barrier.in_transaction():
+                        await barrier.rollback()
+
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks),
+                timeout=3.0,
+            )
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
         async with factory() as verification:
             candidates = [
                 await verification.get(Candidate, candidate_id)
@@ -496,12 +557,13 @@ def test_concurrent_admin_transfers_to_one_target_return_success_and_stable_conf
             audit_count = await verification.scalar(
                 select(func.count()).select_from(AuditEvent)
             )
-        return results, candidates, target_assignments, audit_count
+        return blocked, results, candidates, target_assignments, audit_count
 
-    results, candidates, target_assignments, audit_count = asyncio.run(
+    blocked, results, candidates, target_assignments, audit_count = asyncio.run(
         in_isolated_schema(operation)
     )
 
+    assert blocked == [True, True]
     assert sorted(results) == [
         ("conflict", "REVIEWER_NOT_ELIGIBLE"),
         ("success", None),
