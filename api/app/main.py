@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import auth, health
+from app.api.routes import auth, health, reviews
 from app.config import Settings, get_settings
 from app.database import create_database_engine, create_session_factory
 from app.services.auth import LoginLimiter, parse_trusted_proxy_networks
@@ -28,4 +28,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.include_router(health.router, prefix="/v1")
     app.include_router(auth.router, prefix="/v1")
+    app.include_router(reviews.router, prefix="/v1")
     return app

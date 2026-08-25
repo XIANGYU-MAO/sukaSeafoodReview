@@ -72,3 +72,11 @@ async def require_csrf(
     ):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
     return auth
+
+
+async def require_review_access(
+    auth: CurrentAuth = Depends(require_csrf),
+) -> CurrentAuth:
+    if auth.user.must_change_password:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    return auth

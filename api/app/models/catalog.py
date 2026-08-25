@@ -8,11 +8,13 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Index,
     JSON,
     String,
     UniqueConstraint,
     func,
     true,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -42,6 +44,13 @@ class Candidate(TimestampMixin, Base):
             "source_dataset",
             "source_record_id",
             name="uq_candidates_source_record",
+        ),
+        Index(
+            "uq_candidates_current_reviewer_nonnull",
+            "current_reviewer_id",
+            unique=True,
+            sqlite_where=text("current_reviewer_id IS NOT NULL"),
+            postgresql_where=text("current_reviewer_id IS NOT NULL"),
         ),
     )
 
