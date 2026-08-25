@@ -171,6 +171,7 @@ def test_initial_migration_upgrades_a_fresh_database(tmp_path):
         "idempotency_commands",
         "export_batches",
         "export_items",
+        "candidate_import_previews",
     }
     assert expected_tables == set(inspector.get_table_names())
 
