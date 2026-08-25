@@ -15,6 +15,7 @@ from app.schemas.history import (
     HistoryResponse,
 )
 from app.schemas.review import ReviewResponse, SpeciesSummary
+from app.services.admin import audited_change
 from app.services.reviews import canonical_facts, review_snapshot
 
 
@@ -173,6 +174,16 @@ async def edit_review(
                 review_version=review.version,
                 snapshot_json={"before": before, "after": after},
             )
+        )
+        await audited_change(
+            session,
+            action="REVIEW_SELF_UPDATE",
+            actor_id=reviewer_id,
+            object_type="Review",
+            object_id=review.id,
+            reason=None,
+            before=before,
+            after=after,
         )
         await session.commit()
         return ReviewResponse.from_review(review)

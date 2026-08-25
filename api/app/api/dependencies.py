@@ -1,6 +1,4 @@
 from dataclasses import dataclass
-from datetime import datetime
-
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,6 +59,18 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+async def require_admin_access(
+    auth: CurrentAuth = Depends(get_current_auth),
+) -> CurrentAuth:
+    if (
+        auth.user.name != "Mao"
+        or auth.user.role != "admin"
+        or auth.user.must_change_password
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    return auth
+
+
 async def require_csrf(
     request: Request,
     auth: CurrentAuth = Depends(get_current_auth),
@@ -69,6 +79,18 @@ async def require_csrf(
     supplied = request.headers.get("X-CSRF-Token")
     if not supplied or not verify_csrf_token(
         auth.session.token_hash, settings.CSRF_SECRET, supplied
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    return auth
+
+
+async def require_admin_csrf(
+    auth: CurrentAuth = Depends(require_csrf),
+) -> CurrentAuth:
+    if (
+        auth.user.name != "Mao"
+        or auth.user.role != "admin"
+        or auth.user.must_change_password
     ):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
     return auth
