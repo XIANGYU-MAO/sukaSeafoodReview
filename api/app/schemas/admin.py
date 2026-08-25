@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import json
+import re
 from typing import Annotated, Any
-from urllib.parse import urlparse
 from uuid import UUID
 
 from pydantic import (
+    AnyHttpUrl,
     BaseModel,
     ConfigDict,
     Field,
     StringConstraints,
+    TypeAdapter,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -33,16 +36,24 @@ TrimmedName = Annotated[
 def _validate_https(value: str | None) -> str | None:
     if value is None:
         return None
-    normalized = value.strip()
-    parsed = urlparse(normalized)
+    if value != value.strip() or any(character.isspace() for character in value):
+        raise ValueError("URL must be an absolute HTTPS URL without credentials")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        raise ValueError("URL must not contain control characters")
+    if re.match(r"^https://[^/?#]+", value, flags=re.IGNORECASE) is None:
+        raise ValueError("URL must contain an explicit HTTPS authority")
+    try:
+        parsed = TypeAdapter(AnyHttpUrl).validate_python(value)
+    except ValidationError as exc:
+        raise ValueError("URL must be a valid absolute HTTPS URL") from exc
     if (
-        parsed.scheme.lower() != "https"
-        or not parsed.netloc
+        parsed.scheme != "https"
+        or parsed.host is None
         or parsed.username is not None
         or parsed.password is not None
     ):
         raise ValueError("URL must be an absolute HTTPS URL without credentials")
-    return normalized
+    return str(parsed)
 
 
 class SpeciesFilters(BaseModel):
@@ -99,6 +110,17 @@ class SpeciesPatchRequest(BaseModel):
     def require_change(self) -> "SpeciesPatchRequest":
         if not self.model_fields_set.difference({"reason"}):
             raise ValueError("at least one species field is required")
+        if any(
+            field in self.model_fields_set and getattr(self, field) is None
+            for field in (
+                "name_zh",
+                "name_en",
+                "scientific_name",
+                "active",
+                "sort_order",
+            )
+        ):
+            raise ValueError("species fields cannot be cleared")
         return self
 
 
@@ -106,6 +128,15 @@ class AdminUserSummary(BaseModel):
     id: UUID
     display_name: str
     active: bool
+
+
+class AdminUserDirectoryItem(AdminUserSummary):
+    role: str
+
+
+class AdminUserListResponse(BaseModel):
+    total: int
+    items: list[AdminUserDirectoryItem]
 
 
 class AdminSpeciesSummary(BaseModel):
@@ -248,11 +279,7 @@ class CandidatePatchRequest(BaseModel):
             and "species_id" not in self.model_fields_set
         ):
             raise ValueError("species_id is required when invalidating a review")
-        if (
-            self.new_reviewer_id is not None
-            and not self.confirm_review_invalidation
-            and "species_id" not in self.model_fields_set
-        ):
+        if self.new_reviewer_id is not None and not self.confirm_review_invalidation:
             raise ValueError("new_reviewer_id is only valid for review invalidation")
         if self.metadata is not None:
             encoded = json.dumps(

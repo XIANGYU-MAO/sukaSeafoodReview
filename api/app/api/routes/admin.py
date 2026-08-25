@@ -14,6 +14,7 @@ from app.schemas.admin import (
     AdminReviewFilters,
     AdminReviewListResponse,
     AdminReviewPatchRequest,
+    AdminUserListResponse,
     CandidateAdminResponse,
     CandidateFilters,
     CandidateListResponse,
@@ -38,6 +39,7 @@ from app.services.admin import (
     create_species,
     edit_admin_review,
     list_admin_reviews,
+    list_admin_users,
     list_candidates,
     list_current,
     list_species,
@@ -64,6 +66,14 @@ def _raise_admin_error(exc: Exception) -> None:
             status_code=status.HTTP_409_CONFLICT, detail=detail
         ) from exc
     raise exc
+
+
+@router.get("/users", response_model=AdminUserListResponse)
+async def get_users(
+    _: CurrentAuth = Depends(require_admin_access),
+    db: AsyncSession = Depends(get_db),
+) -> AdminUserListResponse:
+    return await list_admin_users(db)
 
 
 @router.get("/species", response_model=SpeciesListResponse)

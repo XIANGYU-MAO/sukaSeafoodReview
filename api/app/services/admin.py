@@ -27,6 +27,8 @@ from app.schemas.admin import (
     AdminReviewPatchRequest,
     AdminReviewSummary,
     AdminSpeciesSummary,
+    AdminUserDirectoryItem,
+    AdminUserListResponse,
     AdminUserSummary,
     CandidateAdminResponse,
     CandidateFilters,
@@ -51,6 +53,7 @@ from app.services.auth import (
     hash_password,
     utc_now,
 )
+from app.services.pool import lock_species_for_assignment
 from app.services.reviews import canonical_facts, review_snapshot
 
 
@@ -182,6 +185,25 @@ def _candidate_summary(candidate: Candidate) -> AdminCandidateSummary:
         active=candidate.active,
         version=candidate.version,
     )
+
+
+async def list_admin_users(session: AsyncSession) -> AdminUserListResponse:
+    fixed_names = [name for name, _ in FIXED_USERS]
+    users = list(
+        (await session.scalars(select(User).where(User.name.in_(fixed_names)))).all()
+    )
+    by_name = {user.name: user for user in users}
+    items = [
+        AdminUserDirectoryItem(
+            id=by_name[name].id,
+            display_name=by_name[name].name,
+            active=by_name[name].active,
+            role=by_name[name].role,
+        )
+        for name in fixed_names
+        if name in by_name
+    ]
+    return AdminUserListResponse(total=len(items), items=items)
 
 
 async def _candidate_response(
@@ -336,7 +358,10 @@ async def patch_species(
 ) -> SpeciesResponse:
     try:
         species = await session.scalar(
-            select(Species).where(Species.id == species_id).with_for_update()
+            select(Species)
+            .where(Species.id == species_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if species is None:
             raise AdminObjectNotFound
@@ -517,30 +542,36 @@ async def patch_candidate(
             raise AdminConflict("CANDIDATE_CURRENTLY_OPEN")
 
         before_candidate = candidate_snapshot(candidate)
-        current_review = await session.scalar(
-            select(Review)
-            .where(
-                Review.candidate_id == candidate.id,
-                Review.is_current.is_(True),
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
         species_changed = (
-            payload.species_id is not None
+            "species_id" in payload.model_fields_set
             and payload.species_id != candidate.species_id
         )
+        has_invalidation_controls = (
+            payload.confirm_review_invalidation or payload.new_reviewer_id is not None
+        )
+        if has_invalidation_controls and not species_changed:
+            raise AdminConflict("REVIEW_INVALIDATION_REQUIRES_SPECIES_CHANGE")
+
         review_before = None
         review_after = None
         if species_changed:
-            species = await session.scalar(
-                select(Species).where(Species.id == payload.species_id)
-            )
+            species = await lock_species_for_assignment(session, payload.species_id)
             if species is None:
                 raise AdminObjectNotFound
             if not species.active:
                 raise AdminConflict("SPECIES_NOT_ACTIVE")
+            current_review = await session.scalar(
+                select(Review)
+                .where(
+                    Review.candidate_id == candidate.id,
+                    Review.is_current.is_(True),
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
             if current_review is not None:
+                if not candidate.active:
+                    raise AdminConflict("CANDIDATE_NOT_ACTIVE")
                 if not payload.confirm_review_invalidation:
                     raise AdminConflict("REVIEW_INVALIDATION_CONFIRMATION_REQUIRED")
                 target = await _ensure_target_eligible(session, target, candidate.id)
@@ -570,6 +601,8 @@ async def patch_candidate(
                 )
                 candidate.current_reviewer_id = target.id
                 candidate.current_started_at = utc_now()
+            elif has_invalidation_controls:
+                raise AdminConflict("REVIEW_INVALIDATION_NOT_APPLICABLE")
 
         field_map = {
             "species_id": "species_id",
@@ -590,6 +623,9 @@ async def patch_candidate(
         for payload_field, model_field in field_map.items():
             if payload_field in payload.model_fields_set:
                 setattr(candidate, model_field, getattr(payload, payload_field))
+        changed_candidate = candidate_snapshot(candidate)
+        if changed_candidate == before_candidate:
+            raise AdminConflict("CANDIDATE_NO_CHANGES")
         candidate.version += 1
         after_candidate = candidate_snapshot(candidate)
         if review_before is None:
@@ -920,6 +956,11 @@ async def transfer_current(
             )
         if candidate.current_reviewer_id is None:
             raise AdminConflict("CANDIDATE_NOT_OPEN")
+        species = await lock_species_for_assignment(session, candidate.species_id)
+        if species is None:
+            raise AdminObjectNotFound
+        if not candidate.active or not species.active:
+            raise AdminConflict("SPECIES_NOT_ACTIVE")
         if await _current_review(session, candidate.id, lock=True) is not None:
             raise AdminConflict("CANDIDATE_ALREADY_REVIEWED")
         target = await _ensure_target_eligible(
@@ -973,28 +1014,35 @@ async def reopen_review(
             .with_for_update()
             .execution_options(populate_existing=True)
         )
+        if candidate is None:
+            raise AdminObjectNotFound
+        if candidate.version != payload.candidate_version:
+            raise AdminConflict(
+                "STALE_CANDIDATE_VERSION",
+                (await _candidate_response(session, candidate)).model_dump(mode="json"),
+            )
+        if candidate.current_reviewer_id is not None:
+            raise AdminConflict("CANDIDATE_CURRENTLY_OPEN")
+        species = await lock_species_for_assignment(session, candidate.species_id)
+        if species is None:
+            raise AdminObjectNotFound
+        if not candidate.active or not species.active:
+            raise AdminConflict("SPECIES_NOT_ACTIVE")
         review = await session.scalar(
             select(Review)
             .where(Review.id == review_id)
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-        if candidate is None or review is None:
+        if review is None:
             raise AdminObjectNotFound
         if not review.is_current:
             raise AdminConflict("REVIEW_NOT_CURRENT")
-        if candidate.version != payload.candidate_version:
-            raise AdminConflict(
-                "STALE_CANDIDATE_VERSION",
-                (await _candidate_response(session, candidate)).model_dump(mode="json"),
-            )
         if review.version != payload.review_version:
             raise AdminConflict(
                 "STALE_REVIEW_VERSION",
                 ReviewResponse.from_review(review).model_dump(mode="json"),
             )
-        if candidate.current_reviewer_id is not None:
-            raise AdminConflict("CANDIDATE_CURRENTLY_OPEN")
         target = await _ensure_target_eligible(session, target, candidate.id)
         candidate_before = candidate_snapshot(candidate)
         review_before = review_snapshot(review)
