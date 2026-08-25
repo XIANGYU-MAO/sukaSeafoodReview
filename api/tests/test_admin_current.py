@@ -2,11 +2,9 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from uuid import UUID
-
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import event, func, select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.main import create_app
@@ -17,6 +15,7 @@ from app.models import (
     Review,
     ReviewRevision,
     Session,
+    Species,
     User,
 )
 from app.services.auth import verify_password
@@ -101,6 +100,98 @@ async def load_state(settings, candidate_id=None, review_id=None, user_id=None):
         sessions = list((await db.scalars(select(Session))).all())
     await engine.dispose()
     return candidate, review, user, revisions, audits, sessions
+
+
+def test_admin_user_directory_discovers_all_fixed_accounts_without_auth_state(
+    settings,
+):
+    seed, _ = asyncio.run(seed_current_database(settings))
+    with TestClient(create_app(settings)) as client:
+        response = client.get(
+            "/v1/admin/users", headers=admin_headers(seed)
+        )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 6
+    assert [item["display_name"] for item in response.json()["items"]] == [
+        "Hassan",
+        "Mao",
+        "Xinhui",
+        "Wahid",
+        "Sharmaa",
+        "Yiming",
+    ]
+    assert [item["role"] for item in response.json()["items"]] == [
+        "reviewer",
+        "admin",
+        "reviewer",
+        "reviewer",
+        "reviewer",
+        "reviewer",
+    ]
+    assert all(item["active"] is True for item in response.json()["items"])
+    assert {item["id"] for item in response.json()["items"]} == {
+        str(value) for value in seed.user_ids.values()
+    }
+    lowered = response.text.lower()
+    for forbidden in (
+        "password",
+        "hash",
+        "session",
+        "token",
+        "failed_login",
+        "locked_until",
+    ):
+        assert forbidden not in lowered
+
+
+def test_zero_activity_users_are_discoverable_for_transfer_and_reset(settings):
+    seed, _ = asyncio.run(seed_current_database(settings))
+    with TestClient(create_app(settings)) as client:
+        directory = client.get(
+            "/v1/admin/users", headers=admin_headers(seed)
+        )
+        assert directory.status_code == 200
+        by_name = {
+            item["display_name"]: item["id"]
+            for item in directory.json()["items"]
+        }
+        transfer = client.post(
+            f"/v1/admin/current/{seed.candidate_ids[0]}/transfer",
+            headers=admin_headers(seed, csrf=True),
+            json={
+                "version": 1,
+                "new_reviewer_id": by_name["Sharmaa"],
+                "reason": "use discoverable zero-activity reviewer",
+            },
+        )
+        reset = client.post(
+            f"/v1/admin/users/{by_name['Yiming']}/reset-password",
+            headers=admin_headers(seed, csrf=True),
+            json={"reason": "use discoverable zero-activity reviewer"},
+        )
+
+    candidate, _, yiming, _, audits, sessions = asyncio.run(
+        load_state(
+            settings,
+            candidate_id=seed.candidate_ids[0],
+            user_id=seed.user_ids["Yiming"],
+        )
+    )
+    yiming_session = next(
+        session for session in sessions if session.user_id == seed.user_ids["Yiming"]
+    )
+    assert directory.status_code == 200
+    assert transfer.status_code == 200
+    assert candidate.current_reviewer_id == seed.user_ids["Sharmaa"]
+    assert reset.status_code == 200
+    assert set(reset.json()) == {"temporary_password"}
+    assert yiming.must_change_password is True
+    assert yiming_session.revoked_at is not None
+    assert [audit.action for audit in audits] == [
+        "CURRENT_TRANSFER",
+        "USER_PASSWORD_RESET",
+    ]
 
 
 def test_admin_review_history_cross_user_filters_all_attempts_and_paginates(settings):
@@ -447,6 +538,43 @@ def test_reopen_invalidates_current_review_assigns_target_and_preserves_old_atte
     assert audits[0].after_json["candidate"]["current_reviewer_id"] == str(
         seed.user_ids["Xinhui"]
     )
+
+
+def test_reopen_cannot_assign_a_candidate_from_an_inactive_species(settings):
+    seed, review_ids = asyncio.run(seed_current_database(settings))
+
+    async def deactivate(db):
+        candidate = await db.get(Candidate, seed.candidate_ids[2])
+        species = await db.get(Species, candidate.species_id)
+        species.active = False
+
+    asyncio.run(mutate_database(settings, deactivate))
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            f"/v1/admin/reviews/{review_ids[0]}/reopen",
+            headers=admin_headers(seed, csrf=True),
+            json={
+                "candidate_version": 1,
+                "review_version": 1,
+                "new_reviewer_id": str(seed.user_ids["Xinhui"]),
+                "reason": "second opinion",
+            },
+        )
+
+    candidate, review, _, revisions, audits, _ = asyncio.run(
+        load_state(
+            settings,
+            candidate_id=seed.candidate_ids[2],
+            review_id=review_ids[0],
+        )
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "SPECIES_NOT_ACTIVE"
+    assert candidate.current_reviewer_id is None
+    assert candidate.version == 1
+    assert review.is_current is True
+    assert review.version == 1
+    assert revisions == audits == []
 
 
 @pytest.mark.parametrize(

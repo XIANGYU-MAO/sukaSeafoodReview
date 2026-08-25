@@ -21,6 +21,7 @@ def create_admin_database(settings, *, mao_must_change_password=False):
 
 
 READ_PATHS = (
+    "/v1/admin/users",
     "/v1/admin/species",
     "/v1/admin/candidates",
     "/v1/admin/reviews",

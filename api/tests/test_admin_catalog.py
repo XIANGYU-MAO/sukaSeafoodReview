@@ -166,6 +166,38 @@ def test_species_create_and_edit_trim_fields_keep_code_immutable_and_audit(setti
     assert audits[1].reason == "correct catalog"
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["name_zh", "name_en", "scientific_name", "active", "sort_order"],
+)
+def test_species_patch_rejects_explicit_null_without_database_work(settings, field):
+    seed = asyncio.run(seed_catalog(settings))
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        response = client.patch(
+            f"/v1/admin/species/{seed.species_ids[0]}",
+            headers=admin_headers(seed, csrf=True),
+            json={field: None, "reason": "invalid clear"},
+        )
+
+    async def load():
+        engine = create_async_engine(settings.DATABASE_URL)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as db:
+            species = await db.get(Species, seed.species_ids[0])
+            audits = list((await db.scalars(select(AuditEvent))).all())
+        await engine.dispose()
+        return species, audits
+
+    species, audits = asyncio.run(load())
+    assert response.status_code == 422
+    assert species.name_zh == "测试鱼"
+    assert species.name_en == "Test fish"
+    assert species.scientific_name == "Piscis probatio"
+    assert species.active is True
+    assert species.sort_order == 20
+    assert audits == []
+
+
 def test_species_duplicate_code_conflicts_without_partial_row_or_audit(settings):
     seed = asyncio.run(seed_catalog(settings))
     with TestClient(create_app(settings)) as client:
@@ -313,6 +345,72 @@ def test_candidate_safe_patch_validates_https_increments_version_once_and_audits
     assert audits[0].reason == "correct source metadata"
 
 
+@pytest.mark.parametrize(
+    "invalid_url",
+    [
+        "https://example.com:bad/path",
+        "https://user:pass@example.com/path",
+        "https:///missing-host",
+        "http://example.com/path",
+        "https://example.com/path\nheader",
+        "https://example.com:65536/path",
+    ],
+)
+def test_candidate_patch_strictly_rejects_malformed_https_urls(
+    settings, invalid_url
+):
+    seed = asyncio.run(seed_catalog(settings))
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        response = client.patch(
+            f"/v1/admin/candidates/{seed.candidate_ids[0]}",
+            headers=admin_headers(seed, csrf=True),
+            json={
+                "version": 1,
+                "preview_url": invalid_url,
+                "reason": "validate URL",
+            },
+        )
+
+    candidate, _, revisions, audits = asyncio.run(
+        load_catalog_state(settings, candidate_id=seed.candidate_ids[0])
+    )
+    assert response.status_code == 422
+    assert candidate.version == 1
+    assert revisions == audits == []
+
+
+@pytest.mark.parametrize(
+    "valid_url",
+    [
+        "https://[2001:db8::1]:8443/fish.jpg",
+        "https://例子.测试/鱼.jpg",
+        "https://example.com:443/fish.jpg",
+    ],
+)
+def test_candidate_patch_accepts_valid_ipv6_idn_and_bounded_ports(
+    settings, valid_url
+):
+    seed = asyncio.run(seed_catalog(settings))
+    with TestClient(create_app(settings)) as client:
+        response = client.patch(
+            f"/v1/admin/candidates/{seed.candidate_ids[0]}",
+            headers=admin_headers(seed, csrf=True),
+            json={
+                "version": 1,
+                "preview_url": valid_url,
+                "reason": "validate URL",
+            },
+        )
+
+    candidate, _, _, audits = asyncio.run(
+        load_catalog_state(settings, candidate_id=seed.candidate_ids[0])
+    )
+    assert response.status_code == 200
+    assert candidate.preview_url.startswith("https://")
+    assert candidate.version == 2
+    assert [audit.action for audit in audits] == ["CANDIDATE_UPDATE"]
+
+
 def test_candidate_stale_and_duplicate_source_conflicts_roll_back(settings):
     seed = asyncio.run(seed_catalog(settings))
     candidate_id = seed.candidate_ids[0]
@@ -401,6 +499,117 @@ def test_candidate_patch_rejects_assignment_controls_without_invalidation(settin
         load_catalog_state(settings, candidate_id=candidate_id)
     )
     assert response.status_code == 422
+    assert candidate.version == 1
+    assert revisions == audits == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "species_id": "other",
+            "confirm_review_invalidation": False,
+            "new_reviewer_id": "target",
+        },
+        {
+            "species_id": "same",
+            "confirm_review_invalidation": True,
+            "new_reviewer_id": "target",
+        },
+    ],
+)
+def test_candidate_invalidation_controls_reject_unconfirmed_or_same_species(
+    settings, payload
+):
+    seed = asyncio.run(seed_catalog(settings))
+    review_id = asyncio.run(add_review(settings, seed))
+    species_id = (
+        seed.species_ids[1]
+        if payload["species_id"] == "other"
+        else seed.species_ids[0]
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.patch(
+            f"/v1/admin/candidates/{seed.candidate_ids[0]}",
+            headers=admin_headers(seed, csrf=True),
+            json={
+                "version": 1,
+                "species_id": str(species_id),
+                "confirm_review_invalidation": payload[
+                    "confirm_review_invalidation"
+                ],
+                "new_reviewer_id": str(seed.user_ids["Xinhui"]),
+                "reason": "invalid invalidation controls",
+            },
+        )
+
+    candidate, review, revisions, audits = asyncio.run(
+        load_catalog_state(
+            settings,
+            candidate_id=seed.candidate_ids[0],
+            review_id=review_id,
+        )
+    )
+    assert response.status_code in {409, 422}
+    assert candidate.species_id == seed.species_ids[0]
+    assert candidate.current_reviewer_id is None
+    assert candidate.version == 1
+    assert review.is_current is True
+    assert review.version == 1
+    assert revisions == audits == []
+
+
+def test_unreviewed_species_change_rejects_invalidation_controls(settings):
+    seed = asyncio.run(seed_catalog(settings))
+    with TestClient(create_app(settings)) as client:
+        response = client.patch(
+            f"/v1/admin/candidates/{seed.candidate_ids[0]}",
+            headers=admin_headers(seed, csrf=True),
+            json={
+                "version": 1,
+                "species_id": str(seed.species_ids[1]),
+                "confirm_review_invalidation": True,
+                "new_reviewer_id": str(seed.user_ids["Xinhui"]),
+                "reason": "controls are not needed",
+            },
+        )
+
+    candidate, _, revisions, audits = asyncio.run(
+        load_catalog_state(settings, candidate_id=seed.candidate_ids[0])
+    )
+    assert response.status_code == 409
+    assert candidate.species_id == seed.species_ids[0]
+    assert candidate.current_reviewer_id is None
+    assert candidate.version == 1
+    assert revisions == audits == []
+
+
+@pytest.mark.parametrize(
+    "same_value",
+    [
+        {"creator": "Test Creator"},
+        {"species_id": "same"},
+        {"active": True},
+    ],
+)
+def test_candidate_patch_rejects_noop_without_version_or_audit(
+    settings, same_value
+):
+    seed = asyncio.run(seed_catalog(settings))
+    change = dict(same_value)
+    if change.get("species_id") == "same":
+        change["species_id"] = str(seed.species_ids[0])
+    with TestClient(create_app(settings)) as client:
+        response = client.patch(
+            f"/v1/admin/candidates/{seed.candidate_ids[0]}",
+            headers=admin_headers(seed, csrf=True),
+            json={"version": 1, "reason": "no actual change", **change},
+        )
+
+    candidate, _, revisions, audits = asyncio.run(
+        load_catalog_state(settings, candidate_id=seed.candidate_ids[0])
+    )
+    assert response.status_code == 409
     assert candidate.version == 1
     assert revisions == audits == []
 
@@ -518,7 +727,7 @@ def test_reviewed_species_change_requires_confirmation_and_target(settings):
             settings, candidate_id=seed.candidate_ids[0], review_id=review_id
         )
     )
-    assert missing_confirmation.status_code == 409
+    assert missing_confirmation.status_code == 422
     assert missing_target.status_code == 422
     assert candidate.species_id == seed.species_ids[0]
     assert candidate.version == 1
@@ -568,6 +777,43 @@ def test_reviewed_species_change_invalidates_full_review_and_assigns_new_reviewe
         seed.species_ids[1]
     )
     assert audits[0].after_json["invalidated_review"]["is_current"] is False
+
+
+def test_reviewed_species_change_cannot_assign_into_inactive_species(settings):
+    seed = asyncio.run(seed_catalog(settings))
+    review_id = asyncio.run(add_review(settings, seed))
+
+    async def deactivate(db):
+        species = await db.get(Species, seed.species_ids[1])
+        species.active = False
+
+    asyncio.run(mutate_database(settings, deactivate))
+    with TestClient(create_app(settings)) as client:
+        response = client.patch(
+            f"/v1/admin/candidates/{seed.candidate_ids[0]}",
+            headers=admin_headers(seed, csrf=True),
+            json={
+                "version": 1,
+                "species_id": str(seed.species_ids[1]),
+                "confirm_review_invalidation": True,
+                "new_reviewer_id": str(seed.user_ids["Xinhui"]),
+                "reason": "wrong species",
+            },
+        )
+
+    candidate, review, revisions, audits = asyncio.run(
+        load_catalog_state(
+            settings,
+            candidate_id=seed.candidate_ids[0],
+            review_id=review_id,
+        )
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "SPECIES_NOT_ACTIVE"
+    assert candidate.species_id == seed.species_ids[0]
+    assert candidate.current_reviewer_id is None
+    assert review.is_current is True
+    assert revisions == audits == []
 
 
 @pytest.mark.parametrize("target_state", ["inactive", "busy", "prior_review"])
