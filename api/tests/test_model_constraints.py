@@ -138,6 +138,16 @@ def test_candidate_current_reviewer_may_be_null(db_session, species):
     assert candidate.current_reviewer_id is None
 
 
+def test_candidate_current_reviewer_has_unique_non_null_index(db_session):
+    indexes = {index.name: index for index in Candidate.__table__.indexes}
+
+    index = indexes["uq_candidates_current_reviewer_nonnull"]
+    assert index.unique is True
+    assert str(index.dialect_options["postgresql"]["where"]) == (
+        "current_reviewer_id IS NOT NULL"
+    )
+
+
 def test_initial_migration_upgrades_a_fresh_database(tmp_path):
     api_root = Path(__file__).resolve().parents[1]
     database_path = tmp_path / "migration.sqlite3"
@@ -179,6 +189,13 @@ def test_initial_migration_upgrades_a_fresh_database(tmp_path):
             "sqlite_where"
         ]
     )
+
+    candidate_indexes = {
+        index["name"]: index for index in inspector.get_indexes("candidates")
+    }
+    assert candidate_indexes["uq_candidates_current_reviewer_nonnull"][
+        "unique"
+    ] == 1
 
     candidate_columns = {
         column["name"]: column for column in inspector.get_columns("candidates")
