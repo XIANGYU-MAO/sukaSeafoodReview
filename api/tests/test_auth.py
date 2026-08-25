@@ -499,6 +499,47 @@ def test_trusted_proxy_configuration_rejects_full_network_wildcards(wildcard):
         )
 
 
+@pytest.mark.parametrize(
+    "wildcard",
+    [
+        "::ffff:0:0/96",
+        "::ffff:0.0.0.0/96",
+        "0:0:0:0:0:ffff:0:0/96",
+    ],
+)
+def test_trusted_proxy_configuration_rejects_mapped_ipv4_wildcards(wildcard):
+    with pytest.raises(ValueError, match="proxy|CIDR|network"):
+        Settings(
+            DATABASE_URL="postgresql+asyncpg://db.example/review",
+            SESSION_COOKIE_NAME="review_session",
+            SESSION_HOURS=12,
+            SESSION_SECRET="test-session-secret",
+            CSRF_SECRET="test-csrf-secret",
+            APP_ENV="production",
+            TRUSTED_PROXY_CIDRS=(wildcard,),
+        )
+
+
+def test_narrow_mapped_proxy_network_is_normalized_and_bounded():
+    from app.services.auth import parse_trusted_proxy_networks, resolve_client_address
+
+    networks = parse_trusted_proxy_networks(("::ffff:192.0.2.0/120",))
+
+    assert [str(network) for network in networks] == ["192.0.2.0/24"]
+    assert (
+        resolve_client_address(
+            "::ffff:192.0.2.10", "198.51.100.10", networks
+        )
+        == "198.51.100.10"
+    )
+    assert (
+        resolve_client_address(
+            "::ffff:192.0.3.10", "198.51.100.10", networks
+        )
+        == "192.0.3.10"
+    )
+
+
 def test_database_stores_only_password_hash_and_session_token_digest(
     auth_client, auth_settings, seeded_users
 ):
