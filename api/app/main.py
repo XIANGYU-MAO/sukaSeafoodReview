@@ -10,6 +10,8 @@ from app.services.auth import LoginLimiter, parse_trusted_proxy_networks
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     runtime = settings or get_settings()
+    if runtime.APP_ENV.lower() == "production" and not runtime.TRUSTED_PROXY_CIDRS:
+        raise ValueError("TRUSTED_PROXY_CIDRS is required for the production API")
     engine = create_database_engine(runtime)
 
     @asynccontextmanager

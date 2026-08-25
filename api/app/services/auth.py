@@ -3,7 +3,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
-from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
+from ipaddress import (
+    IPv4Address,
+    IPv4Network,
+    IPv6Address,
+    IPv6Network,
+    ip_address,
+    ip_network,
+)
 import secrets
 from uuid import UUID
 
@@ -83,7 +90,34 @@ def as_utc(value: datetime) -> datetime:
 def parse_trusted_proxy_networks(
     values: tuple[str, ...],
 ) -> tuple[IPv4Network | IPv6Network, ...]:
-    return tuple(ip_network(value, strict=False) for value in values)
+    networks: list[IPv4Network | IPv6Network] = []
+    for value in values:
+        network = ip_network(value, strict=False)
+        if isinstance(network, IPv6Network) and network.prefixlen >= 96:
+            mapped = network.network_address.ipv4_mapped
+            if mapped is not None:
+                network = ip_network(
+                    f"{mapped}/{network.prefixlen - 96}", strict=False
+                )
+        networks.append(network)
+    return tuple(networks)
+
+
+def normalize_ip_address(
+    value: str, *, allow_scope: bool
+) -> IPv4Address | IPv6Address:
+    if not allow_scope and "%" in value:
+        raise ValueError("Scoped IPv6 is not valid in a forwarded address")
+    address = ip_address(value)
+    if isinstance(address, IPv6Address):
+        if address.scope_id is not None:
+            if not allow_scope:
+                raise ValueError("Scoped IPv6 is not valid in a forwarded address")
+            address = ip_address(address.packed)
+        mapped = address.ipv4_mapped
+        if mapped is not None:
+            return mapped
+    return address
 
 
 def resolve_client_address(
@@ -92,7 +126,7 @@ def resolve_client_address(
     trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...],
 ) -> str:
     try:
-        peer = ip_address(peer_address)
+        peer = normalize_ip_address(peer_address, allow_scope=True)
     except ValueError:
         return peer_address
     if not any(peer in network for network in trusted_proxy_networks):
@@ -104,7 +138,11 @@ def resolve_client_address(
     if len(raw_hops) > MAX_FORWARDED_HOPS:
         return peer.compressed
     try:
-        hops = [ip_address(value.strip()) for value in raw_hops if value.strip()]
+        hops = [
+            normalize_ip_address(value.strip(), allow_scope=False)
+            for value in raw_hops
+            if value.strip()
+        ]
     except ValueError:
         return peer.compressed
     if len(hops) != len(raw_hops):

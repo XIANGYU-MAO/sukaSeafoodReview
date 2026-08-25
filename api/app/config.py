@@ -19,8 +19,6 @@ class Settings:
     def __post_init__(self) -> None:
         if self.APP_ENV.lower() == "production" and self.DATABASE_URL.startswith("sqlite"):
             raise ValueError("SQLite is not supported in production")
-        if self.APP_ENV.lower() == "production" and not self.TRUSTED_PROXY_CIDRS:
-            raise ValueError("TRUSTED_PROXY_CIDRS is required in production")
         for value in self.TRUSTED_PROXY_CIDRS:
             try:
                 network = ip_network(value, strict=False)

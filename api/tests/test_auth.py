@@ -301,6 +301,58 @@ def test_trusted_proxy_rejects_malformed_forwarded_chain(auth_settings):
     assert statuses == [401, 401, 401, 401, 429]
 
 
+def test_scoped_ipv6_forwarded_values_cannot_evade_rate_limit(auth_settings):
+    asyncio.run(create_schema(auth_settings.DATABASE_URL))
+    proxy_settings = settings_with(
+        auth_settings, TRUSTED_PROXY_CIDRS=("10.20.0.0/24",)
+    )
+    with TestClient(
+        create_app(proxy_settings), client=("10.20.0.5", 50000)
+    ) as proxy_client:
+        statuses = [
+            unknown_login(
+                proxy_client, f"2001:db8::1%attacker-scope-{index}"
+            ).status_code
+            for index in range(1, 7)
+        ]
+
+    assert statuses == [401, 401, 401, 401, 429, 429]
+
+
+def test_ip_normalization_unifies_mapped_addresses_and_socket_scopes(
+    auth_settings,
+):
+    from app.services.auth import parse_trusted_proxy_networks, resolve_client_address
+
+    networks = parse_trusted_proxy_networks(("10.20.0.0/24",))
+    assert (
+        resolve_client_address("fe80::1%scope-a", None, ())
+        == resolve_client_address("fe80::1%scope-b", None, ())
+        == "fe80::1"
+    )
+    assert (
+        resolve_client_address("::ffff:10.20.0.5", "::ffff:192.0.2.1", networks)
+        == "192.0.2.1"
+    )
+
+    asyncio.run(create_schema(auth_settings.DATABASE_URL))
+    proxy_settings = settings_with(
+        auth_settings, TRUSTED_PROXY_CIDRS=("10.20.0.0/24",)
+    )
+    with TestClient(
+        create_app(proxy_settings), client=("::ffff:10.20.0.5", 50000)
+    ) as proxy_client:
+        statuses = [
+            unknown_login(
+                proxy_client,
+                "::ffff:192.0.2.1" if index % 2 else "192.0.2.1",
+            ).status_code
+            for index in range(1, 6)
+        ]
+
+    assert statuses == [401, 401, 401, 401, 429]
+
+
 def test_trusted_multi_hop_chain_stops_at_first_untrusted_address(auth_settings):
     asyncio.run(create_schema(auth_settings.DATABASE_URL))
     proxy_settings = settings_with(
@@ -352,16 +404,29 @@ def test_trusted_proxy_configuration_is_explicit_and_rejects_wildcards(monkeypat
         )
 
 
-def test_production_requires_an_explicit_trusted_proxy_network():
+def test_production_api_requires_an_explicit_trusted_proxy_network():
+    settings = Settings(
+        DATABASE_URL="postgresql+asyncpg://db.example/review",
+        SESSION_COOKIE_NAME="review_session",
+        SESSION_HOURS=12,
+        SESSION_SECRET="test-session-secret",
+        CSRF_SECRET="test-csrf-secret",
+        APP_ENV="production",
+    )
     with pytest.raises(ValueError, match="TRUSTED_PROXY_CIDRS"):
-        Settings(
-            DATABASE_URL="postgresql+asyncpg://db.example/review",
-            SESSION_COOKIE_NAME="review_session",
-            SESSION_HOURS=12,
-            SESSION_SECRET="test-session-secret",
-            CSRF_SECRET="test-csrf-secret",
-            APP_ENV="production",
-        )
+        create_app(settings)
+
+    configured = Settings(
+        DATABASE_URL="postgresql+asyncpg://db.example/review",
+        SESSION_COOKIE_NAME="review_session",
+        SESSION_HOURS=12,
+        SESSION_SECRET="test-session-secret",
+        CSRF_SECRET="test-csrf-secret",
+        APP_ENV="production",
+        TRUSTED_PROXY_CIDRS=("10.20.0.0/24",),
+    )
+    with TestClient(create_app(configured)) as production_client:
+        assert production_client.get("/v1/health").status_code == 200
 
     development = Settings(
         DATABASE_URL="sqlite+aiosqlite:///review.sqlite3",
@@ -372,6 +437,52 @@ def test_production_requires_an_explicit_trusted_proxy_network():
         APP_ENV="test",
     )
     assert development.TRUSTED_PROXY_CIDRS == ()
+
+
+def test_production_commands_complete_database_semantics_without_proxy_env(
+    monkeypatch, settings
+):
+    from app.commands import reset_password as reset_command
+    from app.commands import seed_users as seed_command
+    from app.services.auth import verify_password
+
+    environment = {
+        "DATABASE_URL": "postgresql+asyncpg://db.example/review",
+        "SESSION_COOKIE_NAME": "review_session",
+        "SESSION_HOURS": "12",
+        "SESSION_SECRET": "test-session-secret",
+        "CSRF_SECRET": "test-csrf-secret",
+        "APP_ENV": "production",
+    }
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("TRUSTED_PROXY_CIDRS", raising=False)
+    production = Settings.from_env()
+    assert production.TRUSTED_PROXY_CIDRS == ()
+
+    asyncio.run(create_schema(settings.DATABASE_URL))
+    monkeypatch.setattr(seed_command, "get_settings", lambda: production)
+    monkeypatch.setattr(reset_command, "get_settings", lambda: production)
+    monkeypatch.setattr(
+        seed_command,
+        "create_database_engine",
+        lambda _: create_async_engine(settings.DATABASE_URL),
+    )
+    monkeypatch.setattr(
+        reset_command,
+        "create_database_engine",
+        lambda _: create_async_engine(settings.DATABASE_URL),
+    )
+
+    assert asyncio.run(seed_command.seed_users(print_once=False)) == []
+    temporary_password = asyncio.run(reset_command.reset_password("Mao"))
+    users, _ = asyncio.run(load_auth_rows(settings.DATABASE_URL))
+    mao = next(user for user in users if user.name == "Mao")
+
+    assert [user.name for user in users] == sorted(FIXED_NAMES)
+    assert verify_password(temporary_password, mao.password_hash)
+    assert mao.must_change_password is True
+    assert mao.password_version == 2
 
 
 @pytest.mark.parametrize("wildcard", ["0.0.0.0/0", "::/0"])
