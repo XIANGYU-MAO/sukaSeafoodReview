@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from uuid import uuid4
 
 from alembic import command
 from alembic.config import Config
@@ -22,7 +21,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.main import create_app
 from app.models import (
     AuditEvent,
-    Base,
     Candidate,
     CandidateImportPreview,
     Review,

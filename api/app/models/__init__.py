@@ -2,12 +2,14 @@ from app.models.audit import AuditEvent
 from app.models.auth import Base, Session, User
 from app.models.catalog import Candidate, Species
 from app.models.export import ExportAction, ExportBatch, ExportItem
+from app.models.imports import CandidateImportPreview
 from app.models.review import Decision, IdempotencyCommand, Review, ReviewRevision
 
 __all__ = [
     "AuditEvent",
     "Base",
     "Candidate",
+    "CandidateImportPreview",
     "Decision",
     "ExportAction",
     "ExportBatch",
