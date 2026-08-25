@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from app.api.routes import auth, health
 from app.config import Settings, get_settings
 from app.database import create_database_engine, create_session_factory
-from app.services.auth import LoginLimiter
+from app.services.auth import LoginLimiter, parse_trusted_proxy_networks
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -21,6 +21,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = runtime
     app.state.session_factory = create_session_factory(engine)
     app.state.login_limiter = LoginLimiter()
+    app.state.trusted_proxy_networks = parse_trusted_proxy_networks(
+        getattr(runtime, "TRUSTED_PROXY_CIDRS", ())
+    )
     app.include_router(health.router, prefix="/v1")
     app.include_router(auth.router, prefix="/v1")
     return app

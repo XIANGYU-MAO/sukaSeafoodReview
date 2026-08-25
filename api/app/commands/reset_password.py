@@ -2,15 +2,16 @@ import argparse
 import asyncio
 import sys
 
-from sqlalchemy import select, update
+from sqlalchemy import update
 
 from app.config import get_settings
 from app.database import create_database_engine, create_session_factory
-from app.models import Session, User
+from app.models import Session
 from app.services.auth import (
     FIXED_USERS,
     generate_temporary_password,
     hash_password,
+    user_by_name_for_update,
     utc_now,
 )
 
@@ -23,11 +24,12 @@ async def reset_password(name: str) -> str:
     session_factory = create_session_factory(engine)
     try:
         async with session_factory() as db:
-            user = await db.scalar(select(User).where(User.name == name))
+            user = await db.scalar(user_by_name_for_update(name))
             if user is None:
                 raise RuntimeError("Fixed accounts have not been initialized")
             temporary_password = generate_temporary_password()
             user.password_hash = hash_password(temporary_password)
+            user.password_version += 1
             user.must_change_password = True
             user.failed_login_count = 0
             user.locked_until = None

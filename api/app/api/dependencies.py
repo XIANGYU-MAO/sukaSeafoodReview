@@ -45,6 +45,7 @@ async def get_current_auth(
         session.revoked_at is not None
         or as_utc(session.expires_at) <= now
         or not user.active
+        or session.password_version != user.password_version
     ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     return CurrentAuth(user=user, session=session)

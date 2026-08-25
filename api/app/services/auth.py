@@ -1,11 +1,17 @@
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 import secrets
+from uuid import UUID
 
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+from sqlalchemy import Select, select
+
+from app.models import User
 
 
 FIXED_USERS = (
@@ -18,6 +24,10 @@ FIXED_USERS = (
 )
 LOGIN_FAILURE_LIMIT = 5
 LOGIN_LOCK_MINUTES = 5
+LOGIN_CLIENT_WINDOW = timedelta(minutes=5)
+LOGIN_LIMITER_MAX_CLIENTS = 10_000
+MAX_FORWARDED_HOPS = 20
+MAX_FORWARDED_LENGTH = 2048
 
 _PASSWORD_HASHER = PasswordHasher(type=Type.ID)
 _DUMMY_PASSWORD_HASH = _PASSWORD_HASHER.hash(secrets.token_urlsafe(32))
@@ -70,19 +80,104 @@ def as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def parse_trusted_proxy_networks(
+    values: tuple[str, ...],
+) -> tuple[IPv4Network | IPv6Network, ...]:
+    return tuple(ip_network(value, strict=False) for value in values)
+
+
+def resolve_client_address(
+    peer_address: str,
+    forwarded_for: str | None,
+    trusted_proxy_networks: tuple[IPv4Network | IPv6Network, ...],
+) -> str:
+    try:
+        peer = ip_address(peer_address)
+    except ValueError:
+        return peer_address
+    if not any(peer in network for network in trusted_proxy_networks):
+        return peer.compressed
+    if not forwarded_for or len(forwarded_for) > MAX_FORWARDED_LENGTH:
+        return peer.compressed
+
+    raw_hops = forwarded_for.split(",")
+    if len(raw_hops) > MAX_FORWARDED_HOPS:
+        return peer.compressed
+    try:
+        hops = [ip_address(value.strip()) for value in raw_hops if value.strip()]
+    except ValueError:
+        return peer.compressed
+    if len(hops) != len(raw_hops):
+        return peer.compressed
+
+    current = peer
+    for hop in reversed(hops):
+        if not any(current in network for network in trusted_proxy_networks):
+            break
+        current = hop
+    return current.compressed
+
+
+def user_by_name_for_update(name: str) -> Select[tuple[User]]:
+    return (
+        select(User)
+        .where(User.name == name)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def user_by_id_for_update(user_id: UUID) -> Select[tuple[User]]:
+    return (
+        select(User)
+        .where(User.id == user_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
 @dataclass
 class FailureState:
     count: int = 0
     locked_until: datetime | None = None
+    last_failure: datetime | None = None
 
 
 class LoginLimiter:
     """Per-application client-address limiter; account state remains in the DB."""
 
-    def __init__(self) -> None:
-        self._clients: dict[str, FailureState] = {}
+    def __init__(
+        self,
+        *,
+        window: timedelta = LOGIN_CLIENT_WINDOW,
+        max_entries: int = LOGIN_LIMITER_MAX_CLIENTS,
+    ) -> None:
+        if window <= timedelta(0):
+            raise ValueError("Login limiter window must be positive")
+        if max_entries < 1:
+            raise ValueError("Login limiter capacity must be positive")
+        self._window = window
+        self._max_entries = max_entries
+        self._clients: OrderedDict[str, FailureState] = OrderedDict()
+
+    def _prune(self, now: datetime) -> None:
+        while self._clients:
+            address, state = next(iter(self._clients.items()))
+            lock_active = bool(
+                state.locked_until is not None
+                and as_utc(state.locked_until) > now
+            )
+            if lock_active:
+                break
+            if (
+                state.last_failure is not None
+                and now - as_utc(state.last_failure) < self._window
+            ):
+                break
+            self._clients.pop(address, None)
 
     def is_limited(self, client_address: str, now: datetime) -> bool:
+        self._prune(now)
         state = self._clients.get(client_address)
         if state is None or state.locked_until is None:
             return False
@@ -92,8 +187,15 @@ class LoginLimiter:
         return True
 
     def record_failure(self, client_address: str, now: datetime) -> bool:
-        state = self._clients.setdefault(client_address, FailureState())
+        self._prune(now)
+        state = self._clients.pop(client_address, None)
+        if state is None:
+            while len(self._clients) >= self._max_entries:
+                self._clients.popitem(last=False)
+            state = FailureState()
         state.count += 1
+        state.last_failure = now
+        self._clients[client_address] = state
         if state.count >= LOGIN_FAILURE_LIMIT:
             state.locked_until = now + timedelta(minutes=LOGIN_LOCK_MINUTES)
             return True
@@ -101,3 +203,10 @@ class LoginLimiter:
 
     def clear(self, client_address: str) -> None:
         self._clients.pop(client_address, None)
+
+    @property
+    def tracked_count(self) -> int:
+        return len(self._clients)
+
+    def is_tracked(self, client_address: str) -> bool:
+        return client_address in self._clients

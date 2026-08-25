@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import select, update
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
@@ -12,7 +12,7 @@ from app.api.dependencies import (
 )
 from app.config import Settings
 from app.database import get_db
-from app.models import Session, User
+from app.models import Session
 from app.schemas.auth import AuthState, ChangePasswordRequest, LoginName, LoginRequest
 from app.services.auth import (
     FIXED_USERS,
@@ -22,7 +22,10 @@ from app.services.auth import (
     csrf_token,
     generate_session_token,
     hash_password,
+    resolve_client_address,
     session_digest,
+    user_by_id_for_update,
+    user_by_name_for_update,
     utc_now,
     verify_dummy_password,
     verify_password,
@@ -45,7 +48,12 @@ def public_state(auth: CurrentAuth, settings: Settings) -> AuthState:
 
 
 def client_address(request: Request) -> str:
-    return request.client.host if request.client is not None else "unknown"
+    peer = request.client.host if request.client is not None else "unknown"
+    return resolve_client_address(
+        peer,
+        request.headers.get("X-Forwarded-For"),
+        request.app.state.trusted_proxy_networks,
+    )
 
 
 def set_session_cookie(
@@ -94,7 +102,14 @@ async def login(
             detail=TEMPORARILY_UNAVAILABLE,
         )
 
-    user = await db.scalar(select(User).where(User.name == payload.name))
+    user = await db.scalar(user_by_name_for_update(payload.name))
+    if (
+        user is not None
+        and user.locked_until is not None
+        and as_utc(user.locked_until) <= now
+    ):
+        user.failed_login_count = 0
+        user.locked_until = None
     account_locked = bool(
         user is not None
         and user.locked_until is not None
@@ -132,6 +147,7 @@ async def login(
     session = Session(
         user_id=user.id,
         token_hash=session_digest(raw_token),
+        password_version=user.password_version,
         expires_at=now + timedelta(hours=settings.SESSION_HOURS),
     )
     db.add(session)
@@ -168,20 +184,36 @@ async def change_password(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_runtime_settings),
 ) -> None:
-    if not verify_password(payload.current_password, auth.user.password_hash):
+    user = await db.scalar(user_by_id_for_update(auth.user.id))
+    if (
+        user is None
+        or not user.active
+        or auth.session.password_version != user.password_version
+    ):
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    if not verify_password(payload.current_password, user.password_hash):
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is invalid",
         )
+    if verify_password(payload.new_password, user.password_hash):
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different",
+        )
 
     now = utc_now()
-    auth.user.password_hash = hash_password(payload.new_password)
-    auth.user.must_change_password = False
-    auth.user.failed_login_count = 0
-    auth.user.locked_until = None
+    user.password_hash = hash_password(payload.new_password)
+    user.password_version += 1
+    user.must_change_password = False
+    user.failed_login_count = 0
+    user.locked_until = None
     await db.execute(
         update(Session)
-        .where(Session.user_id == auth.user.id, Session.revoked_at.is_(None))
+        .where(Session.user_id == user.id, Session.revoked_at.is_(None))
         .values(revoked_at=now)
     )
     await db.commit()

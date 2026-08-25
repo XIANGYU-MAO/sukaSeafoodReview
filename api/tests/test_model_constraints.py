@@ -183,7 +183,15 @@ def test_initial_migration_upgrades_a_fresh_database(tmp_path):
     candidate_columns = {
         column["name"]: column for column in inspector.get_columns("candidates")
     }
+    user_columns = {
+        column["name"]: column for column in inspector.get_columns("users")
+    }
+    session_columns = {
+        column["name"]: column for column in inspector.get_columns("sessions")
+    }
     assert candidate_columns["current_reviewer_id"]["nullable"] is True
+    assert user_columns["password_version"]["nullable"] is False
+    assert session_columns["password_version"]["nullable"] is False
 
     candidate_foreign_keys = {
         tuple(foreign_key["constrained_columns"])
