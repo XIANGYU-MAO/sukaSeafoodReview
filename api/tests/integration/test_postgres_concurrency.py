@@ -96,6 +96,36 @@ def test_same_user_concurrent_acquisition_leaves_exactly_one_assignment():
     assert assignment_count == 1
 
 
+def test_different_users_concurrently_receive_different_candidates():
+    async def operation(engine):
+        hassan_id, mao_id, _ = await seed(engine, 2)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as first, factory() as second:
+            return await asyncio.gather(
+                get_or_open_current(first, hassan_id, ReviewFilters()),
+                get_or_open_current(second, mao_id, ReviewFilters()),
+            )
+
+    results = asyncio.run(in_isolated_schema(operation))
+
+    assert results[0].id != results[1].id
+
+
+def test_one_candidate_is_returned_to_at_most_one_concurrent_user():
+    async def operation(engine):
+        hassan_id, mao_id, _ = await seed(engine, 1)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as first, factory() as second:
+            return await asyncio.gather(
+                get_or_open_current(first, hassan_id, ReviewFilters()),
+                get_or_open_current(second, mao_id, ReviewFilters()),
+            )
+
+    results = asyncio.run(in_isolated_schema(operation))
+
+    assert sum(result is not None for result in results) == 1
+
+
 def test_skip_locked_immediately_bypasses_a_candidate_held_by_another_transaction():
     async def operation(engine):
         _, mao_id, _ = await seed(engine, 2)
