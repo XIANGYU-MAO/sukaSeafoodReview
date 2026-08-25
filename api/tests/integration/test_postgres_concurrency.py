@@ -96,34 +96,60 @@ def test_same_user_concurrent_acquisition_leaves_exactly_one_assignment():
     assert assignment_count == 1
 
 
-def test_different_users_concurrently_receive_different_candidates():
+def test_skip_locked_immediately_bypasses_a_candidate_held_by_another_transaction():
     async def operation(engine):
-        hassan_id, mao_id, _ = await seed(engine, 2)
+        _, mao_id, _ = await seed(engine, 2)
         factory = async_sessionmaker(engine, expire_on_commit=False)
-        async with factory() as first, factory() as second:
-            return await asyncio.gather(
-                get_or_open_current(first, hassan_id, ReviewFilters()),
-                get_or_open_current(second, mao_id, ReviewFilters()),
+        async with factory() as lock_session, factory() as acquisition_session:
+            locked_candidate = await lock_session.scalar(
+                select(Candidate)
+                .order_by(Candidate.id)
+                .limit(1)
+                .with_for_update()
             )
+            assert locked_candidate is not None
+            locked_candidate_id = locked_candidate.id
+            assert lock_session.in_transaction()
+            try:
+                acquired = await asyncio.wait_for(
+                    get_or_open_current(
+                        acquisition_session, mao_id, ReviewFilters()
+                    ),
+                    timeout=1.0,
+                )
+            finally:
+                await lock_session.rollback()
+        return locked_candidate_id, acquired
 
-    results = asyncio.run(in_isolated_schema(operation))
+    locked_candidate_id, acquired = asyncio.run(in_isolated_schema(operation))
 
-    assert results[0].id != results[1].id
+    assert acquired is not None
+    assert acquired.id != locked_candidate_id
 
 
-def test_one_candidate_is_returned_to_at_most_one_concurrent_user():
+def test_skip_locked_immediately_returns_empty_when_only_candidate_is_locked():
     async def operation(engine):
-        hassan_id, mao_id, _ = await seed(engine, 1)
+        _, mao_id, _ = await seed(engine, 1)
         factory = async_sessionmaker(engine, expire_on_commit=False)
-        async with factory() as first, factory() as second:
-            return await asyncio.gather(
-                get_or_open_current(first, hassan_id, ReviewFilters()),
-                get_or_open_current(second, mao_id, ReviewFilters()),
+        async with factory() as lock_session, factory() as acquisition_session:
+            locked_candidate = await lock_session.scalar(
+                select(Candidate).limit(1).with_for_update()
             )
+            assert locked_candidate is not None
+            assert lock_session.in_transaction()
+            try:
+                return await asyncio.wait_for(
+                    get_or_open_current(
+                        acquisition_session, mao_id, ReviewFilters()
+                    ),
+                    timeout=1.0,
+                )
+            finally:
+                await lock_session.rollback()
 
-    results = asyncio.run(in_isolated_schema(operation))
+    result = asyncio.run(in_isolated_schema(operation))
 
-    assert sum(result is not None for result in results) == 1
+    assert result is None
 
 
 def test_concurrent_identical_submission_retries_create_one_command_and_review():
@@ -163,5 +189,6 @@ def test_concurrent_identical_submission_retries_create_one_command_and_review()
 
     results, counts = asyncio.run(in_isolated_schema(operation))
 
-    assert results[0].id == results[1].id
+    assert results[0].review.id == results[1].review.id
+    assert results[0].response_json == results[1].response_json
     assert counts == (1, 1, 1)

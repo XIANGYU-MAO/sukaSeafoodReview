@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -26,6 +28,13 @@ class ReviewAssignmentConflict(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class SubmissionResult:
+    review: Review
+    response_status: int
+    response_json: dict[str, Any]
+
+
 def canonical_facts(payload: DecisionRequest) -> tuple[str, str]:
     if payload.decision == Decision.APPROVED:
         return "YES", "YES"
@@ -38,8 +47,13 @@ def canonical_facts(payload: DecisionRequest) -> tuple[str, str]:
     return "REVIEW", "REVIEW"
 
 
-def request_digest(candidate_id: UUID, payload: DecisionRequest) -> str:
+def request_digest(
+    user_id: UUID,
+    candidate_id: UUID,
+    payload: DecisionRequest,
+) -> str:
     canonical = {
+        "user_id": str(user_id),
         "candidate_id": str(candidate_id),
         "payload": payload.model_dump(mode="json"),
     }
@@ -75,11 +89,11 @@ async def submit_decision(
     candidate_id: UUID,
     command_id: str,
     payload: DecisionRequest,
-) -> Review:
+) -> SubmissionResult:
     normalized_command = command_id.strip()
     if not normalized_command or len(normalized_command) > 255:
         raise ValueError("invalid idempotency key")
-    digest = request_digest(candidate_id, payload)
+    digest = request_digest(user_id, candidate_id, payload)
 
     try:
         user = await session.scalar(
@@ -100,13 +114,17 @@ async def submit_decision(
                 await session.rollback()
                 raise IdempotencyConflict
             review = await session.get(
-                Review, UUID(str(command.response_json["review_id"]))
+                Review, UUID(str(command.response_json["id"]))
             )
             if review is None:
                 await session.rollback()
                 raise RuntimeError("persisted idempotency response is invalid")
             await session.commit()
-            return review
+            return SubmissionResult(
+                review=review,
+                response_status=command.response_status,
+                response_json=dict(command.response_json),
+            )
 
         candidate = await session.scalar(
             select(Candidate)
@@ -156,7 +174,6 @@ async def submit_decision(
         candidate.current_started_at = None
         candidate.version += 1
         response_json = ReviewResponse.from_review(review).model_dump(mode="json")
-        response_json["review_id"] = str(review.id)
         session.add(
             IdempotencyCommand(
                 user_id=user_id,
@@ -167,7 +184,11 @@ async def submit_decision(
             )
         )
         await session.commit()
-        return review
+        return SubmissionResult(
+            review=review,
+            response_status=201,
+            response_json=response_json,
+        )
     except BaseException:
         if session.in_transaction():
             await session.rollback()

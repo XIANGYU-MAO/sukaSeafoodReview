@@ -1,4 +1,5 @@
 import asyncio
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,6 +11,7 @@ from app.main import create_app
 from app.models import (
     Base,
     Candidate,
+    Decision,
     IdempotencyCommand,
     Review,
     ReviewRevision,
@@ -19,6 +21,7 @@ from app.services.pool import get_or_open_current
 from app.services.reviews import (
     IdempotencyConflict,
     ReviewAssignmentConflict,
+    request_digest,
     submit_decision,
 )
 from tests.review_support import review_headers, seed_review_database
@@ -126,7 +129,7 @@ def test_decision_mapping_persists_only_supported_facts(
                 db, seed.hassan_id, ReviewFilters()
             )
         async with factory() as db:
-            review = await submit_decision(
+            result = await submit_decision(
                 db,
                 seed.hassan_id,
                 candidate.id,
@@ -134,7 +137,7 @@ def test_decision_mapping_persists_only_supported_facts(
                 DecisionRequest.model_validate(payload),
             )
         await engine.dispose()
-        return review
+        return result.review
 
     review = asyncio.run(exercise())
 
@@ -183,6 +186,23 @@ def test_other_notes_are_trimmed_and_stable_rejection_codes_are_complete():
     }
 
 
+def test_request_digest_canonically_includes_user_candidate_and_payload():
+    candidate_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    first_user = UUID("11111111-1111-1111-1111-111111111111")
+    second_user = UUID("22222222-2222-2222-2222-222222222222")
+    payload = DecisionRequest(decision="APPROVED")
+
+    first_digest = request_digest(first_user, candidate_id, payload)
+    second_digest = request_digest(second_user, candidate_id, payload)
+
+    assert first_digest == (
+        "bcb60a97e063ba23c16ca549ecdb6858d249821b6955153b9fa8e40d917396ab"
+    )
+    assert second_digest == (
+        "dec354bb9da575026993827657af2ff8c0a8b4fea756748ee961588b3176c22d"
+    )
+
+
 def test_submission_is_atomic_and_next_request_advances(settings):
     seed = asyncio.run(create_database(settings))
 
@@ -192,7 +212,7 @@ def test_submission_is_atomic_and_next_request_advances(settings):
         async with factory() as db:
             candidate = await get_or_open_current(db, seed.hassan_id, ReviewFilters())
         async with factory() as db:
-            review = await submit_decision(
+            result = await submit_decision(
                 db,
                 seed.hassan_id,
                 candidate.id,
@@ -206,12 +226,12 @@ def test_submission_is_atomic_and_next_request_advances(settings):
         async with factory() as db:
             stored_candidate = await db.get(Candidate, candidate.id)
             stored_review = await db.scalar(
-                select(Review).where(Review.id == review.id)
+                select(Review).where(Review.id == result.review.id)
             )
             revisions = (
                 await db.scalars(
                     select(ReviewRevision).where(
-                        ReviewRevision.review_id == review.id
+                        ReviewRevision.review_id == result.review.id
                     )
                 )
             ).all()
@@ -255,7 +275,7 @@ def test_submission_is_atomic_and_next_request_advances(settings):
         "version": 1,
     }
     assert len(commands) == 1
-    assert commands[0].response_json["review_id"] == str(review.id)
+    assert commands[0].response_json["id"] == str(review.id)
 
 
 def test_only_assigned_user_may_submit_and_retry_is_idempotent(settings):
@@ -302,7 +322,9 @@ def test_only_assigned_user_may_submit_and_retry_is_idempotent(settings):
 
     first, replay, counts = asyncio.run(exercise())
 
-    assert replay.id == first.id
+    assert replay.review.id == first.review.id
+    assert replay.response_json == first.response_json
+    assert replay.response_status == first.response_status == 201
     assert counts == (1, 1, 1)
 
 
@@ -358,7 +380,7 @@ def test_reusing_idempotency_key_for_different_request_conflicts_without_mutatio
 
     first, counts, retained_assignment = asyncio.run(exercise())
 
-    assert first.decision.value == "APPROVED"
+    assert first.review.decision.value == "APPROVED"
     assert counts == (1, 1, 1)
     assert retained_assignment.current_reviewer_id == seed.hassan_id
 
@@ -488,6 +510,22 @@ def test_decision_api_replays_same_response_and_rejects_changed_request(settings
             headers=headers,
             json={"decision": "REJECTED", "rejection_reason": "DUPLICATE"},
         )
+
+        async def mutate_persisted_review():
+            engine = create_async_engine(settings.DATABASE_URL)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as db:
+                review = await db.get(Review, UUID(first.json()["id"]))
+                review.decision = Decision.UNSURE
+                review.rejection_reason = None
+                review.notes = "edited after the original command"
+                review.whole_fish = "REVIEW"
+                review.exact_species_verified = "REVIEW"
+                review.version = 2
+                await db.commit()
+            await engine.dispose()
+
+        asyncio.run(mutate_persisted_review())
         replay = client.post(
             f"/v1/reviews/{candidate_id}/decision",
             headers=headers,
@@ -499,11 +537,31 @@ def test_decision_api_replays_same_response_and_rejects_changed_request(settings
             json={"decision": "UNSURE"},
         )
 
+    async def load_post_replay_state():
+        engine = create_async_engine(settings.DATABASE_URL)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as db:
+            review = await db.get(Review, UUID(first.json()["id"]))
+            command = await db.scalar(select(IdempotencyCommand))
+            counts = (
+                await db.scalar(select(func.count()).select_from(ReviewRevision)),
+                await db.scalar(select(func.count()).select_from(IdempotencyCommand)),
+            )
+        await engine.dispose()
+        return review, command, counts
+
+    edited_review, command, counts = asyncio.run(load_post_replay_state())
+
     assert current.status_code == 200
     assert first.status_code == 201
     assert replay.status_code == 201
     assert replay.json() == first.json()
     assert conflict.status_code == 409
+    assert edited_review.notes == "edited after the original command"
+    assert edited_review.version == 2
+    assert command.response_status == first.status_code
+    assert command.response_json == first.json()
+    assert counts == (1, 1)
 
 
 def test_whitespace_and_missing_or_overlong_idempotency_keys_are_rejected(settings):

@@ -2,6 +2,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentAuth, require_review_access
@@ -80,14 +81,14 @@ async def decide(
     ],
     auth: CurrentAuth = Depends(require_review_access),
     db: AsyncSession = Depends(get_db),
-) -> ReviewResponse:
+) -> JSONResponse:
     if not idempotency_key.strip():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Idempotency-Key must not be blank",
         )
     try:
-        review = await submit_decision(
+        result = await submit_decision(
             db,
             auth.user.id,
             candidate_id,
@@ -104,4 +105,7 @@ async def decide(
             status_code=status.HTTP_409_CONFLICT,
             detail="Candidate is not assigned to this user",
         ) from exc
-    return ReviewResponse.from_review(review)
+    return JSONResponse(
+        status_code=result.response_status,
+        content=result.response_json,
+    )
