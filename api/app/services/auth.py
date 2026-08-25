@@ -9,7 +9,6 @@ from ipaddress import (
     IPv6Address,
     IPv6Network,
     ip_address,
-    ip_network,
 )
 import secrets
 from uuid import UUID
@@ -18,6 +17,7 @@ from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from sqlalchemy import Select, select
 
+from app.config import normalize_trusted_proxy_network
 from app.models import User
 
 
@@ -90,17 +90,7 @@ def as_utc(value: datetime) -> datetime:
 def parse_trusted_proxy_networks(
     values: tuple[str, ...],
 ) -> tuple[IPv4Network | IPv6Network, ...]:
-    networks: list[IPv4Network | IPv6Network] = []
-    for value in values:
-        network = ip_network(value, strict=False)
-        if isinstance(network, IPv6Network) and network.prefixlen >= 96:
-            mapped = network.network_address.ipv4_mapped
-            if mapped is not None:
-                network = ip_network(
-                    f"{mapped}/{network.prefixlen - 96}", strict=False
-                )
-        networks.append(network)
-    return tuple(networks)
+    return tuple(normalize_trusted_proxy_network(value) for value in values)
 
 
 def normalize_ip_address(

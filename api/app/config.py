@@ -1,7 +1,18 @@
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from ipaddress import ip_network
+from ipaddress import IPv4Network, IPv6Network, ip_network
+
+
+def normalize_trusted_proxy_network(value: str) -> IPv4Network | IPv6Network:
+    network = ip_network(value, strict=False)
+    if isinstance(network, IPv6Network) and network.prefixlen >= 96:
+        mapped = network.network_address.ipv4_mapped
+        if mapped is not None:
+            return ip_network(
+                f"{mapped}/{network.prefixlen - 96}", strict=False
+            )
+    return network
 
 
 @dataclass(frozen=True)
@@ -21,7 +32,7 @@ class Settings:
             raise ValueError("SQLite is not supported in production")
         for value in self.TRUSTED_PROXY_CIDRS:
             try:
-                network = ip_network(value, strict=False)
+                network = normalize_trusted_proxy_network(value)
             except ValueError as exc:
                 raise ValueError(
                     f"Trusted proxy entry must be an IP address or CIDR: {value!r}"
