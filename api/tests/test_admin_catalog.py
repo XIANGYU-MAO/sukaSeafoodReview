@@ -736,6 +736,47 @@ def test_reviewed_species_change_requires_confirmation_and_target(settings):
     assert revisions == audits == []
 
 
+def test_reviewed_candidate_metadata_change_with_same_species_preserves_review(
+    settings,
+):
+    seed = asyncio.run(seed_catalog(settings))
+    review_id = asyncio.run(add_review(settings, seed))
+    with TestClient(create_app(settings)) as client:
+        response = client.patch(
+            f"/v1/admin/candidates/{seed.candidate_ids[0]}",
+            headers=admin_headers(seed, csrf=True),
+            json={
+                "version": 1,
+                "species_id": str(seed.species_ids[0]),
+                "metadata": {
+                    "catalog_number": "updated-after-review",
+                    "quality": "verified",
+                },
+                "reason": "correct metadata only",
+            },
+        )
+
+    candidate, review, revisions, audits = asyncio.run(
+        load_catalog_state(
+            settings,
+            candidate_id=seed.candidate_ids[0],
+            review_id=review_id,
+        )
+    )
+    assert response.status_code == 200
+    assert candidate.species_id == seed.species_ids[0]
+    assert candidate.metadata_json == {
+        "catalog_number": "updated-after-review",
+        "quality": "verified",
+    }
+    assert candidate.current_reviewer_id is None
+    assert candidate.version == 2
+    assert review.is_current is True
+    assert review.version == 1
+    assert revisions == []
+    assert [audit.action for audit in audits] == ["CANDIDATE_UPDATE"]
+
+
 def test_reviewed_species_change_invalidates_full_review_and_assigns_new_reviewer(
     settings,
 ):

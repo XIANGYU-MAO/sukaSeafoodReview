@@ -194,6 +194,43 @@ def test_zero_activity_users_are_discoverable_for_transfer_and_reset(settings):
     ]
 
 
+def test_directory_uuid_can_reopen_for_a_zero_activity_user(settings):
+    seed, review_ids = asyncio.run(seed_current_database(settings))
+    review_id = review_ids[0]
+    candidate_id = seed.candidate_ids[2]
+    with TestClient(create_app(settings)) as client:
+        directory = client.get(
+            "/v1/admin/users", headers=admin_headers(seed)
+        )
+        assert directory.status_code == 200
+        sharmaa_id = next(
+            item["id"]
+            for item in directory.json()["items"]
+            if item["display_name"] == "Sharmaa"
+        )
+        response = client.post(
+            f"/v1/admin/reviews/{review_id}/reopen",
+            headers=admin_headers(seed, csrf=True),
+            json={
+                "candidate_version": 1,
+                "review_version": 1,
+                "new_reviewer_id": sharmaa_id,
+                "reason": "use directory for zero-activity reviewer",
+            },
+        )
+
+    candidate, review, _, revisions, audits, _ = asyncio.run(
+        load_state(settings, candidate_id=candidate_id, review_id=review_id)
+    )
+    assert response.status_code == 200
+    assert candidate.current_reviewer_id == seed.user_ids["Sharmaa"]
+    assert candidate.version == 2
+    assert review.is_current is False
+    assert review.version == 2
+    assert len(revisions) == 1
+    assert [audit.action for audit in audits] == ["REVIEW_REOPEN"]
+
+
 def test_admin_review_history_cross_user_filters_all_attempts_and_paginates(settings):
     seed, review_ids = asyncio.run(seed_current_database(settings))
     with TestClient(create_app(settings)) as client:

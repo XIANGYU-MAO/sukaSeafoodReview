@@ -6,10 +6,30 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.models import AuditEvent, Base, Candidate, Species, User
-from app.schemas.admin import SpeciesPatchRequest
+from app.models import (
+    AuditEvent,
+    Base,
+    Candidate,
+    Decision,
+    Review,
+    ReviewRevision,
+    Species,
+    User,
+)
+from app.schemas.admin import (
+    CandidatePatchRequest,
+    ReopenRequest,
+    SpeciesPatchRequest,
+    TransferRequest,
+)
 from app.schemas.review import ReviewFilters
-from app.services.admin import AdminConflict, patch_species
+from app.services.admin import (
+    AdminConflict,
+    patch_candidate,
+    patch_species,
+    reopen_review,
+    transfer_current,
+)
 from app.services.auth import utc_now
 from app.services.pool import get_or_open_current
 from tests.review_support import candidate_record
@@ -69,6 +89,100 @@ async def seed(engine):
         db.add(candidate)
         await db.commit()
         return reviewer.id, mao.id, species.id, candidate.id
+
+
+async def seed_admin_assignment_paths(engine):
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as db:
+        users = {
+            name: User(
+                name=name,
+                role="admin" if name == "Mao" else "reviewer",
+                password_hash="test",
+                must_change_password=False,
+            )
+            for name in ("Hassan", "Wahid", "Xinhui", "Sharmaa", "Mao")
+        }
+        source_species = Species(
+            code="SF001",
+            name_zh="测试鱼",
+            name_en="Test fish",
+            scientific_name="Piscis probatio",
+        )
+        target_species = Species(
+            code="SF002",
+            name_zh="目标鱼",
+            name_en="Target fish",
+            scientific_name="Piscis destinatio",
+        )
+        db.add_all([*users.values(), source_species, target_species])
+        await db.flush()
+
+        candidates = [candidate_record(source_species.id, index) for index in range(1, 6)]
+        candidates[0].current_reviewer_id = users["Hassan"].id
+        candidates[0].current_started_at = utc_now()
+        candidates[3].current_reviewer_id = users["Sharmaa"].id
+        candidates[3].current_started_at = utc_now()
+        candidates[4].current_reviewer_id = users["Wahid"].id
+        candidates[4].current_started_at = utc_now()
+        db.add_all(candidates)
+        await db.flush()
+
+        reviews = []
+        for candidate in candidates[1:3]:
+            reviews.append(
+                Review(
+                    candidate_id=candidate.id,
+                    reviewer_id=users["Hassan"].id,
+                    decision=Decision.APPROVED,
+                    whole_fish="YES",
+                    exact_species_verified="YES",
+                    is_current=True,
+                    version=1,
+                )
+            )
+        db.add_all(reviews)
+        await db.flush()
+        result = {
+            "users": {name: user.id for name, user in users.items()},
+            "source_species": source_species.id,
+            "target_species": target_species.id,
+            "candidates": [candidate.id for candidate in candidates],
+            "reviews": [review.id for review in reviews],
+        }
+        await db.commit()
+        return result
+
+
+async def assert_waits_for_species_deactivation(
+    factory,
+    species_id,
+    operation,
+):
+    async with factory() as holder:
+        species = await holder.scalar(
+            select(Species).where(Species.id == species_id).with_for_update()
+        )
+        species.active = False
+        await holder.flush()
+        operation_task = asyncio.create_task(operation())
+        blocked = False
+        try:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(operation_task), timeout=0.25
+                )
+            except TimeoutError:
+                blocked = True
+        finally:
+            await holder.commit()
+
+        conflict_code = None
+        try:
+            await asyncio.wait_for(operation_task, timeout=2.0)
+        except AdminConflict as exc:
+            conflict_code = exc.code
+        return blocked, conflict_code
 
 
 def test_pool_waits_for_species_disable_then_returns_none():
@@ -183,3 +297,215 @@ def test_species_disable_waits_for_shared_assignment_then_conflicts():
     assert active is True
     assert current_reviewer_id is not None
     assert audit_count == 0
+
+
+def test_transfer_current_waits_for_species_lock_then_rolls_back_inactive_conflict():
+    async def operation(engine):
+        seeded = await seed_admin_assignment_paths(engine)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        candidate_id = seeded["candidates"][0]
+
+        async def transfer():
+            async with factory() as db:
+                return await transfer_current(
+                    db,
+                    seeded["users"]["Mao"],
+                    candidate_id,
+                    TransferRequest(
+                        version=1,
+                        new_reviewer_id=seeded["users"]["Xinhui"],
+                        reason="prove species lock",
+                    ),
+                )
+
+        blocked, conflict_code = await assert_waits_for_species_deactivation(
+            factory,
+            seeded["source_species"],
+            transfer,
+        )
+        async with factory() as verification:
+            candidate = await verification.get(Candidate, candidate_id)
+            audit_count = await verification.scalar(
+                select(func.count()).select_from(AuditEvent)
+            )
+        return (
+            blocked,
+            conflict_code,
+            candidate.current_reviewer_id == seeded["users"]["Hassan"],
+            candidate.version,
+            audit_count,
+        )
+
+    result = asyncio.run(in_isolated_schema(operation))
+
+    assert result == (True, "SPECIES_NOT_ACTIVE", True, 1, 0)
+
+
+def test_reopen_review_waits_for_species_lock_then_preserves_review_on_conflict():
+    async def operation(engine):
+        seeded = await seed_admin_assignment_paths(engine)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        candidate_id = seeded["candidates"][1]
+        review_id = seeded["reviews"][0]
+
+        async def reopen():
+            async with factory() as db:
+                return await reopen_review(
+                    db,
+                    seeded["users"]["Mao"],
+                    review_id,
+                    ReopenRequest(
+                        candidate_version=1,
+                        review_version=1,
+                        new_reviewer_id=seeded["users"]["Xinhui"],
+                        reason="prove species lock",
+                    ),
+                )
+
+        blocked, conflict_code = await assert_waits_for_species_deactivation(
+            factory,
+            seeded["source_species"],
+            reopen,
+        )
+        async with factory() as verification:
+            candidate = await verification.get(Candidate, candidate_id)
+            review = await verification.get(Review, review_id)
+            revision_count = await verification.scalar(
+                select(func.count()).select_from(ReviewRevision)
+            )
+            audit_count = await verification.scalar(
+                select(func.count()).select_from(AuditEvent)
+            )
+        return (
+            blocked,
+            conflict_code,
+            candidate.current_reviewer_id,
+            candidate.version,
+            review.is_current,
+            review.version,
+            revision_count,
+            audit_count,
+        )
+
+    result = asyncio.run(in_isolated_schema(operation))
+
+    assert result == (True, "SPECIES_NOT_ACTIVE", None, 1, True, 1, 0, 0)
+
+
+def test_reviewed_candidate_patch_waits_for_target_species_then_rolls_back():
+    async def operation(engine):
+        seeded = await seed_admin_assignment_paths(engine)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        candidate_id = seeded["candidates"][2]
+        review_id = seeded["reviews"][1]
+
+        async def change_species():
+            async with factory() as db:
+                return await patch_candidate(
+                    db,
+                    seeded["users"]["Mao"],
+                    candidate_id,
+                    CandidatePatchRequest(
+                        version=1,
+                        species_id=seeded["target_species"],
+                        confirm_review_invalidation=True,
+                        new_reviewer_id=seeded["users"]["Xinhui"],
+                        reason="prove target species lock",
+                    ),
+                )
+
+        blocked, conflict_code = await assert_waits_for_species_deactivation(
+            factory,
+            seeded["target_species"],
+            change_species,
+        )
+        async with factory() as verification:
+            candidate = await verification.get(Candidate, candidate_id)
+            review = await verification.get(Review, review_id)
+            revision_count = await verification.scalar(
+                select(func.count()).select_from(ReviewRevision)
+            )
+            audit_count = await verification.scalar(
+                select(func.count()).select_from(AuditEvent)
+            )
+        return (
+            blocked,
+            conflict_code,
+            candidate.species_id == seeded["source_species"],
+            candidate.current_reviewer_id,
+            candidate.version,
+            review.is_current,
+            review.version,
+            revision_count,
+            audit_count,
+        )
+
+    result = asyncio.run(in_isolated_schema(operation))
+
+    assert result == (
+        True,
+        "SPECIES_NOT_ACTIVE",
+        True,
+        None,
+        1,
+        True,
+        1,
+        0,
+        0,
+    )
+
+
+def test_concurrent_admin_transfers_to_one_target_return_success_and_stable_conflict():
+    async def operation(engine):
+        seeded = await seed_admin_assignment_paths(engine)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        candidate_ids = seeded["candidates"][3:5]
+        target_id = seeded["users"]["Xinhui"]
+
+        async def transfer(candidate_id):
+            async with factory() as db:
+                try:
+                    await transfer_current(
+                        db,
+                        seeded["users"]["Mao"],
+                        candidate_id,
+                        TransferRequest(
+                            version=1,
+                            new_reviewer_id=target_id,
+                            reason="compete for one reviewer",
+                        ),
+                    )
+                    return "success", None
+                except AdminConflict as exc:
+                    return "conflict", exc.code
+
+        results = await asyncio.wait_for(
+            asyncio.gather(*(transfer(value) for value in candidate_ids)),
+            timeout=3.0,
+        )
+        async with factory() as verification:
+            candidates = [
+                await verification.get(Candidate, candidate_id)
+                for candidate_id in candidate_ids
+            ]
+            target_assignments = await verification.scalar(
+                select(func.count())
+                .select_from(Candidate)
+                .where(Candidate.current_reviewer_id == target_id)
+            )
+            audit_count = await verification.scalar(
+                select(func.count()).select_from(AuditEvent)
+            )
+        return results, candidates, target_assignments, audit_count
+
+    results, candidates, target_assignments, audit_count = asyncio.run(
+        in_isolated_schema(operation)
+    )
+
+    assert sorted(results) == [
+        ("conflict", "REVIEWER_NOT_ELIGIBLE"),
+        ("success", None),
+    ]
+    assert target_assignments == 1
+    assert sorted(candidate.version for candidate in candidates) == [1, 2]
+    assert audit_count == 1
