@@ -97,12 +97,14 @@ def test_candidate_has_only_one_current_review(db_session, species, reviewer):
 
 def test_replacing_a_non_current_review_succeeds(db_session, species, reviewer):
     candidate = make_candidate(species=species)
+    db_session.add(candidate)
+    db_session.commit()
     old_review = make_review(
         candidate=candidate,
         reviewer=reviewer,
         decision=Decision.APPROVED,
     )
-    db_session.add_all([candidate, old_review])
+    db_session.add(old_review)
     db_session.commit()
 
     old_review.is_current = False
@@ -172,6 +174,16 @@ def test_initial_migration_upgrades_a_fresh_database(tmp_path):
         index["name"]: index for index in inspector.get_indexes("reviews")
     }
     assert review_indexes["uq_reviews_current_candidate"]["unique"] == 1
+    assert "is_current = 1" in str(
+        review_indexes["uq_reviews_current_candidate"]["dialect_options"][
+            "sqlite_where"
+        ]
+    )
+
+    candidate_columns = {
+        column["name"]: column for column in inspector.get_columns("candidates")
+    }
+    assert candidate_columns["current_reviewer_id"]["nullable"] is True
 
     candidate_foreign_keys = {
         tuple(foreign_key["constrained_columns"])
