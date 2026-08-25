@@ -24,8 +24,10 @@ from app.models import (
     Candidate,
     CandidateImportPreview,
     Review,
+    Session,
     Species,
 )
+from app.services.auth import csrf_token, session_digest
 from app.services.imports import (
     ImportConflict,
     commit_candidate_csv,
@@ -136,6 +138,25 @@ async def count_rows(settings, model) -> int:
         return int(await db.scalar(select(func.count()).select_from(model)) or 0)
 
     return await run_with_session(settings, operation)
+
+
+async def add_session(settings, seed, name: str, suffix: str) -> tuple[str, str]:
+    raw_token = f"{name.lower()}-{suffix}-test-token"
+    digest = session_digest(raw_token)
+
+    async def operation(db):
+        session = Session(
+            user_id=seed.user_ids[name],
+            token_hash=digest,
+            password_version=1,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=12),
+        )
+        db.add(session)
+        await db.commit()
+        return str(session.id)
+
+    await run_with_session(settings, operation)
+    return raw_token, csrf_token(digest, settings.CSRF_SECRET)
 
 
 def cli_env(settings) -> dict[str, str]:
@@ -331,6 +352,72 @@ def test_issue_details_are_bounded_while_counts_remain_complete():
     assert preview.invalid_licenses == 150
     assert preview.blocking_errors == 150
     assert len(preview.issues) == 100
+    assert preview.issues_truncated is True
+    assert preview.omitted_issue_details == 50
+
+
+def test_final_normalized_values_fit_columns_and_reject_controls():
+    raw_http_url = "http://example.test/" + "a" * (2048 - len("http://example.test/"))
+    overlong_after_https = preview_candidate_csv(
+        csv_bytes([valid_row(image_url=raw_http_url)])
+    )
+    nul_identifier = preview_candidate_csv(
+        csv_bytes([valid_row(source_record_id="unsafe\x00record")])
+    )
+    metadata_nul = preview_candidate_csv(
+        csv_bytes(
+            [valid_row(provenance="unsafe\x00metadata")],
+            headers=(*REQUIRED_HEADERS, "provenance"),
+        )
+    )
+
+    assert overlong_after_https.issues[0].code == "FIELD_TOO_LONG"
+    assert nul_identifier.issues[0].code == "INVALID_CONTROL_CHARACTER"
+    assert metadata_nul.issues[0].code == "INVALID_CONTROL_CHARACTER"
+    assert not overlong_after_https.can_commit
+    assert not nul_identifier.can_commit
+    assert not metadata_nul.can_commit
+
+
+def test_human_text_controls_are_normalized_and_metadata_keys_are_casefolded():
+    normalized = normalize_legacy_row(
+        valid_row(
+            creator=" Ada\r\nLovelace\t ",
+            attribution=" Ada\r\nLovelace\t / CC-BY ",
+            location=" sea\r\n bay\t ",
+            **{
+                " LOCAL_PATH ": "do-not-import",
+                "Status": "approved",
+                "SHA256": "secret-local-state",
+                " Review_Notes ": "local review state",
+                "public_note": "kept",
+            },
+        )
+    )
+
+    assert normalized.creator == "Ada Lovelace"
+    assert normalized.attribution == "Ada Lovelace / CC-BY"
+    assert normalized.location == "sea bay"
+    assert normalized.metadata_json["public_note"] == "kept"
+    assert not {
+        "local_path",
+        "status",
+        "sha256",
+        "review_notes",
+    }.intersection(key.strip().casefold() for key in normalized.metadata_json)
+
+
+def test_metadata_limit_is_checked_after_all_derived_fields_are_added():
+    row = valid_row(
+        provenance="x" * 65_470,
+        source_date="y" * 64,
+    )
+    preview = preview_candidate_csv(
+        csv_bytes([row], headers=(*REQUIRED_HEADERS, "provenance", "source_date"))
+    )
+
+    assert preview.can_commit is False
+    assert preview.issues[0].code == "METADATA_TOO_LARGE"
 
 
 def test_db_preview_reports_unknown_species_and_stages_nothing_on_dry_run(settings):
@@ -420,6 +507,7 @@ def test_staged_preview_binds_digest_actor_expiry_and_mutates_no_candidates_or_a
             db,
             fixture_bytes(),
             actor_id=seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
             filename="../candidate secret.csv",
         )
         stage = (await db.scalars(select(CandidateImportPreview))).one()
@@ -432,6 +520,7 @@ def test_staged_preview_binds_digest_actor_expiry_and_mutates_no_candidates_or_a
     assert stage.token_digest == hashlib.sha256(report.preview_token.encode()).hexdigest()
     assert report.preview_token not in json.dumps(stage.report_json)
     assert stage.actor_id == seed.user_ids["Mao"]
+    assert stage.actor_session_id == seed.session_ids["Mao"]
     assert stage.filename == "candidate_secret.csv"
     assert stage.content == fixture_bytes()
     assert stage.expires_at > datetime.now(timezone.utc)
@@ -445,17 +534,23 @@ def test_commit_rejects_tampered_actor_bound_or_expired_token(settings, case):
 
     async def stage(db):
         return await stage_candidate_csv(
-            db, fixture_bytes(), actor_id=seed.user_ids["Mao"], filename="candidates.csv"
+            db,
+            fixture_bytes(),
+            actor_id=seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+            filename="candidates.csv",
         )
 
     report = asyncio.run(run_with_session(settings, stage))
     token = report.preview_token
     actor_id = seed.user_ids["Mao"]
+    actor_session_id = seed.session_ids["Mao"]
     expected = "IMPORT_PREVIEW_NOT_FOUND"
     if case == "tampered":
         token += "x"
     elif case == "other_actor":
         actor_id = seed.user_ids["Hassan"]
+        actor_session_id = seed.session_ids["Hassan"]
     else:
         stages = asyncio.run(load_all(settings, CandidateImportPreview))
         asyncio.run(
@@ -470,7 +565,12 @@ def test_commit_rejects_tampered_actor_bound_or_expired_token(settings, case):
 
     async def commit(db):
         with pytest.raises(ImportConflict) as caught:
-            await commit_candidate_csv(db, token, actor_id)
+            await commit_candidate_csv(
+                db,
+                token,
+                actor_id,
+                actor_session_id=actor_session_id,
+            )
         return caught.value.code
 
     assert asyncio.run(run_with_session(settings, commit)) == expected
@@ -483,9 +583,18 @@ def test_commit_inserts_all_candidates_with_null_assignments_one_bounded_audit(s
 
     async def operation(db):
         preview = await stage_candidate_csv(
-            db, fixture_bytes(), actor_id=seed.user_ids["Mao"], filename="candidates.csv"
+            db,
+            fixture_bytes(),
+            actor_id=seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+            filename="candidates.csv",
         )
-        result = await commit_candidate_csv(db, preview.preview_token, seed.user_ids["Mao"])
+        result = await commit_candidate_csv(
+            db,
+            preview.preview_token,
+            seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+        )
         candidates = list((await db.scalars(select(Candidate).order_by(Candidate.source_dataset))).all())
         reviews = list((await db.scalars(select(Review))).all())
         audits = list((await db.scalars(select(AuditEvent))).all())
@@ -521,9 +630,18 @@ def test_commit_skips_only_exact_duplicates_disclosed_by_preview(settings):
 
     async def operation(db):
         preview = await stage_candidate_csv(
-            db, content, actor_id=seed.user_ids["Mao"], filename="duplicates.csv"
+            db,
+            content,
+            actor_id=seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+            filename="duplicates.csv",
         )
-        result = await commit_candidate_csv(db, preview.preview_token, seed.user_ids["Mao"])
+        result = await commit_candidate_csv(
+            db,
+            preview.preview_token,
+            seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+        )
         return preview, result
 
     preview, result = asyncio.run(run_with_session(settings, operation))
@@ -542,18 +660,21 @@ def test_commit_refuses_blocking_preview_and_stale_file_or_database_state(settin
             db,
             csv_bytes([valid_row(license="ARR")]),
             actor_id=seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
             filename="blocked.csv",
         )
         stale_file = await stage_candidate_csv(
             db,
             csv_bytes([valid_row(source_record_id="file-stale")]),
             actor_id=seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
             filename="file.csv",
         )
         stale_db = await stage_candidate_csv(
             db,
             csv_bytes([valid_row(source_record_id="db-stale")]),
             actor_id=seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
             filename="db.csv",
         )
         return blocked, stale_file, stale_db
@@ -574,7 +695,12 @@ def test_commit_refuses_blocking_preview_and_stale_file_or_database_state(settin
     async def attempt(token, expected):
         async def operation(db):
             with pytest.raises(ImportConflict) as caught:
-                await commit_candidate_csv(db, token, seed.user_ids["Mao"])
+                await commit_candidate_csv(
+                    db,
+                    token,
+                    seed.user_ids["Mao"],
+                    actor_session_id=seed.session_ids["Mao"],
+                )
             assert caught.value.code == expected
 
         await run_with_session(settings, operation)
@@ -592,10 +718,24 @@ def test_successful_commit_retry_returns_exact_stored_result_without_new_writes(
 
     async def operation(db):
         preview = await stage_candidate_csv(
-            db, content, actor_id=seed.user_ids["Mao"], filename="one.csv"
+            db,
+            content,
+            actor_id=seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+            filename="one.csv",
         )
-        first = await commit_candidate_csv(db, preview.preview_token, seed.user_ids["Mao"])
-        second = await commit_candidate_csv(db, preview.preview_token, seed.user_ids["Mao"])
+        first = await commit_candidate_csv(
+            db,
+            preview.preview_token,
+            seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+        )
+        second = await commit_candidate_csv(
+            db,
+            preview.preview_token,
+            seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+        )
         return first, second
 
     first, second = asyncio.run(run_with_session(settings, operation))
@@ -611,7 +751,11 @@ def test_concurrent_retry_converges_on_one_result(settings):
 
     async def stage(db):
         return await stage_candidate_csv(
-            db, content, actor_id=seed.user_ids["Mao"], filename="race.csv"
+            db,
+            content,
+            actor_id=seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+            filename="race.csv",
         )
 
     preview = asyncio.run(run_with_session(settings, stage))
@@ -621,7 +765,12 @@ def test_concurrent_retry_converges_on_one_result(settings):
 
         async def one():
             async with factory() as db:
-                return await commit_candidate_csv(db, preview.preview_token, seed.user_ids["Mao"])
+                return await commit_candidate_csv(
+                    db,
+                    preview.preview_token,
+                    seed.user_ids["Mao"],
+                    actor_session_id=seed.session_ids["Mao"],
+                )
 
         try:
             return await asyncio.gather(one(), one())
@@ -641,7 +790,11 @@ def test_injected_database_failure_rolls_back_candidates_audit_and_commit_state(
 
     async def stage_and_trigger(db):
         preview = await stage_candidate_csv(
-            db, content, actor_id=seed.user_ids["Mao"], filename="rollback.csv"
+            db,
+            content,
+            actor_id=seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+            filename="rollback.csv",
         )
         await db.execute(
             text(
@@ -656,7 +809,12 @@ def test_injected_database_failure_rolls_back_candidates_audit_and_commit_state(
 
     async def commit(db):
         with pytest.raises(Exception, match="injected import failure"):
-            await commit_candidate_csv(db, preview.preview_token, seed.user_ids["Mao"])
+            await commit_candidate_csv(
+                db,
+                preview.preview_token,
+                seed.user_ids["Mao"],
+                actor_session_id=seed.session_ids["Mao"],
+            )
 
     asyncio.run(run_with_session(settings, commit))
 
@@ -700,6 +858,79 @@ def test_preview_api_requires_initialized_mao_and_csrf_and_never_mutates_candida
     assert asyncio.run(count_rows(settings, AuditEvent)) == 0
 
 
+@pytest.mark.parametrize(
+    ("content", "expected_status", "expected_code"),
+    [
+        (b"x" * (5 * 1024 * 1024 + 1), 413, "CSV_TOO_LARGE"),
+        (b"\xff\xfeseafood_code", 422, "CSV_INVALID_ENCODING"),
+        (b"seafood_code,source_dataset\nSF001,GBIF\n", 422, "CSV_MISSING_HEADERS"),
+        (
+            b"seafood_code,source_dataset,source_record_id,source_url,image_url,license,license\n",
+            422,
+            "CSV_DUPLICATE_HEADERS",
+        ),
+        (
+            b'seafood_code,source_dataset,source_record_id,source_url,image_url,license\nSF001,GBIF,"unterminated',
+            422,
+            "CSV_MALFORMED",
+        ),
+    ],
+    ids=["too-large", "encoding", "missing-headers", "duplicate-headers", "malformed"],
+)
+def test_preview_api_maps_fatal_file_errors_without_staging_or_writes(
+    settings, content, expected_status, expected_code
+):
+    seed = seed_import_database(settings)
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/v1/admin/imports/preview",
+            files={"file": ("fatal.csv", content, "text/csv")},
+            headers=admin_headers(seed, csrf=True),
+        )
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"]["code"] == expected_code
+    report = response.json()["detail"]["report"]
+    assert report["can_commit"] is False
+    assert "preview_token" not in report
+    assert settings.SESSION_SECRET not in response.text
+    assert settings.CSRF_SECRET not in response.text
+    assert asyncio.run(count_rows(settings, CandidateImportPreview)) == 0
+    assert asyncio.run(count_rows(settings, Candidate)) == 0
+    assert asyncio.run(count_rows(settings, AuditEvent)) == 0
+
+
+def test_preview_api_maps_row_limit_to_413_without_staging(settings):
+    seed = seed_import_database(settings)
+    content = csv_bytes(
+        [
+            valid_row(
+                source_dataset="FISH_VISTA",
+                source_record_id=str(number),
+                source_url="https://x.co/a",
+                image_url="https://x.co/a",
+                license="CC0",
+            )
+            for number in range(50_001)
+        ]
+    )
+    assert len(content) < 5 * 1024 * 1024
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/v1/admin/imports/preview",
+            files={"file": ("too-many.csv", content, "text/csv")},
+            headers=admin_headers(seed, csrf=True),
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "CSV_TOO_MANY_ROWS"
+    assert asyncio.run(count_rows(settings, CandidateImportPreview)) == 0
+    assert asyncio.run(count_rows(settings, Candidate)) == 0
+    assert asyncio.run(count_rows(settings, AuditEvent)) == 0
+
+
 def test_commit_api_requires_csrf_and_returns_stable_conflicts(settings):
     seed = seed_import_database(settings)
     with TestClient(create_app(settings)) as client:
@@ -736,6 +967,53 @@ def test_commit_api_requires_csrf_and_returns_stable_conflicts(settings):
     assert retry.json() == success.json()
 
 
+def test_preview_token_is_bound_to_exact_mao_session_across_commit_and_retry(settings):
+    seed = seed_import_database(settings)
+    session_b_token, session_b_csrf = asyncio.run(
+        add_session(settings, seed, "Mao", "second-session")
+    )
+    session_b_headers = {
+        "Cookie": f"review_session={session_b_token}",
+        "X-CSRF-Token": session_b_csrf,
+    }
+
+    with TestClient(create_app(settings)) as client:
+        preview = client.post(
+            "/v1/admin/imports/preview",
+            files={"file": ("c.csv", csv_bytes([valid_row()]), "text/csv")},
+            headers=admin_headers(seed, csrf=True),
+        ).json()
+        rejected_before = client.post(
+            "/v1/admin/imports/commit",
+            json={"preview_token": preview["preview_token"]},
+            headers=session_b_headers,
+        )
+        committed = client.post(
+            "/v1/admin/imports/commit",
+            json={"preview_token": preview["preview_token"]},
+            headers=admin_headers(seed, csrf=True),
+        )
+        rejected_retry = client.post(
+            "/v1/admin/imports/commit",
+            json={"preview_token": preview["preview_token"]},
+            headers=session_b_headers,
+        )
+        original_retry = client.post(
+            "/v1/admin/imports/commit",
+            json={"preview_token": preview["preview_token"]},
+            headers=admin_headers(seed, csrf=True),
+        )
+
+    assert rejected_before.status_code == rejected_retry.status_code == 409
+    assert rejected_before.json()["detail"] == rejected_retry.json()["detail"] == {
+        "code": "IMPORT_PREVIEW_NOT_FOUND"
+    }
+    assert committed.status_code == 200
+    assert original_retry.json() == committed.json()
+    assert asyncio.run(count_rows(settings, Candidate)) == 1
+    assert asyncio.run(count_rows(settings, AuditEvent)) == 1
+
+
 def test_import_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(tmp_path):
     database_path = tmp_path / "imports-migration.sqlite3"
     config = Config(API_ROOT / "alembic.ini")
@@ -745,15 +1023,37 @@ def test_import_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(t
     command.upgrade(config, "head")
     engine = create_async_engine(f"sqlite+aiosqlite:///{database_path.as_posix()}")
 
-    async def table_names():
+    async def migration_shape():
         async with engine.connect() as connection:
-            return await connection.run_sync(lambda sync: set(inspect(sync).get_table_names()))
+            return await connection.run_sync(
+                lambda sync: {
+                    "tables": set(inspect(sync).get_table_names()),
+                    "columns": {
+                        item["name"]: item
+                        for item in inspect(sync).get_columns("candidate_import_previews")
+                    }
+                    if "candidate_import_previews" in inspect(sync).get_table_names()
+                    else {},
+                    "foreign_keys": inspect(sync).get_foreign_keys(
+                        "candidate_import_previews"
+                    )
+                    if "candidate_import_previews" in inspect(sync).get_table_names()
+                    else [],
+                }
+            )
 
-    assert "candidate_import_previews" in asyncio.run(table_names())
+    shape = asyncio.run(migration_shape())
+    assert "candidate_import_previews" in shape["tables"]
+    assert shape["columns"]["actor_session_id"]["nullable"] is False
+    assert any(
+        foreign_key["constrained_columns"] == ["actor_session_id"]
+        and foreign_key["referred_table"] == "sessions"
+        for foreign_key in shape["foreign_keys"]
+    )
     command.downgrade(config, "20260826_03")
-    assert "candidate_import_previews" not in asyncio.run(table_names())
+    assert "candidate_import_previews" not in asyncio.run(migration_shape())["tables"]
     command.upgrade(config, "head")
-    assert "candidate_import_previews" in asyncio.run(table_names())
+    assert "candidate_import_previews" in asyncio.run(migration_shape())["tables"]
     asyncio.run(engine.dispose())
 
     output = io.StringIO()
@@ -764,6 +1064,8 @@ def test_import_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(t
     ddl = output.getvalue()
     assert "CREATE TABLE candidate_import_previews" in ddl
     assert "BYTEA" in ddl
+    assert "actor_session_id UUID NOT NULL" in ddl
+    assert "FOREIGN KEY(actor_session_id) REFERENCES sessions" in ddl
     assert "CREATE UNIQUE INDEX" in ddl
 
 
@@ -784,7 +1086,7 @@ def test_cli_dry_run_writes_json_and_no_database_rows(settings, tmp_path):
     written = json.loads(report_path.read_text(encoding="utf-8"))
     assert stdout == written
     assert stdout["total"] == 4
-    assert stdout["preview_token"] is None
+    assert "preview_token" not in stdout
     assert asyncio.run(count_rows(settings, Candidate)) == 0
     assert asyncio.run(count_rows(settings, CandidateImportPreview)) == 0
     assert asyncio.run(count_rows(settings, AuditEvent)) == 0
@@ -838,7 +1140,12 @@ def test_real_1221_manifest_dry_run_has_exact_counts_and_no_writes(settings, tmp
         "SF004": 257,
         "SF005": 245,
     }
-    assert report["preview_token"] is None
+    assert "preview_token" not in report
+    assert report["possible_url_duplicates"] == 247
+    assert report["warnings"] == 262
+    assert len(report["issues"]) == 100
+    assert report["issues_truncated"] is True
+    assert report["omitted_issue_details"] == 162
     assert before == after == 0
     assert asyncio.run(count_rows(settings, CandidateImportPreview)) == 0
     assert asyncio.run(count_rows(settings, AuditEvent)) == 0

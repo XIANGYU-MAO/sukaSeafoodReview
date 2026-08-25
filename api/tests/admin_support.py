@@ -26,6 +26,7 @@ FIXED_ACCOUNTS = (
 @dataclass(frozen=True)
 class AdminSeed:
     user_ids: dict[str, UUID]
+    session_ids: dict[str, UUID]
     species_ids: tuple[UUID, UUID]
     candidate_ids: tuple[UUID, ...]
     tokens: dict[str, str]
@@ -82,22 +83,23 @@ async def seed_admin_database(
         now = datetime.now(timezone.utc)
         tokens: dict[str, str] = {}
         csrf_values: dict[str, str] = {}
+        sessions: dict[str, Session] = {}
         for name, user in users.items():
             raw_token = f"{name.lower()}-admin-test-token"
             digest = session_digest(raw_token)
             tokens[name] = raw_token
             csrf_values[name] = csrf_token(digest, settings.CSRF_SECRET)
-            db.add(
-                Session(
-                    user_id=user.id,
-                    token_hash=digest,
-                    password_version=user.password_version,
-                    expires_at=now + timedelta(hours=12),
-                )
+            sessions[name] = Session(
+                user_id=user.id,
+                token_hash=digest,
+                password_version=user.password_version,
+                expires_at=now + timedelta(hours=12),
             )
+            db.add(sessions[name])
         await db.commit()
         result = AdminSeed(
             user_ids={name: user.id for name, user in users.items()},
+            session_ids={name: session.id for name, session in sessions.items()},
             species_ids=(primary.id, secondary.id),
             candidate_ids=tuple(candidate.id for candidate in candidates),
             tokens=tokens,
