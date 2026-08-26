@@ -24,6 +24,7 @@ _HEX_64 = re.compile(r"[0-9a-fA-F]{64}\Z", re.ASCII)
 _HEX_BOUNDED = re.compile(r"[0-9a-fA-F]{1,256}\Z", re.ASCII)
 _ACTIONS = frozenset({"ADD", "MOVE", "REMOVE"})
 _SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
+_SQLITE_PATH_VALIDATION_ATTEMPTS = 2
 _COLUMNS = (
     "candidate_id",
     "review_id",
@@ -243,20 +244,20 @@ class SyncIndex:
         self._validate_sqlite_paths()
         self._initialize()
 
-    def _validate_sqlite_path(self, candidate: Path, *, sidecar: bool) -> None:
-        label = "SQLite sidecar" if sidecar else "index"
-        if candidate.parent != self.root:
-            raise SyncIndexError(f"{label} path must remain inside the selected root")
+    @staticmethod
+    def _inspect_sqlite_path(
+        candidate: Path, *, label: str
+    ) -> os.stat_result | None:
         try:
-            metadata = os.lstat(candidate)
+            return os.lstat(candidate)
         except FileNotFoundError:
-            if candidate.resolve(strict=False).parent != self.root:
-                raise SyncIndexError(
-                    f"{label} path must remain inside the selected root"
-                )
-            return
-        except OSError as exc:
-            raise SyncIndexError(f"{label} path cannot be inspected safely") from exc
+            return None
+        except OSError:
+            pass
+        raise SyncIndexError(f"{label} path cannot be inspected safely")
+
+    @staticmethod
+    def _validate_sqlite_metadata(metadata: os.stat_result, *, label: str) -> None:
         attributes = getattr(metadata, "st_file_attributes", 0)
         if stat.S_ISLNK(metadata.st_mode):
             raise SyncIndexError(f"{label} path must not be a symlink or reparse point")
@@ -264,13 +265,70 @@ class SyncIndex:
             raise SyncIndexError(f"{label} path must not be a reparse point")
         if not stat.S_ISREG(metadata.st_mode):
             raise SyncIndexError(f"{label} path must be a regular file")
+
+    def _validate_sqlite_parent(self, candidate: Path, *, label: str) -> None:
+        resolved_parent = None
         try:
-            resolved = candidate.resolve(strict=True)
-            resolved.relative_to(self.root)
-        except (OSError, ValueError) as exc:
+            resolved_parent = candidate.parent.resolve(strict=True)
+        except (OSError, RuntimeError):
+            pass
+        if resolved_parent != self.root:
             raise SyncIndexError(
                 f"{label} path must remain inside the selected root"
-            ) from exc
+            )
+
+    def _validate_sqlite_path(self, candidate: Path, *, sidecar: bool) -> None:
+        label = "SQLite sidecar" if sidecar else "index"
+        if candidate.parent != self.root:
+            raise SyncIndexError(f"{label} path must remain inside the selected root")
+        attempts = _SQLITE_PATH_VALIDATION_ATTEMPTS if sidecar else 1
+        for attempt in range(attempts):
+            metadata = self._inspect_sqlite_path(candidate, label=label)
+            if metadata is None:
+                self._validate_sqlite_parent(candidate, label=label)
+                metadata = self._inspect_sqlite_path(candidate, label=label)
+                if metadata is None:
+                    return
+            self._validate_sqlite_metadata(metadata, label=label)
+
+            resolution_missing = False
+            resolution_failed = False
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(self.root)
+            except FileNotFoundError:
+                resolution_missing = True
+            except (OSError, RuntimeError, ValueError):
+                resolution_failed = True
+            if resolution_failed:
+                raise SyncIndexError(
+                    f"{label} path must remain inside the selected root"
+                )
+            if resolution_missing:
+                if not sidecar:
+                    raise SyncIndexError(
+                        f"{label} path must remain inside the selected root"
+                    )
+                self._validate_sqlite_parent(candidate, label=label)
+                if self._inspect_sqlite_path(candidate, label=label) is None:
+                    return
+            else:
+                current = self._inspect_sqlite_path(candidate, label=label)
+                if current is None:
+                    if not sidecar:
+                        raise SyncIndexError(
+                            f"{label} path must remain inside the selected root"
+                        )
+                    self._validate_sqlite_parent(candidate, label=label)
+                    if self._inspect_sqlite_path(candidate, label=label) is None:
+                        return
+                else:
+                    self._validate_sqlite_metadata(current, label=label)
+                    if os.path.samestat(metadata, current):
+                        return
+
+            if attempt + 1 == attempts:
+                raise SyncIndexError(f"{label} path changed during validation")
 
     def _validate_sqlite_paths(self) -> None:
         self._validate_sqlite_path(self.path, sidecar=False)

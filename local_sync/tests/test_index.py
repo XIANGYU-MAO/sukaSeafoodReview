@@ -173,6 +173,158 @@ def test_absent_database_rejects_linked_rollback_journal_before_sqlite_open(
     assert journal.is_symlink()
 
 
+def test_regular_rollback_journal_removed_after_lstat_is_treated_as_absent(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_root.mkdir()
+    database = sync_root / ".sukaseafood-sync.sqlite3"
+    journal = Path(f"{database}-journal")
+    journal.write_bytes(b"transient SQLite rollback journal")
+    original_resolve = Path.resolve
+    removed_after_lstat = False
+
+    def remove_journal_before_strict_resolution(
+        candidate: Path, strict: bool = False
+    ) -> Path:
+        nonlocal removed_after_lstat
+        if candidate == journal and strict and not removed_after_lstat:
+            removed_after_lstat = True
+            journal.unlink()
+        return original_resolve(candidate, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", remove_journal_before_strict_resolution)
+
+    index = SyncIndex(sync_root)
+
+    assert removed_after_lstat
+    assert index.path == database
+    assert index.path.is_file()
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_sidecar_symlink_reparse_or_nonregular_swap_is_rejected_without_touching_outside(
+    sync_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    index = SyncIndex(sync_root)
+    journal = Path(f"{index.path}-journal")
+    journal.write_bytes(b"regular before inspection")
+    outside = tmp_path / "outside-sidecar-target.bin"
+    original = b"outside bytes must remain unchanged"
+    outside.write_bytes(original)
+    original_resolve = Path.resolve
+    replaced_after_lstat = False
+
+    def replace_journal_before_strict_resolution(
+        candidate: Path, strict: bool = False
+    ) -> Path:
+        nonlocal replaced_after_lstat
+        if candidate == journal and strict and not replaced_after_lstat:
+            replaced_after_lstat = True
+            journal.unlink()
+            if replacement == "symlink":
+                journal.symlink_to(outside)
+            else:
+                journal.mkdir()
+        return original_resolve(candidate, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", replace_journal_before_strict_resolution)
+
+    try:
+        with pytest.raises(SyncIndexError, match="sidecar|symlink|reparse|regular"):
+            index._validate_sqlite_path(journal, sidecar=True)
+    finally:
+        assert outside.read_bytes() == original
+
+    assert replaced_after_lstat
+    if replacement == "symlink" and os.name == "nt":
+        attributes = getattr(os.lstat(journal), "st_file_attributes", 0)
+        assert attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def test_sidecar_reinspection_failure_has_stable_secret_free_exception_graph(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    journal = Path(f"{index.path}-journal")
+    journal.write_bytes(b"regular before inspection")
+    original_lstat = os.lstat
+    journal_inspections = 0
+
+    def fail_journal_reinspection(
+        candidate: os.PathLike[str] | str,
+    ) -> os.stat_result:
+        nonlocal journal_inspections
+        if Path(candidate) == journal:
+            journal_inspections += 1
+            if journal_inspections == 2:
+                raise OSError(f"unsafe inspection detail: {RECEIPT_TOKEN}")
+        return original_lstat(candidate)
+
+    monkeypatch.setattr(os, "lstat", fail_journal_reinspection)
+
+    with pytest.raises(SyncIndexError, match="cannot be inspected safely") as caught:
+        index._validate_sqlite_path(journal, sidecar=True)
+
+    assert journal_inspections == 2
+    assert_secret_free_exception_graph(caught.value)
+
+
+def test_sidecar_that_keeps_changing_fails_closed_after_bounded_validation(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    journal = Path(f"{index.path}-journal")
+    journal.write_bytes(b"first journal identity")
+    original_resolve = Path.resolve
+    replacements = 0
+
+    def replace_journal_on_every_strict_resolution(
+        candidate: Path, strict: bool = False
+    ) -> Path:
+        nonlocal replacements
+        if candidate == journal and strict:
+            retired = sync_root / f"retired-journal-{replacements}"
+            journal.replace(retired)
+            replacements += 1
+            journal.write_bytes(f"journal identity {replacements}".encode())
+        return original_resolve(candidate, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", replace_journal_on_every_strict_resolution)
+
+    with pytest.raises(SyncIndexError, match="changed during validation") as caught:
+        index._validate_sqlite_path(journal, sidecar=True)
+
+    assert replacements == 2
+    assert_secret_free_exception_graph(caught.value)
+
+
+def test_main_database_removed_after_lstat_is_not_treated_as_transient(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    original_resolve = Path.resolve
+    removed_after_lstat = False
+
+    def remove_database_before_strict_resolution(
+        candidate: Path, strict: bool = False
+    ) -> Path:
+        nonlocal removed_after_lstat
+        if candidate == index.path and strict and not removed_after_lstat:
+            removed_after_lstat = True
+            index.path.unlink()
+        return original_resolve(candidate, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", remove_database_before_strict_resolution)
+
+    with pytest.raises(SyncIndexError, match="index.*selected root"):
+        index._validate_sqlite_path(index.path, sidecar=False)
+
+    assert removed_after_lstat
+
+
 @pytest.mark.parametrize("suffix", ["-wal", "-shm"])
 def test_canonical_database_rejects_linked_wal_sidecars_without_touching_them(
     sync_root: Path, tmp_path: Path, suffix: str
