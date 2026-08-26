@@ -52,9 +52,9 @@ describe("PillChoiceGroup", () => {
     await user.keyboard("{ArrowDown}");
     expect(onChange).toHaveBeenLastCalledWith("Mao");
     await user.keyboard("{ArrowUp}");
-    expect(onChange).toHaveBeenLastCalledWith("Yiming");
+    expect(onChange).toHaveBeenLastCalledWith("Hassan");
     await user.keyboard(" ");
-    expect(onChange).toHaveBeenLastCalledWith("Yiming");
+    expect(onChange).toHaveBeenLastCalledWith("Hassan");
   });
 
   it("does not select or focus disabled pills", async () => {

@@ -20,12 +20,11 @@ describe("API client", () => {
         method: "PATCH",
         credentials: "include",
         body: JSON.stringify({ decision: "UNSURE" }),
-        headers: expect.objectContaining({
-          "Content-Type": "application/json",
-          "X-CSRF-Token": "csrf-value",
-        }),
       }),
     );
+    const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(headers.get("X-CSRF-Token")).toBe("csrf-value");
   });
 
   it("returns no body for a successful 204 response", async () => {
