@@ -104,6 +104,48 @@ def test_readmes_describe_unpublished_checkout_security_boundaries_and_extensibl
     assert "鱼种管理" in chinese and "Species management" in english
 
 
+def test_readmes_describe_implemented_sync_envelope_storage_and_release_truth():
+    chinese = README_ZH.read_text(encoding="utf-8")
+    english = README_EN.read_text(encoding="utf-8")
+
+    for text in (chinese, english):
+        assert "local_sync/README_ZH.md" in text
+        assert "10,000" in text
+        assert "20 MiB" in text
+        assert "/sukaseafood/review" in text
+        assert "/sukaseafood/api/v1" in text
+        assert "IMAGE_ORIGIN_ALLOWLIST" in text
+    assert "Windows 本地同步工具已经实现" in chinese
+    assert "Windows local-sync tool is implemented" in english
+    assert "离线回执" in chinese and "offline receipt" in english
+    assert "不保存图片字节、原图 URL 或批次 token" in chinese
+    assert "stores no image bytes, original URLs, or batch tokens" in english
+    assert "已准备的 YGF 发布会删除 `/project`" in chinese
+    assert "prepared YGF release removes `/project`" in english
+    assert "部署构件已实现并在本机验证" in chinese
+    assert "deployment artifacts are implemented and locally verified" in english
+    assert "未执行生产 SSH 部署或公开验收" in chinese
+    assert "no production SSH deployment or public acceptance has been executed" in english
+    assert "显式授权" in chinese and "explicit authorization" in english
+    assert "精确 16 列 CSV" in chinese
+    assert "exact 16-column CSV" in english
+    assert "七字段 CSV" not in chinese
+    assert "seven-field CSV" not in english
+
+
+def test_readmes_show_the_exact_locked_clean_windows_build_command():
+    chinese = README_ZH.read_text(encoding="utf-8")
+    english = README_EN.read_text(encoding="utf-8")
+    command = (
+        "powershell -NoProfile -ExecutionPolicy Bypass -File "
+        "local_sync/scripts/build_windows.ps1"
+    )
+
+    for text in (chinese, english):
+        assert command in text
+        assert "build_windows.ps1 -Clean -Locked" not in text
+
+
 def test_readmes_do_not_claim_deployment_or_embed_secret_material():
     chinese = README_ZH.read_text(encoding="utf-8")
     english = README_EN.read_text(encoding="utf-8")

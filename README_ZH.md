@@ -4,13 +4,13 @@
 
 ## 系统成果
 
-本仓库提供一个面向 SukaSeafood 候选鱼类图片的多人协作审核核心：六个固定账号 Hassan、Mao、Xinhui、Wahid、Sharmaa、Yiming 共享同一待审核池，其中 Mao 是唯一管理员。系统不设个人配额，同一候选不会交给已经审核过它的成员；每次选择 KEEP、REJECT 或 UNSURE 后立即写入数据库，收到数据库确认后才取下一张。
+本仓库提供完整的 SukaSeafood 多人协作审核 Web/API 和 Windows 本地同步工具：六个固定账号 Hassan、Mao、Xinhui、Wahid、Sharmaa、Yiming 共享同一待审核池，其中 Mao 是唯一管理员。系统不设个人配额，同一候选不会交给已经审核过它的成员；每次选择 KEEP、REJECT 或 UNSURE 后立即写入数据库，收到数据库确认后才取下一张。
 
-成员只能查看和修改自己的当前审核历史，但都能看汇总进度。Mao 使用固定中文的七标签后台管理进度、候选图片、鱼种、审核历史、CSV 导入、训练集同步批次和账号。服务器只保存结构化候选信息、外部 URL、审核结果、CSV 与小型回执，不保存、缓存、代理或下载原图字节。审核通过原图的增量下载属于后续 Windows 本地同步阶段，由 Mao 的电脑直接访问外部来源。
+成员只能查看和修改自己的当前审核历史，但都能看汇总进度。Mao 使用标题为“管理后台”的固定中文七标签后台管理进度、候选图片、动态鱼种、审核历史、CSV 导入、训练集同步批次和账号。服务器只保存结构化候选信息、外部 URL、审核结果、受限 CSV 与回执，不保存、缓存、代理或下载原图字节。Windows 本地同步工具已经实现，由 Mao 的电脑直接访问获准的外部来源；详见 [`local_sync/README_ZH.md`](local_sync/README_ZH.md)。
 
 ## 仓库与当前开发上下文
 
-截至 2026-08-26，当前实现仅存在于本地，尚未发布：分支是 `codex/collaborative-review`，工作树位于 `C:\Users\86166\Desktop\sukaSeafoodReview\.worktrees\collaborative-review`。远端 `origin` 当前没有已发布引用；`https://github.com/XIANGYU-MAO/sukaSeafoodReview.git` 只是目标地址。`.worktrees` 是本机 Git 隔离实现细节，不是运行时要求。
+截至 2026-08-27，当前实现仅存在于本地，尚未发布：分支是 `codex/collaborative-review`，工作树位于 `C:\Users\86166\Desktop\sukaSeafoodReview\.worktrees\collaborative-review`。远端 `origin` 当前没有已发布引用；`https://github.com/XIANGYU-MAO/sukaSeafoodReview.git` 只是目标地址。`.worktrees` 是本机 Git 隔离实现细节，不是运行时要求。
 
 只有该分支被显式合并、推送和发布后，其他使用者才可以执行以下 clone；当前不能把它当成可运行的获取方式：
 
@@ -19,25 +19,27 @@ git clone https://github.com/XIANGYU-MAO/sukaSeafoodReview.git
 Set-Location .\sukaSeafoodReview
 ```
 
-在此之前，本机命令必须从上述当前 checkout 的仓库根目录运行。不要复制或依赖另一台机器的 `.worktrees` 目录。本文描述当前核心代码，不表示已合并、已推送、生产发布或 Windows 下载器阶段已经完成。
+在此之前，本机命令必须从上述当前 checkout 的仓库根目录运行。不要复制或依赖另一台机器的 `.worktrees` 目录。本文描述当前已实现代码，不表示已合并、已推送或已生产发布。
 
 ## 架构与数据流
 
 - `web/`：React 19、TypeScript、Vite；生产构建基址和浏览器路由基址固定为 `/sukaseafood/review/`。
 - `api/`：FastAPI、SQLAlchemy async、Alembic；应用内部路由从 `/v1` 开始。
+- `local_sync/`：独立的 CLI/Tkinter Windows 同步器、可恢复索引与冻结构建；使用说明见 [`local_sync/README_ZH.md`](local_sync/README_ZH.md)。
+- `deploy/` 与两个 Compose 文件：固定路径的生产备份、恢复、首次部署、预检、导入和回滚构件。
 - 开发浏览器入口：`http://localhost:5173/sukaseafood/review/`。Vite 只把 `/sukaseafood/api` 重写到本机 FastAPI 根路径，因此网页仍使用 `/sukaseafood/api/v1`。
 - 规划中的生产入口：`https://findai.top/sukaseafood/review`；外部 API 前缀固定为 `/sukaseafood/api/v1`。
 - 浏览器从 API 取得候选元数据，再通过外部 HTTPS URL 直接加载图片。图片字节不经过中国服务器，也不写入服务器数据库或磁盘。
 - 审核提交带 CSRF 和 Idempotency-Key；API 在数据库事务确认后返回回执，网页验证回执再刷新汇总并取下一张。
 
-本系统不提供 `/project` 或 `/project/*` 页面，也没有图片上传、原图代理或原图下载 API。删除旧 `/project` 路由并保护 YGF 其他页面属于后续生产部署计划，不由本地开发步骤执行。
+本系统没有图片上传、原图代理或原图下载 API。已准备的 YGF 发布会删除 `/project`、`/project/*` 与 `/project-assets/*`，同时保留其他 YGF 页面；这些网关改动尚未部署，线上路由在获得显式授权并发布前不会改变。
 
 ## 环境要求
 
 - Windows PowerShell 7（Windows PowerShell 5.1 也可执行下列基础命令）。
 - Python 3.12。
 - Node.js 22.12 或更高版本，配套 npm。
-- 本地开发可使用 SQLite；SQLite 仅适合单机开发和测试。
+- API 测试/开发可使用 SQLite；生产业务数据库只使用 PostgreSQL。本地同步器另有一个小型 SQLite 恢复索引，只保存操作键、相对路径、哈希和回执状态，不保存图片字节、原图 URL 或批次 token。
 - 生产必须使用 PostgreSQL 16、HTTPS，并把 `SECURE_COOKIE` 设为 `true`。生产配置会拒绝 SQLite 和不安全 Cookie。
 
 如需运行真实 PostgreSQL 并发测试，请准备一个可清空的独立 PostgreSQL 16 测试数据库。绝不能把测试指向生产数据库。
@@ -87,7 +89,7 @@ npm run dev
 
 公开姓名顺序固定为 Hassan、Mao、Xinhui、Wahid、Sharmaa、Yiming；除 Mao 为 `admin` 外，其余均为 `reviewer`。不支持注册、社交登录或自定义账号。首次登录必须修改临时密码，修改成功会撤销全部会话并返回登录页；管理员重置成员密码也会撤销该成员会话。
 
-会话保存在数据库，浏览器只接收 HttpOnly、SameSite=Lax、`Path=/sukaseafood` Cookie。刷新页面通过 `/sukaseafood/api/v1/auth/me` 恢复会话。生产必须在 HTTPS 下使用 `SECURE_COOKIE=true`；`SECURE_COOKIE=false` 会被生产配置拒绝。登录是未认证入口；登录成功后，浏览器发起的已认证状态变更使用会话和同一会话派生的 CSRF，审核提交还要求每个具体操作独立的 Idempotency-Key。后续本地同步工具向 `/v1/sync/batches/{batch_id}/receipt` 提交回执时使用批次 token，不使用浏览器会话或 CSRF。
+会话保存在数据库，浏览器只接收 HttpOnly、SameSite=Lax、`Path=/sukaseafood` Cookie。刷新页面通过 `/sukaseafood/api/v1/auth/me` 恢复会话。生产必须在 HTTPS 下使用 `SECURE_COOKIE=true`；`SECURE_COOKIE=false` 会被生产配置拒绝。登录是未认证入口；登录成功后，浏览器发起的已认证状态变更使用会话和同一会话派生的 CSRF，审核提交还要求每个具体操作独立的 Idempotency-Key。本地同步工具向 `/v1/sync/batches/{batch_id}/receipt` 提交回执时使用批次 token，不使用浏览器会话或 CSRF。
 
 临时密码和重置密码只显示一次。不要把密码、会话 Cookie、CSRF、回执密钥、数据库 URL 或 SSH 凭据写进 Git、截图、日志或问题单。
 
@@ -102,7 +104,7 @@ Set-Location .\api
 
 2026-08-26 对该真实文件的当前验证结果是：1,221 行可作为新候选、247 条可能 URL 重复、262 条警告、0 条 blocking error。它是一次已观察到的验证证据，不是对未来文件或已有数据库状态的永久不变量；文件内容或数据库变化后应重新 dry-run。
 
-dry-run 不写候选、不生成可提交预览令牌。确认报告后，Mao 在中文后台“导入”标签选择同一 CSV，先执行预检查，再显式确认 commit。预览令牌仅保存在当前页面内存并有过期时间；新文件、终端冲突或成功提交会使旧令牌失效。
+dry-run 不写候选、不生成可提交预览令牌。确认报告后，Mao 可以在中文后台“导入”标签先预检查再显式确认 commit；生产首次导入脚本也会在服务器上先 dry-run，再以同一 CLI 的 `--commit` 事务性复核并写入。CLI 精确重复导入是幂等的。网页预览令牌仅保存在当前页面内存并有过期时间；新文件、终端冲突或成功提交会使旧令牌失效。
 
 ## 审核成员工作流
 
@@ -132,11 +134,11 @@ dry-run 不写候选、不生成可提交预览令牌。确认报告后，Mao �
 
 ## 增量 CSV 与本地下载边界
 
-当前核心只生成小型增量 CSV 和接收回执，不包含 Windows 下载器。CSV 按数据库当前审核状态产生 ADD、REMOVE 或 MOVE，并携带服务器决定的精确目标相对路径。下载链接是同源认证 GET；文件回执是受限大小的 `application/json` POST。
+服务器按一个统一封套生成增量批次：每批最多 10,000 行，精确 16 列 CSV 序列化后最多 20 MiB，在线回执与离线回执上传也最多 20 MiB。超过 10,000 个待处理项会被拆成互不重叠的后续批次；任意一行本身导致超限时会在持久化批次前失败。CSV 按同一 PostgreSQL 快照产生 ADD、REMOVE 或 MOVE，并携带服务器决定的精确目标相对路径和单调审核版本。CSV 下载是同源认证、`no-store` 的附件响应；回执是有界 `application/json` POST。
 
-后续 `docs/superpowers/plans/2026-08-26-local-training-sync.md` 将实现独立 `local_sync` 包、CLI/Tkinter 和 Windows 可执行文件。该工具计划在 Mao 的电脑上直接访问 `original_url`，验证图片、计算哈希、使用 `.part` 和原子改名、幂等续跑，并把 REMOVE 移到可恢复 `_removed` 路径。中国服务器不抓取原图，可避免服务器带宽、外部来源限流和许可边界扩大，也确保训练数据仍由本地目录所有者控制。
+独立 `local_sync` 包、CLI/Tkinter 和 Windows 可执行文件已经实现。工具在 Mao 的电脑上直接访问每个获准的 `original_url`，验证每次重定向、图片内容和哈希，使用 `.part` 加原子改名幂等续跑，并把 REMOVE 移到可恢复 `_removed` 路径。只允许配置的精确主机/域名后缀；可用 `IMAGE_ORIGIN_ALLOWLIST` 配置服务器，用 `SUKASEAFOOD_IMAGE_ORIGIN_ALLOWLIST` 配置本机同步器。禁止 localhost、IP 字面量和未批准来源。配置代理只代表信任该代理去连接经过批准的主机名；工具不会把 Cookie 或凭据发送到图片来源。中国服务器从不向图片来源发起 HEAD/GET，也没有图片缓存或代理。
 
-在下载器阶段完成前，不要把导出 CSV 描述为已经同步的本地训练集，也不要手工伪造成功回执。
+取消或网络中断时，已经安全完成的操作会留在本地索引；工具保存 `download_receipt-{batch_id}.json` 离线回执，网络恢复后可重传。旧版本重放不能覆盖较新审核结果；具体操作和安全恢复流程见 [`local_sync/README_ZH.md`](local_sync/README_ZH.md)。不要手工伪造成功回执。
 
 ## 验证命令
 
@@ -173,7 +175,17 @@ npm run typecheck
 npm run build
 ```
 
-生产构建资产必须保持在 `/sukaseafood/review/assets/`。上述命令验证代码；公开路由、Caddy、备份、六账号浏览器验收和 YGF 回归属于后续部署计划。
+本地同步器测试、编译和锁定构建：
+
+```powershell
+Set-Location ..\local_sync
+python -m pytest -q
+python -m compileall src tests
+Set-Location ..
+powershell -NoProfile -ExecutionPolicy Bypass -File local_sync/scripts/build_windows.ps1
+```
+
+生产构建资产必须保持在 `/sukaseafood/review/assets/`。部署构件已实现并在本机验证，但未执行生产 SSH 部署或公开验收；上线、Caddy reload、六账号浏览器验收和回滚演练都需要显式授权。
 
 ## 故障排查
 
@@ -191,13 +203,15 @@ npm run build
 ```text
 api/                         FastAPI、模型、迁移、CLI 与后端测试
 web/                         React/Vite 网页与 Web 测试
+local_sync/                  Windows 同步器、测试、构建与中文手册
+deploy/                      生产脚本、环境模板、操作与回滚清单
 docs/superpowers/specs/      已批准系统设计
 docs/superpowers/plans/      核心、本地同步和生产部署计划
 ```
 
 - 系统设计：`docs/superpowers/specs/2026-08-26-collaborative-review-system-design.md`
 - 核心实施计划：`docs/superpowers/plans/2026-08-26-collaborative-review-core.md`
-- Windows 本地同步后续计划：`docs/superpowers/plans/2026-08-26-local-training-sync.md`（尚未实现）
-- 生产部署与 YGF 路由后续计划：`docs/superpowers/plans/2026-08-26-production-deployment.md`（尚未执行）
+- Windows 本地同步实施计划：`docs/superpowers/plans/2026-08-26-local-training-sync.md`（代码与冻结构建流程已实现）
+- 生产部署与 YGF 路由计划：`docs/superpowers/plans/2026-08-26-production-deployment.md`（构件和隔离网关提交已准备，未上线）
 
-生产阶段还需单独完成 PostgreSQL、容器、备份、Caddy、`/project` 404、公开路由和回滚验收。本文不包含真实服务器、SSH、数据库、生产密码或密钥值。
+生产 Compose、镜像、备份/恢复、首次部署、预检、导入和回滚构件均已准备并完成本机静态/构建验证；隔离的 YGF 发布也已准备删除 `/project` 并接入 `/sukaseafood/review` 与 `/sukaseafood/api/v1`。当前分支没有执行 SSH、推送、部署、Caddy reload、生产数据导入或公开验收；所有外部操作仍须用户显式授权。本文不包含真实服务器、SSH、数据库、生产密码或密钥值。
