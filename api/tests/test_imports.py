@@ -275,6 +275,20 @@ def test_preview_accepts_utf8_bom_and_reports_stable_source_species_counts():
         "INATURALIST": 1,
         "WIKIMEDIA_COMMONS": 1,
     }
+
+
+@pytest.mark.parametrize(
+    "unsafe_code", ["../outside", "SF/001", "SF\\001", "CON", "sf001", "鱼001"]
+)
+def test_preview_rejects_non_ascii_non_windows_safe_species_codes(unsafe_code):
+    preview = preview_candidate_csv(
+        csv_bytes([valid_row(seafood_code=unsafe_code)])
+    )
+
+    assert preview.invalid_species == 1
+    assert preview.blocking_errors == 1
+    assert preview.new_rows == 0
+    assert preview.issues[0].code == "INVALID_SPECIES"
     assert preview.species_counts == {"SF001": 2, "SF002": 2}
     assert preview.file_sha256 == hashlib.sha256(b"\xef\xbb\xbf" + fixture_bytes()).hexdigest()
     assert preview.preview_token is None

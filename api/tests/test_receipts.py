@@ -103,6 +103,31 @@ def test_success_failed_partial_completion_retry_and_conflict(settings):
     assert token not in " ".join(str(event.__dict__) for event in audits)
 
 
+def test_token_receipt_ignores_browser_identity_and_attributes_audit_to_batch_creator(settings):
+    seed, client, batch_id, token, rows = setup_batch(settings)
+    try:
+        response = client.post(
+            f"/v1/sync/batches/{batch_id}/receipt",
+            json={"items": [success_receipt(rows[0])]},
+            headers={
+                "Authorization": f"Batch {token}",
+                "Cookie": f"review_session={seed.hassan_token}",
+            },
+        )
+    finally:
+        close(client)
+
+    assert response.status_code == 200
+    receipt_audits = [
+        event
+        for event in asyncio.run(load_models(settings, AuditEvent))
+        if event.action == "EXPORT_RECEIPT_APPLY"
+    ]
+    assert len(receipt_audits) == 1
+    assert receipt_audits[0].actor_id == seed.mao_id
+    assert receipt_audits[0].actor_id != seed.hassan_id
+
+
 @pytest.mark.parametrize(
     "mutator",
     [
@@ -196,38 +221,52 @@ def test_manual_receipt_file_requires_mao_csrf_bounds_batch_match_and_reuses_sem
     try:
         anonymous = client.post(
             f"/v1/admin/exports/{batch_id}/receipt-file",
-            files={"file": ("download_receipt.json", json.dumps(payload), "application/json")},
+            content=b"x" * (1024 * 1024),
+            headers={"Content-Type": "multipart/form-data; boundary=never-parse"},
         )
         no_csrf = client.post(
             f"/v1/admin/exports/{batch_id}/receipt-file",
-            files={"file": ("download_receipt.json", json.dumps(payload), "application/json")},
+            json=payload,
             headers=mao_headers(seed),
+        )
+        multipart = client.post(
+            f"/v1/admin/exports/{batch_id}/receipt-file",
+            files={"file": ("download_receipt.json", json.dumps(payload), "application/json")},
+            headers=mao_headers(seed, csrf=True),
         )
         mismatch = client.post(
             f"/v1/admin/exports/{batch_id}/receipt-file",
-            files={"file": ("download_receipt.json", json.dumps({**payload, "batch_id": str(uuid4())}), "application/json")},
+            json={**payload, "batch_id": str(uuid4())},
             headers=mao_headers(seed, csrf=True),
         )
         oversized = client.post(
             f"/v1/admin/exports/{batch_id}/receipt-file",
-            files={"file": ("download_receipt.json", b"x" * (130 * 1024), "application/json")},
-            headers=mao_headers(seed, csrf=True),
+            content=json.dumps(payload).encode() + b" " * (130 * 1024),
+            headers={**mao_headers(seed, csrf=True), "Content-Type": "application/json"},
         )
         applied = client.post(
             f"/v1/admin/exports/{batch_id}/receipt-file",
-            files={"file": ("download_receipt.json", json.dumps(payload), "application/json")},
+            json=payload,
             headers=mao_headers(seed, csrf=True),
         )
     finally:
         close(client)
     assert anonymous.status_code == 401
     assert no_csrf.status_code == 403
+    assert multipart.status_code == 415
     assert mismatch.status_code == 409
     assert mismatch.json()["detail"]["code"] == "RECEIPT_BATCH_MISMATCH"
     assert oversized.status_code == 413
     assert applied.status_code == 200
     assert applied.json()["status"] == "completed"
     assert token not in applied.text
+
+    with TestClient(create_app(settings)) as docs_client:
+        operation = docs_client.get("/openapi.json").json()["paths"][
+            "/v1/admin/exports/{batch_id}/receipt-file"
+        ]["post"]
+    content_types = set(operation["requestBody"]["content"])
+    assert content_types == {"application/json"}
 
 
 def test_receipt_rolls_back_item_when_audit_insert_fails(settings):

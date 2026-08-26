@@ -6,11 +6,12 @@ import hmac
 import importlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import event, func, select
+from sqlalchemy import event, func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import Settings
@@ -68,6 +69,15 @@ def receipt(client, batch_id, token, items):
 
 def test_new_approved_export_is_immutable_rfc4180_snapshot_and_csv_get_stays_pending(settings):
     seed = create_seed(settings)
+    asyncio.run(
+        mutate(
+            settings,
+            Candidate,
+            seed.candidate_ids[0],
+            creator='Fish, "Quoted"\nCreator',
+            attribution='Fish, "Quoted"\nCreator / source',
+        )
+    )
     with TestClient(create_app(settings)) as client:
         created = create_batch(client, seed, "SF001")
         batch_id = created.json()["id"]
@@ -86,6 +96,11 @@ def test_new_approved_export_is_immutable_rfc4180_snapshot_and_csv_get_stays_pen
     assert rows[0]["target_relative_path"] == f"images/SF001/{seed.candidate_ids[0]}.jpg"
     assert rows[0]["previous_relative_path"] == ""
     assert rows[0]["original_url"].endswith("/1/original.jpg")
+    assert rows[0]["creator"] == 'Fish, "Quoted"\nCreator'
+    assert rows[0]["attribution"] == 'Fish, "Quoted"\nCreator / source'
+    decoded = csv_response.content.decode("utf-8-sig")
+    assert '"Fish, ""Quoted""\nCreator"' in decoded
+    assert decoded.splitlines()[0] == ",".join(EXPORT_COLUMNS)
     assert csv_response.headers["content-type"].startswith("text/csv; charset=utf-8")
     assert f"sukaseafood-export-{batch_id}.csv" in csv_response.headers["content-disposition"]
     assert counts.status_code == 200
@@ -246,6 +261,34 @@ def test_species_change_emits_move_and_scope_matches_old_or_new_species(settings
     assert rows[0]["target_relative_path"] == f"images/SF002/{seed.candidate_ids[0]}.jpg"
 
 
+def test_species_and_original_change_emits_redownload_add_with_old_path_cleanup(settings):
+    seed, local = _successful_initial_sync(settings)
+    asyncio.run(
+        mutate(
+            settings,
+            Candidate,
+            seed.candidate_ids[0],
+            species_id=seed.species_ids[1],
+            original_url="https://images.example.test/1/new-content.png",
+            version=2,
+        )
+    )
+    with TestClient(create_app(settings)) as client:
+        batch = create_batch(client, seed)
+        _, rows = download(client, seed, batch.json()["id"])
+
+    assert rows == [
+        {
+            **rows[0],
+            "action": "ADD",
+            "species_code": "SF002",
+            "target_relative_path": f"images/SF002/{seed.candidate_ids[0]}.png",
+            "previous_relative_path": local["target_relative_path"],
+            "original_url": "https://images.example.test/1/new-content.png",
+        }
+    ]
+
+
 def test_metadata_refresh_and_original_url_change_emit_add_but_unchanged_state_does_not(settings):
     seed, local = _successful_initial_sync(settings)
     with TestClient(create_app(settings)) as client:
@@ -373,6 +416,128 @@ def test_mid_rereview_remove_then_later_approval_add_and_inactive_catalog_remove
     assert rows[0]["action"] == "REMOVE"
 
 
+def test_inactive_species_makes_a_locally_present_candidate_removable(settings):
+    seed, local = _successful_initial_sync(settings)
+    asyncio.run(mutate(settings, Species, seed.species_ids[0], active=False))
+
+    with TestClient(create_app(settings)) as client:
+        batch = create_batch(client, seed, "SF001")
+        _, rows = download(client, seed, batch.json()["id"])
+
+    assert len(rows) == 1
+    assert rows[0]["action"] == "REMOVE"
+    assert rows[0]["previous_relative_path"] == local["target_relative_path"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_code",
+    ["../outside", "SF/001", "SF\\001", ".", "CON", "COM1", "sf001", "鱼001"],
+)
+def test_admin_and_export_filter_reject_unsafe_species_codes(settings, unsafe_code):
+    seed = create_seed(settings)
+    create_payload = {
+        "code": unsafe_code,
+        "name_zh": "不安全鱼种",
+        "name_en": "Unsafe fish",
+        "scientific_name": "Piscis unsafe",
+        "reason": "validate safe code boundary",
+    }
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/v1/admin/species",
+            json=create_payload,
+            headers=mao_headers(seed, csrf=True),
+        )
+        exported = client.post(
+            "/v1/admin/exports",
+            json={"species_code": unsafe_code},
+            headers=mao_headers(seed, csrf=True),
+        )
+
+    assert created.status_code == 422
+    assert exported.status_code == 422
+
+
+def test_database_constraint_rejects_unsafe_species_code(settings):
+    create_seed(settings)
+
+    async def insert_unsafe():
+        engine = create_async_engine(settings.DATABASE_URL)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as db:
+            db.add(
+                Species(
+                    code="../outside",
+                    name_zh="不安全鱼种",
+                    name_en="Unsafe fish",
+                    scientific_name="Piscis unsafe",
+                )
+            )
+            with pytest.raises(IntegrityError):
+                await db.commit()
+            await db.rollback()
+        await engine.dispose()
+
+    asyncio.run(insert_unsafe())
+
+
+def test_export_boundary_rejects_corrupted_unsafe_species_without_creating_paths(settings):
+    seed = create_seed(settings)
+
+    async def corrupt_legacy_code():
+        engine = create_async_engine(settings.DATABASE_URL)
+        async with engine.begin() as connection:
+            await connection.execute(text("PRAGMA ignore_check_constraints = ON"))
+            await connection.execute(
+                text("UPDATE species SET code = '../outside' WHERE id = :species_id"),
+                {"species_id": seed.species_ids[0].hex},
+            )
+        await engine.dispose()
+
+    asyncio.run(corrupt_legacy_code())
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/v1/admin/exports",
+            json={},
+            headers=mao_headers(seed, csrf=True),
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "UNSAFE_SPECIES_CODE"
+    assert asyncio.run(load_models(settings, ExportBatch)) == []
+
+
+def test_export_history_and_pending_count_gets_compute_expiry_without_writes(settings):
+    seed = create_seed(settings)
+    with TestClient(create_app(settings)) as client:
+        created = create_batch(client, seed)
+    batch_id = UUID(created.json()["id"])
+    asyncio.run(
+        mutate(
+            settings,
+            ExportBatch,
+            batch_id,
+            expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+    )
+
+    with TestClient(create_app(settings)) as client:
+        history = client.get("/v1/admin/exports", headers=mao_headers(seed))
+        counts = client.get(
+            "/v1/admin/exports/pending-counts", headers=mao_headers(seed)
+        )
+
+    assert history.status_code == 200
+    assert history.json()["items"][0]["status"] == "expired"
+    assert history.json()["items"][0]["expired_at"] is None
+    assert counts.json() == {"SF001": 1, "SF002": 0}
+    stored = asyncio.run(load_models(settings, ExportBatch))[0]
+    audits = asyncio.run(load_models(settings, AuditEvent))
+    assert stored.status == "pending"
+    assert stored.expired_at is None
+    assert [audit.action for audit in audits] == ["EXPORT_BATCH_CREATE"]
+
+
 def test_admin_permissions_csrf_unknown_species_and_stable_zero_pending_counts(settings):
     seed = create_seed(settings, (Decision.REJECTED,))
     with TestClient(create_app(settings)) as client:
@@ -484,3 +649,141 @@ def test_export_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(t
     assert "20260826_05" in ddl
     assert "CREATE UNIQUE INDEX uq_export_batches_pending_scope" in ddl
     assert "original_fingerprint" in ddl
+
+
+def test_populated_revision_04_backfills_canonical_scope_and_reuses_after_reupgrade(tmp_path):
+    from alembic import command
+    from alembic.config import Config
+
+    api_root = Path(__file__).parents[1]
+    database = tmp_path / "populated-export-migration.sqlite3"
+    database_url = f"sqlite+aiosqlite:///{database.as_posix()}"
+    config = Config(api_root / "alembic.ini")
+    config.set_main_option("script_location", str(api_root / "alembic"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "20260826_04")
+    user_id = uuid4()
+    species_id = uuid4()
+    batch_id = uuid4()
+
+    async def seed_revision_04():
+        engine = create_async_engine(database_url)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO users "
+                    "(id, name, role, password_hash, must_change_password, active, "
+                    "failed_login_count, password_version) "
+                    "VALUES (:id, 'Mao', 'admin', 'hash', 0, 1, 0, 1)"
+                ),
+                {"id": user_id.hex},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO species "
+                    "(id, code, name_zh, name_en, scientific_name, active, sort_order) "
+                    "VALUES (:id, 'SF001', '鱼', 'Fish', 'Piscis', 1, 1)"
+                ),
+                {"id": species_id.hex},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO export_batches "
+                    "(id, created_by_id, species_id, receipt_token_hash, status, expires_at) "
+                    "VALUES (:id, :user_id, :species_id, :digest, 'pending', :expires_at)"
+                ),
+                {
+                    "id": batch_id.hex,
+                    "user_id": user_id.hex,
+                    "species_id": species_id.hex,
+                    "digest": "a" * 64,
+                    "expires_at": "2099-01-01 00:00:00+00:00",
+                },
+            )
+        await engine.dispose()
+
+    async def scope_and_reuse():
+        from app.services.exports import create_export_batch
+
+        engine = create_async_engine(database_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as db:
+            scope = await db.scalar(
+                select(ExportBatch.scope_key).where(ExportBatch.id == batch_id)
+            )
+            reused = await create_export_batch(
+                db,
+                user_id,
+                "SF001",
+                "migration-receipt-secret-that-is-long-enough",
+            )
+        await engine.dispose()
+        return scope, reused
+
+    asyncio.run(seed_revision_04())
+    command.upgrade(config, "head")
+    first_scope, first_reuse = asyncio.run(scope_and_reuse())
+    assert first_scope == str(species_id)
+    assert first_reuse.batch.id == batch_id
+    assert first_reuse.created is False
+
+    command.downgrade(config, "20260826_04")
+    command.upgrade(config, "head")
+    second_scope, second_reuse = asyncio.run(scope_and_reuse())
+    assert second_scope == str(species_id)
+    assert second_reuse.batch.id == batch_id
+    assert second_reuse.created is False
+
+
+def test_revision_05_rejects_existing_unsafe_species_codes_before_schema_changes(tmp_path):
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect
+
+    api_root = Path(__file__).parents[1]
+    database = tmp_path / "unsafe-species-migration.sqlite3"
+    database_url = f"sqlite+aiosqlite:///{database.as_posix()}"
+    config = Config(api_root / "alembic.ini")
+    config.set_main_option("script_location", str(api_root / "alembic"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "20260826_04")
+
+    async def seed_and_columns():
+        engine = create_async_engine(database_url)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO species "
+                    "(id, code, name_zh, name_en, scientific_name, active, sort_order) "
+                    "VALUES (:id, '../outside', '鱼', 'Fish', 'Piscis', 1, 1)"
+                ),
+                {"id": uuid4().hex},
+            )
+        async with engine.connect() as connection:
+            columns = await connection.run_sync(
+                lambda sync: {
+                    column["name"]
+                    for column in inspect(sync).get_columns("export_batches")
+                }
+            )
+        await engine.dispose()
+        return columns
+
+    before = asyncio.run(seed_and_columns())
+    assert "scope_key" not in before
+    with pytest.raises(RuntimeError, match=r"unsafe species codes.*\.\./outside"):
+        command.upgrade(config, "head")
+
+    async def columns_after_failure():
+        engine = create_async_engine(database_url)
+        async with engine.connect() as connection:
+            columns = await connection.run_sync(
+                lambda sync: {
+                    column["name"]
+                    for column in inspect(sync).get_columns("export_batches")
+                }
+            )
+        await engine.dispose()
+        return columns
+
+    assert "scope_key" not in asyncio.run(columns_after_failure())
