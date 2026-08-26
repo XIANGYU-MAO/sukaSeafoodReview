@@ -15,6 +15,7 @@ from .receipt import (
     ReceiptError,
     build_receipt,
     load_receipt_file,
+    prepare_receipt_directory,
     save_receipt_file,
     submit_receipt,
     validate_api_base,
@@ -58,8 +59,31 @@ def _ignore_progress(_event: ProgressEvent) -> None:
     return None
 
 
+def _is_cancelled(cancel_event: object) -> bool:
+    checker = getattr(cancel_event, "is_set", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker())
+    except Exception:
+        return True
+
+
+def _cancel_aware_wait(cancel_event: object, delay: float) -> None:
+    waiter = getattr(cancel_event, "wait", None)
+    if callable(waiter):
+        try:
+            waiter(delay)
+            return
+        except Exception:
+            return
+    import time
+
+    time.sleep(delay)
+
+
 def _configure_session(session: requests.Session, request: SyncRequest) -> None:
-    overrides = {
+    session_overrides = {
         key: value
         for key, value in (
             ("http", request.http_proxy),
@@ -68,9 +92,14 @@ def _configure_session(session: requests.Session, request: SyncRequest) -> None:
         )
         if value
     }
-    if not overrides:
+    if not session_overrides:
         return
-    session.proxies.update(overrides)
+    session.proxies.update(session_overrides)
+    transport_overrides = {
+        key: value
+        for key, value in session_overrides.items()
+        if key in {"http", "https"}
+    }
     original_merge = getattr(session, "merge_environment_settings", None)
     if not callable(original_merge):
         return
@@ -86,8 +115,18 @@ def _configure_session(session: requests.Session, request: SyncRequest) -> None:
         if request.no_proxy:
             requested["no_proxy"] = request.no_proxy
         settings = original_merge(url, requested, stream, verify, cert)
+        try:
+            bypass = requests.utils.should_bypass_proxies(
+                url,
+                no_proxy=request.no_proxy or None,
+            )
+        except Exception:
+            bypass = False
+        if bypass:
+            settings["proxies"] = {}
+            return settings
         effective = dict(settings.get("proxies") or {})
-        effective.update(overrides)
+        effective.update(transport_overrides)
         settings["proxies"] = effective
         return settings
 
@@ -107,6 +146,14 @@ def run_sync(
     try:
         api_base = validate_api_base(request.api_base)
         manifest = load_manifest(request.manifest_path)
+        receipt_directory = (
+            prepare_receipt_directory(
+                request.receipt_dir,
+                create=not request.dry_run,
+            )
+            if request.receipt_dir is not None
+            else request.dataset_root
+        )
     except Exception:
         return SyncOutcome(2, "同步参数或增量 CSV 无效", empty_counts)
     if request.dry_run:
@@ -134,13 +181,14 @@ def run_sync(
             cancel_event,
         )
         counts = MappingProxyType(dict(batch_result.counts))
-        if batch_result.cancelled and not batch_result.receipt_items:
+        cancelled = bool(batch_result.cancelled) or _is_cancelled(cancel_event)
+        if cancelled and not batch_result.receipt_items:
             return SyncOutcome(130, "同步已取消", counts, cancelled=True)
         receipt = build_receipt(manifest, batch_result)
-        if batch_result.cancelled:
+        if cancelled or _is_cancelled(cancel_event):
             saved = save_receipt_file(
                 receipt,
-                request.receipt_dir or request.dataset_root,
+                receipt_directory,
             )
             return SyncOutcome(
                 130,
@@ -152,7 +200,7 @@ def run_sync(
         if not request.submit:
             saved = save_receipt_file(
                 receipt,
-                request.receipt_dir or request.dataset_root,
+                receipt_directory,
             )
             return SyncOutcome(4, f"回执已保存，尚未上传：{saved}", counts, saved)
         index_failed = False
@@ -161,10 +209,22 @@ def run_sync(
         except Exception:
             index_failed = True
             receipt_index = None
+        if _is_cancelled(cancel_event):
+            saved = save_receipt_file(
+                receipt,
+                receipt_directory,
+            )
+            return SyncOutcome(
+                130,
+                f"同步已取消，部分回执已保存：{saved}",
+                counts,
+                saved,
+                True,
+            )
         if index_failed:
             saved = save_receipt_file(
                 receipt,
-                request.receipt_dir or request.dataset_root,
+                receipt_directory,
             )
             return SyncOutcome(
                 4,
@@ -179,13 +239,27 @@ def run_sync(
             30.0,
             session=session,
             index=receipt_index,
+            sleep=lambda delay: _cancel_aware_wait(cancel_event, delay),
+            cancelled=lambda: _is_cancelled(cancel_event),
         )
         if submission.code == "SUBMITTED":
             exit_code = 3 if counts["failed"] else 0
             return SyncOutcome(exit_code, "同步完成", counts)
+        if not submission.submitted and _is_cancelled(cancel_event):
+            saved = save_receipt_file(
+                receipt,
+                receipt_directory,
+            )
+            return SyncOutcome(
+                130,
+                f"同步已取消，部分回执已保存：{saved}",
+                counts,
+                saved,
+                True,
+            )
         saved = save_receipt_file(
             receipt,
-            request.receipt_dir or request.dataset_root,
+            receipt_directory,
         )
         return SyncOutcome(4, f"回执未完整上传，已保存：{saved}", counts, saved)
     except ReceiptError:

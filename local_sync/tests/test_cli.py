@@ -153,7 +153,9 @@ def test_shared_sync_workflow_owns_one_session_and_submits_with_csv_token_and_in
         def __init__(self, selected_root: Path) -> None:
             indexes.append(Path(selected_root))
 
-    def submit(receipt, api_base, token, timeout, *, session, index):
+    def submit(receipt, api_base, token, timeout, *, session, index, sleep, cancelled):
+        assert callable(sleep)
+        assert callable(cancelled)
         submitted.append((session, token, index))
         return SubmitResult(True, "SUBMITTED", status="completed", attempts=1)
 
@@ -237,9 +239,11 @@ def test_proxy_overrides_configure_only_the_run_session_and_stay_out_of_repr(
         assert secret not in exposed
 
 
-def test_proxy_overrides_win_over_environment_in_effective_session_settings(
+def test_run_no_proxy_bypasses_override_and_non_bypass_selects_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import requests
+
     from sukaseafood_sync import service
     from sukaseafood_sync.receipt import SubmitResult
 
@@ -255,21 +259,25 @@ def test_proxy_overrides_win_over_environment_in_effective_session_settings(
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HTTP_PROXY", environment_http)
     monkeypatch.setenv("HTTPS_PROXY", environment_https)
-    effective: list[dict[str, str]] = []
+    selected: list[str | None] = []
 
     class Engine:
         def __init__(self, *, session: object) -> None:
             self.session = session
 
         def run(self, manifest, selected_root, callbacks, cancel_event):
-            settings = self.session.merge_environment_settings(
+            for url in (
                 "https://bypass.example.test/resource",
-                {},
-                False,
-                self.session.verify,
-                self.session.cert,
-            )
-            effective.append(dict(settings["proxies"]))
+                "https://public.example.test/resource",
+            ):
+                settings = self.session.merge_environment_settings(
+                    url,
+                    {},
+                    False,
+                    self.session.verify,
+                    self.session.cert,
+                )
+                selected.append(requests.utils.select_proxy(url, settings["proxies"]))
             return SimpleNamespace(
                 counts={"succeeded": 1, "failed": 0, "skipped": 0},
                 receipt_items=(object(),),
@@ -297,9 +305,80 @@ def test_proxy_overrides_win_over_environment_in_effective_session_settings(
     )
 
     assert outcome.exit_code == 0
-    assert effective[0]["http"] == override_http
-    assert effective[0]["https"] == override_https
-    assert effective[0]["no_proxy"] == override_no_proxy
+    assert selected == [None, override_https]
+
+
+@pytest.mark.parametrize("no_proxy_override", [None, ""])
+def test_environment_no_proxy_still_bypasses_explicit_proxy_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_proxy_override: str | None,
+) -> None:
+    import requests
+
+    from sukaseafood_sync import service
+    from sukaseafood_sync.receipt import SubmitResult
+
+    manifest_path = write_manifest(tmp_path)
+    root = tmp_path / "training"
+    root.mkdir()
+    proxy_secret = "http://private-user:private-pass@override.example:9443"
+    for name in (
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "private.example.test")
+    selected: list[str | None] = []
+
+    class Engine:
+        def __init__(self, *, session: object) -> None:
+            self.session = session
+
+        def run(self, manifest, selected_root, callbacks, cancel_event):
+            url = "https://private.example.test/resource"
+            settings = self.session.merge_environment_settings(
+                url,
+                {},
+                False,
+                self.session.verify,
+                self.session.cert,
+            )
+            selected.append(requests.utils.select_proxy(url, settings["proxies"]))
+            return SimpleNamespace(
+                counts={"succeeded": 1, "failed": 0, "skipped": 0},
+                receipt_items=(object(),),
+                cancelled=False,
+            )
+
+    monkeypatch.setattr(service, "SyncEngine", Engine)
+    monkeypatch.setattr(service, "build_receipt", lambda *_args: object())
+    monkeypatch.setattr(service, "SyncIndex", lambda _root: object())
+    monkeypatch.setattr(
+        service,
+        "submit_receipt",
+        lambda *_args, **_kwargs: SubmitResult(True, "SUBMITTED"),
+    )
+
+    outcome = service.run_sync(
+        service.SyncRequest(
+            manifest_path,
+            root,
+            https_proxy=proxy_secret,
+            no_proxy=no_proxy_override,
+        ),
+        Event(),
+    )
+
+    assert outcome.exit_code == 0
+    assert selected == [None]
+    assert proxy_secret not in repr(outcome) + outcome.message
 
 
 def test_no_submit_saves_offline_receipt_and_exit_four_overrides_item_failures(
@@ -375,6 +454,143 @@ def test_no_submit_saves_offline_receipt_and_exit_four_overrides_item_failures(
     assert outcome.offline_receipt_path == saved_path
     assert outcome.counts["failed"] == 1
     assert str(saved_path) in outcome.message
+
+
+def test_receipt_dir_existing_json_is_rejected_before_engine_and_left_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sukaseafood_sync import service
+
+    manifest_path = write_manifest(tmp_path)
+    root = tmp_path / "training"
+    root.mkdir()
+    existing_file = tmp_path / "notes.json"
+    original = b'{"important":"keep"}\n'
+    existing_file.write_bytes(original)
+
+    monkeypatch.setattr(
+        service.requests,
+        "Session",
+        lambda: pytest.fail("invalid receipt directory must fail before Session setup"),
+    )
+    monkeypatch.setattr(
+        service,
+        "SyncEngine",
+        lambda **_kwargs: pytest.fail("invalid receipt directory must fail before engine"),
+    )
+
+    outcome = service.run_sync(
+        service.SyncRequest(
+            manifest_path,
+            root,
+            receipt_dir=existing_file,
+            submit=False,
+        ),
+        Event(),
+    )
+
+    assert outcome.exit_code == 2
+    assert existing_file.read_bytes() == original
+    assert outcome.offline_receipt_path is None
+
+
+def test_creatable_receipt_dir_uses_canonical_batch_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sukaseafood_sync import service
+    from sukaseafood_sync.engine import BatchResult, ReceiptItem
+
+    manifest_path = write_manifest(tmp_path)
+    root = tmp_path / "training"
+    root.mkdir()
+    receipt_dir = tmp_path / "new" / "receipts"
+
+    class Session:
+        proxies: dict[str, str] = {}
+
+        def close(self) -> None:
+            return None
+
+    class Engine:
+        def __init__(self, *, session: object) -> None:
+            pass
+
+        def run(self, manifest, selected_root, callbacks, cancel_event) -> BatchResult:
+            row = manifest.rows[0]
+            return BatchResult(
+                str(manifest.batch_id),
+                {"succeeded": 1, "failed": 0, "skipped": 0},
+                (
+                    ReceiptItem(
+                        str(row.candidate_id),
+                        str(row.review_id),
+                        row.review_version,
+                        "SUCCEEDED",
+                        "a" * 64,
+                        row.target_relative_path.as_posix(),
+                        None,
+                    ),
+                ),
+                False,
+                1,
+                1,
+                selected_root / "operations.jsonl",
+            )
+
+    monkeypatch.setattr(service.requests, "Session", Session)
+    monkeypatch.setattr(service, "SyncEngine", Engine)
+
+    outcome = service.run_sync(
+        service.SyncRequest(
+            manifest_path,
+            root,
+            receipt_dir=receipt_dir,
+            submit=False,
+        ),
+        Event(),
+    )
+
+    expected = receipt_dir / f"download_receipt-{BATCH_ID}.json"
+    assert outcome.exit_code == 4
+    assert outcome.offline_receipt_path == expected
+    assert expected.is_file()
+    assert list(receipt_dir.iterdir()) == [expected]
+
+
+def test_receipt_dir_symlink_is_rejected_before_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sukaseafood_sync import service
+
+    manifest_path = write_manifest(tmp_path)
+    root = tmp_path / "training"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    receipt_link = tmp_path / "receipt-link"
+    try:
+        receipt_link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks unavailable")
+
+    monkeypatch.setattr(
+        service.requests,
+        "Session",
+        lambda: pytest.fail("unsafe receipt directory must fail before Session setup"),
+    )
+
+    outcome = service.run_sync(
+        service.SyncRequest(
+            manifest_path,
+            root,
+            receipt_dir=receipt_link,
+            submit=False,
+        ),
+        Event(),
+    )
+
+    assert outcome.exit_code == 2
+    assert list(outside.iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -581,6 +797,102 @@ def test_cancellation_saves_nonempty_partial_receipt_without_submit_and_returns_
     assert outcome.offline_receipt_path == saved_path
 
 
+def test_late_cancel_after_engine_saves_partial_receipt_before_submit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sukaseafood_sync import service
+
+    manifest_path = write_manifest(tmp_path)
+    root = tmp_path / "training"
+    root.mkdir()
+    saved_path = root / f"download_receipt-{BATCH_ID}.json"
+    cancel_event = Event()
+
+    class Session:
+        proxies: dict[str, str] = {}
+
+        def close(self) -> None:
+            return None
+
+    class Engine:
+        def __init__(self, *, session: object) -> None:
+            pass
+
+        def run(self, manifest, selected_root, callbacks, received_event):
+            assert received_event is cancel_event
+            received_event.set()
+            return SimpleNamespace(
+                counts={"succeeded": 1, "failed": 0, "skipped": 0},
+                receipt_items=(object(),),
+                cancelled=False,
+            )
+
+    monkeypatch.setattr(service.requests, "Session", Session)
+    monkeypatch.setattr(service, "SyncEngine", Engine)
+    monkeypatch.setattr(service, "build_receipt", lambda *_args: object())
+    monkeypatch.setattr(
+        service,
+        "submit_receipt",
+        lambda *_args, **_kwargs: pytest.fail("late cancellation must not upload"),
+    )
+    monkeypatch.setattr(service, "save_receipt_file", lambda _receipt, _selected: saved_path)
+
+    outcome = service.run_sync(service.SyncRequest(manifest_path, root), cancel_event)
+
+    assert outcome.exit_code == 130
+    assert outcome.cancelled is True
+    assert outcome.offline_receipt_path == saved_path
+
+
+def test_successful_submit_wins_if_cancel_arrives_after_server_acknowledgement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sukaseafood_sync import service
+    from sukaseafood_sync.receipt import SubmitResult
+
+    manifest_path = write_manifest(tmp_path)
+    root = tmp_path / "training"
+    root.mkdir()
+    cancel_event = Event()
+
+    class Session:
+        proxies: dict[str, str] = {}
+
+        def close(self) -> None:
+            return None
+
+    class Engine:
+        def __init__(self, *, session: object) -> None:
+            pass
+
+        def run(self, manifest, selected_root, callbacks, received_event):
+            return SimpleNamespace(
+                counts={"succeeded": 1, "failed": 0, "skipped": 0},
+                receipt_items=(object(),),
+                cancelled=False,
+            )
+
+    def submit(*_args, **_kwargs):
+        cancel_event.set()
+        return SubmitResult(True, "SUBMITTED", status="completed", attempts=1)
+
+    monkeypatch.setattr(service.requests, "Session", Session)
+    monkeypatch.setattr(service, "SyncEngine", Engine)
+    monkeypatch.setattr(service, "build_receipt", lambda *_args: object())
+    monkeypatch.setattr(service, "SyncIndex", lambda _root: object())
+    monkeypatch.setattr(service, "submit_receipt", submit)
+    monkeypatch.setattr(
+        service,
+        "save_receipt_file",
+        lambda *_args: pytest.fail("acknowledged receipt must not be saved as cancelled"),
+    )
+
+    outcome = service.run_sync(service.SyncRequest(manifest_path, root), cancel_event)
+
+    assert outcome.exit_code == 0
+    assert outcome.cancelled is False
+
+
 def test_cancellation_before_any_item_returns_130_without_empty_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -630,6 +942,60 @@ def test_cancellation_before_any_item_returns_130_without_empty_receipt(
     assert outcome.exit_code == 130
     assert outcome.cancelled is True
     assert outcome.offline_receipt_path is None
+
+
+def test_cli_sigint_cooperatively_sets_shared_event_and_reports_partial_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sukaseafood_sync import cli
+    from sukaseafood_sync.service import SyncOutcome
+
+    manifest_path = tmp_path / "batch.csv"
+    root = tmp_path / "training"
+    saved = root / f"download_receipt-{BATCH_ID}.json"
+    installed: list[object] = []
+    previous = object()
+
+    class SignalModule:
+        SIGINT = 2
+
+        @staticmethod
+        def getsignal(signum: int) -> object:
+            assert signum == 2
+            return previous
+
+        @staticmethod
+        def signal(signum: int, handler: object) -> None:
+            assert signum == 2
+            installed.append(handler)
+
+    def run(_request, cancel_event):
+        assert installed and callable(installed[-1])
+        installed[-1](2, None)
+        assert cancel_event.is_set()
+        return SyncOutcome(
+            130,
+            f"同步已取消，部分回执已保存：{saved}",
+            {"succeeded": 1, "failed": 0, "skipped": 0},
+            saved,
+            True,
+        )
+
+    monkeypatch.setattr(cli, "signal", SignalModule, raising=False)
+    monkeypatch.setattr(cli, "run_sync", run)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    exit_code = cli.main(
+        ["sync", str(manifest_path), str(root)],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 130
+    assert str(saved) in stdout.getvalue()
+    assert stderr.getvalue() == ""
+    assert installed[-1] is previous
 
 
 def test_offline_save_failure_returns_stable_two_and_closes_session_secret_free(

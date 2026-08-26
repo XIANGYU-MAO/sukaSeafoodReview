@@ -6,6 +6,7 @@ from email.utils import format_datetime
 import json
 import os
 from pathlib import Path, PurePosixPath
+from threading import Event
 from typing import Any
 from uuid import UUID
 
@@ -731,6 +732,34 @@ def test_timeout_uses_fallback_delay_then_succeeds() -> None:
     assert result.attempts == 2
     assert sleeps == [1.0]
     assert "timeout details secret" not in repr(result)
+
+
+def test_cancel_during_retry_wait_stops_before_another_submission_attempt() -> None:
+    cancel_event = Event()
+    session = FakeSession(
+        [
+            requests.ConnectionError("private network detail"),
+            AssertionError("cancelled retry must not send again"),
+        ]
+    )
+
+    def cancel_wait(_delay: float) -> None:
+        cancel_event.set()
+
+    result = submit_receipt(
+        build_receipt(manifest(), batch()),
+        "https://api.example.test/sukaseafood/api/v1",
+        RECEIPT_TOKEN,
+        5,
+        session=session,
+        sleep=cancel_wait,
+        cancelled=cancel_event.is_set,
+    )
+
+    assert result.code == "CANCELLED"
+    assert result.attempts == 1
+    assert len(session.sent) == 1
+    assert "private network detail" not in repr(result)
 
 
 def test_retry_after_http_date_is_capped_at_sixty_seconds() -> None:

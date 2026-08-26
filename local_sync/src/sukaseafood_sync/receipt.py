@@ -509,6 +509,7 @@ def submit_receipt(
     index: SyncIndex | None = None,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    cancelled: Callable[[], bool] = lambda: False,
 ) -> SubmitResult:
     """Submit a receipt without merging origin session credentials or cookies."""
 
@@ -521,6 +522,11 @@ def submit_receipt(
         return _safe_result("INVALID_TOKEN", 0)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0 or not math.isfinite(timeout):
         return _safe_result("INVALID_TIMEOUT", 0)
+    try:
+        if cancelled():
+            return _safe_result("CANCELLED", 0)
+    except Exception:
+        return _safe_result("CANCELLED", 0)
 
     owned = session is None
     transport = requests.Session() if owned else session
@@ -546,6 +552,11 @@ def submit_receipt(
     attempts = 0
     try:
         for attempts in range(1, 4):
+            try:
+                if cancelled():
+                    return _safe_result("CANCELLED", attempts - 1)
+            except Exception:
+                return _safe_result("CANCELLED", attempts - 1)
             response = None
             try:
                 settings = transport.merge_environment_settings(
@@ -566,6 +577,11 @@ def submit_receipt(
                 if attempts == 3:
                     return _safe_result("RETRY_EXHAUSTED", attempts, retryable=True)
                 sleep(float(attempts))
+                try:
+                    if cancelled():
+                        return _safe_result("CANCELLED", attempts)
+                except Exception:
+                    return _safe_result("CANCELLED", attempts)
                 continue
             except requests.RequestException:
                 return _safe_result("TRANSPORT_FAILED", attempts)
@@ -633,6 +649,11 @@ def submit_receipt(
                     pass
             assert retry_delay is not None
             sleep(retry_delay)
+            try:
+                if cancelled():
+                    return _safe_result("CANCELLED", attempts)
+            except Exception:
+                return _safe_result("CANCELLED", attempts)
             continue
         return _safe_result("RETRY_EXHAUSTED", attempts, retryable=True)
     finally:
@@ -666,6 +687,47 @@ def _safe_target(target: Path) -> bool:
     except OSError:
         return False
     return stat.S_ISREG(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode) and not _is_reparse(metadata)
+
+
+def prepare_receipt_directory(
+    path: str | os.PathLike[str],
+    *,
+    create: bool,
+) -> Path:
+    """Validate a safe receipt directory and optionally create missing components."""
+
+    try:
+        requested = Path(path)
+    except (TypeError, ValueError):
+        raise ReceiptError("UNSAFE_RECEIPT_DIRECTORY") from None
+    try:
+        requested.lstat()
+    except FileNotFoundError:
+        cursor = requested.parent
+        while True:
+            try:
+                cursor.lstat()
+                break
+            except FileNotFoundError:
+                parent = cursor.parent
+                if parent == cursor:
+                    raise ReceiptError("UNSAFE_RECEIPT_DIRECTORY") from None
+                cursor = parent
+            except (OSError, RuntimeError, ValueError):
+                raise ReceiptError("UNSAFE_RECEIPT_DIRECTORY") from None
+        if not _validate_parent(cursor):
+            raise ReceiptError("UNSAFE_RECEIPT_DIRECTORY")
+        if not create:
+            return requested
+        try:
+            requested.mkdir(parents=True, exist_ok=True)
+        except (OSError, RuntimeError, ValueError):
+            raise ReceiptError("UNSAFE_RECEIPT_DIRECTORY") from None
+    except (OSError, RuntimeError, ValueError):
+        raise ReceiptError("UNSAFE_RECEIPT_DIRECTORY") from None
+    if not _validate_parent(requested):
+        raise ReceiptError("UNSAFE_RECEIPT_DIRECTORY")
+    return requested
 
 
 def save_receipt_file(receipt: Receipt, path: str | os.PathLike[str]) -> Path:

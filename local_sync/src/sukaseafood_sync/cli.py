@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from pathlib import Path
+import signal
 import sys
 from threading import Event
 from typing import Sequence, TextIO
@@ -104,7 +105,17 @@ def main(
         )
         return outcome.exit_code
     if arguments.command == "sync":
+        cancel_event = Event()
+        previous_sigint: object | None = None
+        sigint_installed = False
+
+        def request_cancel(_signum: int, _frame: object) -> None:
+            cancel_event.set()
+
         try:
+            previous_sigint = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, request_cancel)
+            sigint_installed = True
             outcome = run_sync(
                 SyncRequest(
                     manifest_path=arguments.batch_csv,
@@ -117,7 +128,7 @@ def main(
                     https_proxy=arguments.https_proxy,
                     no_proxy=arguments.no_proxy,
                 ),
-                Event(),
+                cancel_event,
             )
         except KeyboardInterrupt:
             print("同步已取消", file=errors)
@@ -125,6 +136,9 @@ def main(
         except Exception:
             print("同步参数或文件无效", file=errors)
             return 2
+        finally:
+            if sigint_installed:
+                signal.signal(signal.SIGINT, previous_sigint)
         print(
             outcome.message,
             file=errors if outcome.exit_code == 2 else output,
