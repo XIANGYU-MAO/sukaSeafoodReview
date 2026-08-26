@@ -1,9 +1,15 @@
-import { screen } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
-import { authState, jsonResponse, renderWithAuth } from "../test/helpers";
+import {
+  authState,
+  deferred,
+  jsonResponse,
+  renderWithAuth,
+  renderWithStrictAuth,
+} from "../test/helpers";
 
 describe("authenticated password and logout flows", () => {
   it("gates protected UI until a forced password change succeeds with CSRF", async () => {
@@ -132,6 +138,66 @@ describe("authenticated password and logout flows", () => {
     expect(screen.getByText("审核工作区即将上线")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重试退出" }));
     expect(await screen.findByRole("heading", { name: "登录审核平台" })).toBeInTheDocument();
+  });
+
+  it("keeps logout authoritative when an older StrictMode bootstrap succeeds late", async () => {
+    const staleBootstrap = deferred<Response>();
+    const activeBootstrap = deferred<Response>();
+    let meCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          meCalls += 1;
+          return meCalls === 1 ? staleBootstrap.promise : activeBootstrap.promise;
+        }
+        if (url.endsWith("/auth/logout")) return Promise.resolve(new Response(null, { status: 204 }));
+        if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+        return Promise.reject(new Error(`Unexpected request: ${url}`));
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderWithStrictAuth(<App />);
+    await waitFor(() => expect(meCalls).toBe(2));
+    await act(async () => activeBootstrap.resolve(jsonResponse(authState)));
+    await user.click(await screen.findByRole("button", { name: "退出登录" }));
+    expect(await screen.findByRole("heading", { name: "登录审核平台" })).toBeInTheDocument();
+
+    await act(async () => staleBootstrap.resolve(jsonResponse(authState)));
+    expect(screen.getByRole("heading", { name: "登录审核平台" })).toBeInTheDocument();
+    expect(screen.queryByText("审核工作区即将上线")).not.toBeInTheDocument();
+  });
+
+  it("clears voluntary password navigation across password change and the next login", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) return jsonResponse(authState);
+      if (url.endsWith("/auth/change-password")) return new Response(null, { status: 204 });
+      if (url.endsWith("/auth/names")) return jsonResponse(fixedNames());
+      if (url.endsWith("/auth/login")) {
+        return jsonResponse({ ...authState, csrf_token: "next-session-csrf" });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    renderWithAuth(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "修改密码 / Change password" }));
+    await user.type(screen.getByLabelText("当前密码"), "current-password");
+    await user.type(screen.getByLabelText("新密码"), "a-long-new-password");
+    await user.type(screen.getByLabelText("确认新密码"), "a-long-new-password");
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
+    expect(await screen.findByRole("heading", { name: "登录审核平台" })).toBeInTheDocument();
+
+    await user.click(await screen.findByRole("radio", { name: "Hassan" }));
+    await user.type(screen.getByLabelText("密码"), "a-long-new-password");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(await screen.findByText("审核工作区即将上线")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "修改密码" })).not.toBeInTheDocument();
   });
 });
 

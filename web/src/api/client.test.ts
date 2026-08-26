@@ -33,6 +33,46 @@ describe("API client", () => {
     await expect(request("/auth/logout", { method: "POST", csrfToken: "csrf" })).resolves.toBeUndefined();
   });
 
+  it("passes an AbortSignal to fetch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    await request<{ ok: boolean }>("/auth/me", { signal: controller.signal });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/sukaseafood/api/v1/auth/me",
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
+  it.each([
+    ["text/html", "<html>upstream secret</html>"],
+    ["application/json", "{not-valid-json"],
+  ])("rejects a successful typed response with invalid %s content safely", async (contentType, body) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(body, {
+          status: 200,
+          headers: { "Content-Type": contentType },
+        }),
+      ),
+    );
+
+    let failure: unknown;
+    try {
+      await request<{ ok: boolean }>("/auth/me");
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(200);
+    expect((failure as ApiError).detail).not.toContain("upstream secret");
+    expect((failure as ApiError).detail).not.toContain("not-valid-json");
+  });
+
   it("preserves stable JSON details without exposing non-JSON server bodies", async () => {
     vi.stubGlobal(
       "fetch",

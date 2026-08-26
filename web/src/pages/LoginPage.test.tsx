@@ -1,9 +1,15 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
-import { authState, jsonResponse, renderWithAuth } from "../test/helpers";
+import {
+  authState,
+  deferred,
+  jsonResponse,
+  renderWithAuth,
+  renderWithStrictAuth,
+} from "../test/helpers";
 
 const serverNames = ["Hassan", "Mao", "Xinhui", "Wahid", "Sharmaa", "Yiming"];
 
@@ -20,32 +26,35 @@ describe("login page", () => {
     );
   });
 
-  it("renders only the six fixed ordered names even when the server payload is unexpected", async () => {
+  it("renders the exact six fixed ordered names from a valid server payload", async () => {
+    renderWithAuth(<App />);
+
+    const radios = await screen.findAllByRole("radio");
+    expect(radios.map((radio) => radio.textContent?.replace("✓", "").trim())).toEqual(serverNames);
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["unexpected name", [...serverNames.map((name) => ({ name })), { name: "Intruder" }]],
+    ["duplicate name", [...serverNames.map((name) => ({ name })), { name: "Hassan" }]],
+    ["missing name", serverNames.slice(0, 5).map((name) => ({ name }))],
+    ["non-array body", { name: "Hassan" }],
+    ["malformed item", [...serverNames.map((name) => ({ name })), {}]],
+  ])("rejects a names payload with %s as a retryable closed-list failure", async (_label, payload) => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
-        if (url.endsWith("/auth/names")) {
-          return jsonResponse([
-            { name: "Yiming" },
-            { name: "Intruder" },
-            { name: "Hassan" },
-            { name: "Mao" },
-            { name: "Xinhui" },
-            { name: "Wahid" },
-            { name: "Sharmaa" },
-          ]);
-        }
+        if (url.endsWith("/auth/names")) return jsonResponse(payload);
         throw new Error(`Unexpected request: ${url}`);
       }),
     );
 
     renderWithAuth(<App />);
 
-    const radios = await screen.findAllByRole("radio");
-    expect(radios.map((radio) => radio.textContent?.replace("✓", "").trim())).toEqual(serverNames);
-    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(await screen.findByText("无法载入成员名单")).toBeInTheDocument();
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
   });
 
   it("loads names as a retryable closed list instead of inventing a text identity input", async () => {
@@ -176,5 +185,63 @@ describe("login page", () => {
     expect(localStorage).toHaveLength(0);
     expect(sessionStorage).toHaveLength(0);
     await waitFor(() => expect(screen.queryByDisplayValue("storage-secret-password")).not.toBeInTheDocument());
+  });
+
+  it("rejects a malformed successful login payload without authenticating", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
+        if (url.endsWith("/auth/names")) return jsonResponse(serverNames.map((name) => ({ name })));
+        if (url.endsWith("/auth/login")) return jsonResponse({});
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderWithAuth(<App />);
+    await user.click(await screen.findByRole("radio", { name: "Hassan" }));
+    await user.type(screen.getByLabelText("密码"), "temporary-password");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("服务暂时不可用，请重试。");
+    expect(screen.queryByText("审核工作区即将上线")).not.toBeInTheDocument();
+  });
+
+  it("aborts replayed and unmounted names loads without showing a stale error", async () => {
+    const staleNames = deferred<Response>();
+    const activeNames = deferred<Response>();
+    const nameSignals: AbortSignal[] = [];
+    let namesCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse({}, 401));
+        if (url.endsWith("/auth/names")) {
+          nameSignals.push(init?.signal as AbortSignal);
+          namesCalls += 1;
+          return namesCalls === 1 ? staleNames.promise : activeNames.promise;
+        }
+        return Promise.reject(new Error(`Unexpected request: ${url}`));
+      }),
+    );
+
+    const view = renderWithStrictAuth(<App />);
+    await waitFor(() => expect(namesCalls).toBe(2));
+    await act(async () => {
+      activeNames.resolve(jsonResponse(serverNames.map((name) => ({ name }))));
+    });
+    expect(await screen.findAllByRole("radio")).toHaveLength(6);
+
+    await act(async () => staleNames.resolve(jsonResponse([{ name: "Intruder" }])));
+    expect(nameSignals[0]).toBeInstanceOf(AbortSignal);
+    expect(nameSignals[0].aborted).toBe(true);
+    expect(screen.queryByText("无法载入成员名单")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("radio")).toHaveLength(6);
+
+    view.unmount();
+    expect(nameSignals[1].aborted).toBe(true);
   });
 });

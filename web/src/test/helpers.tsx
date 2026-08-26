@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { StrictMode, type ReactNode } from "react";
 import { render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -25,4 +25,24 @@ export function renderWithAuth(ui: ReactNode, initialEntry = "/") {
       <AuthProvider>{ui}</AuthProvider>
     </MemoryRouter>,
   );
+}
+
+export function renderWithStrictAuth(ui: ReactNode, initialEntry = "/") {
+  return render(
+    <StrictMode>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <AuthProvider>{ui}</AuthProvider>
+      </MemoryRouter>
+    </StrictMode>,
+  );
+}
+
+export function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }

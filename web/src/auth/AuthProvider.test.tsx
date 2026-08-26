@@ -1,9 +1,15 @@
-import { screen } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
-import { authState, jsonResponse, renderWithAuth } from "../test/helpers";
+import {
+  authState,
+  deferred,
+  jsonResponse,
+  renderWithAuth,
+  renderWithStrictAuth,
+} from "../test/helpers";
 
 describe("authentication bootstrap", () => {
   it("shows a stable accessible loading state then restores a refresh session", async () => {
@@ -53,4 +59,59 @@ describe("authentication bootstrap", () => {
     await user.click(screen.getByRole("button", { name: "重试连接" }));
     expect(await screen.findByText("审核工作区即将上线")).toBeInTheDocument();
   });
+
+  it.each([
+    ["missing fields", {}],
+    ["unknown identity", { ...authState, name: "Intruder" }],
+    ["invalid role", { ...authState, role: "owner" }],
+    ["wrong fixed role", { ...authState, role: "admin" }],
+    ["empty CSRF", { ...authState, csrf_token: "" }],
+    ["invalid id", { ...authState, id: "not-a-uuid" }],
+  ])("treats a 200 bootstrap payload with %s as a retryable protocol failure", async (_label, payload) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(payload)));
+
+    renderWithAuth(<App />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法连接审核服务");
+    expect(screen.queryByText("审核工作区即将上线")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "登录审核平台" })).not.toBeInTheDocument();
+  });
+
+  it("aborts StrictMode replay and ignores its stale 401 after a newer login", async () => {
+    const staleBootstrap = deferred<Response>();
+    const activeBootstrap = deferred<Response>();
+    const bootstrapSignals: AbortSignal[] = [];
+    let meCalls = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) {
+        bootstrapSignals.push(init?.signal as AbortSignal);
+        meCalls += 1;
+        return meCalls === 1 ? staleBootstrap.promise : activeBootstrap.promise;
+      }
+      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+      if (url.endsWith("/auth/login")) return Promise.resolve(jsonResponse(authState));
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderWithStrictAuth(<App />);
+    await waitFor(() => expect(meCalls).toBe(2));
+    await act(async () => activeBootstrap.resolve(jsonResponse({}, 401)));
+    await user.click(await screen.findByRole("radio", { name: "Hassan" }));
+    await user.type(screen.getByLabelText("密码"), "temporary-password");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+    expect(await screen.findByText("审核工作区即将上线")).toBeInTheDocument();
+
+    await act(async () => staleBootstrap.resolve(jsonResponse({}, 401)));
+
+    expect(bootstrapSignals[0]).toBeInstanceOf(AbortSignal);
+    expect(bootstrapSignals[0].aborted).toBe(true);
+    expect(screen.getByText("审核工作区即将上线")).toBeInTheDocument();
+  });
 });
+
+function fixedNames() {
+  return ["Hassan", "Mao", "Xinhui", "Wahid", "Sharmaa", "Yiming"].map((name) => ({ name }));
+}
