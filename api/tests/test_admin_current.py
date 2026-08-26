@@ -267,6 +267,24 @@ def test_admin_review_history_cross_user_filters_all_attempts_and_paginates(sett
     assert "token" not in filtered.text.lower()
 
 
+def test_admin_reviews_reject_overflowing_date_to_and_accept_safe_upper_bound(settings):
+    seed, _ = asyncio.run(seed_current_database(settings))
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        overflowing = client.get(
+            "/v1/admin/reviews",
+            params={"date_to": "9999-12-31"},
+            headers=admin_headers(seed),
+        )
+        safe = client.get(
+            "/v1/admin/reviews",
+            params={"date_to": "9998-12-31"},
+            headers=admin_headers(seed),
+        )
+
+    assert overflowing.status_code == 422
+    assert safe.status_code == 200
+
+
 def test_admin_review_edit_uses_canonical_mapping_revision_version_and_audit(settings):
     seed, review_ids = asyncio.run(seed_current_database(settings))
     review_id = review_ids[0]

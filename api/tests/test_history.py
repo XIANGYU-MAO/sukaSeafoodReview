@@ -212,6 +212,25 @@ def test_history_rejects_invalid_filters(settings, params):
     assert response.status_code == 422
 
 
+def test_history_rejects_overflowing_date_to_and_accepts_safe_upper_bound(settings):
+    data = asyncio.run(seed_history_database(settings))
+    seed = data["seed"]
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        overflowing = client.get(
+            "/v1/history",
+            params={"date_to": "9999-12-31"},
+            headers=review_headers(seed.hassan_token),
+        )
+        safe = client.get(
+            "/v1/history",
+            params={"date_to": "9998-12-31"},
+            headers=review_headers(seed.hassan_token),
+        )
+
+    assert overflowing.status_code == 422
+    assert safe.status_code == 200
+
+
 def test_history_reviewer_override_is_forbidden_even_for_mao(settings):
     data = asyncio.run(seed_history_database(settings))
     seed = data["seed"]
