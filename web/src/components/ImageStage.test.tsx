@@ -30,9 +30,13 @@ describe("ImageStage", () => {
     expect(screen.getByRole("status", { name: "正在加载图片" })).toBeVisible();
     const image = screen.getByRole("img", { name: props.alt });
     expect(image).toHaveAttribute("src", props.previewUrl);
+    expect(screen.getByRole("link", { name: "打开来源页面" })).toHaveAttribute("href", props.sourceUrl);
+    expect(screen.getByRole("link", { name: "打开原图" })).toHaveAttribute("href", props.originalUrl);
     fireEvent.load(image);
 
     expect(screen.queryByRole("status", { name: "正在加载图片" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "打开来源页面" })).toHaveLength(1);
+    expect(screen.getAllByRole("link", { name: "打开原图" })).toHaveLength(1);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -45,6 +49,8 @@ describe("ImageStage", () => {
     expect(screen.queryByRole("status", { name: "正在加载图片" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新加载图片" })).toBeVisible();
     expect(screen.getByRole("button", { name: "图片链接失效" })).toBeVisible();
+    expect(screen.getAllByRole("link", { name: "打开来源页面" })).toHaveLength(1);
+    expect(screen.getAllByRole("link", { name: "打开原图" })).toHaveLength(1);
     for (const link of screen.getAllByRole("link")) {
       expect(link).toHaveAttribute("target", "_blank");
       expect(link).toHaveAttribute("rel", "noopener noreferrer");
@@ -52,6 +58,15 @@ describe("ImageStage", () => {
 
     await user.click(screen.getByRole("button", { name: "图片链接失效" }));
     expect(onImageUnavailable).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the retained image-unavailable payload with an explicit pressed and visible cue", () => {
+    renderStage({ imageUnavailableSelected: true });
+    fireEvent.error(screen.getByRole("img"));
+
+    const unavailable = screen.getByRole("button", { name: "图片链接失效" });
+    expect(unavailable).toHaveAttribute("aria-pressed", "true");
+    expect(unavailable).toHaveTextContent("✓");
   });
 
   it("remounts on retry and ignores stale load/error events from the prior attempt", async () => {

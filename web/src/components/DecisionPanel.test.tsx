@@ -8,10 +8,11 @@ import { DecisionPanel } from "./DecisionPanel";
 
 function renderPanel(
   overrides: Partial<ComponentProps<typeof DecisionPanel>> = {},
+  initialLocale: "zh" | "en" = "zh",
 ) {
   const onSubmit = vi.fn();
   const result = render(
-    <I18nProvider initialLocale="zh">
+    <I18nProvider initialLocale={initialLocale}>
       <DecisionPanel onSubmit={onSubmit} pending={false} {...overrides} />
     </I18nProvider>,
   );
@@ -37,6 +38,30 @@ describe("DecisionPanel", () => {
       notes: null,
     });
     expect(screen.queryByRole("button", { name: /保存/ })).not.toBeInTheDocument();
+  });
+
+  it("renders the exact retained main or rejection payload as a non-color selected state", () => {
+    const approved = renderPanel({
+      selectedPayload: { decision: "APPROVED", rejection_reason: null, notes: null },
+    });
+    expect(screen.getByRole("button", { name: "保留 (K)" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "保留 (K)" })).toHaveTextContent("✓");
+    expect(screen.getByRole("button", { name: "不确定 (U)" })).toHaveAttribute("aria-pressed", "false");
+    approved.unmount();
+
+    renderPanel(
+      {
+        selectedPayload: {
+          decision: "REJECTED",
+          rejection_reason: "OTHER",
+          notes: "fin detail",
+        },
+      },
+      "en",
+    );
+    expect(screen.getByRole("button", { name: "Reject (R)" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("radio", { name: "Other" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("textbox", { name: "Other reason notes" })).toHaveValue("fin detail");
   });
 
   it("requires one rejection reason from ten wrapping pills instead of a combobox", async () => {
@@ -101,16 +126,36 @@ describe("DecisionPanel", () => {
       fireEvent.keyDown(target, { key: "k" });
       target.remove();
     }
-    const editable = document.createElement("div");
-    editable.setAttribute("contenteditable", "true");
-    document.body.append(editable);
-    fireEvent.keyDown(editable, { key: "k" });
-    editable.remove();
-    const ariaInteractive = document.createElement("div");
-    ariaInteractive.setAttribute("role", "checkbox");
-    document.body.append(ariaInteractive);
-    fireEvent.keyDown(ariaInteractive, { key: "k" });
-    ariaInteractive.remove();
+    for (const value of ["", "true", "plaintext-only"]) {
+      const editable = document.createElement("div");
+      const nested = document.createElement("span");
+      editable.setAttribute("contenteditable", value);
+      editable.append(nested);
+      document.body.append(editable);
+      fireEvent.keyDown(nested, { key: "k" });
+      editable.remove();
+    }
+    for (const role of [
+      "checkbox",
+      "searchbox",
+      "menuitemcheckbox",
+      "menuitemradio",
+      "treeitem",
+      "gridcell",
+    ]) {
+      const ariaInteractive = document.createElement("div");
+      const nested = document.createElement("span");
+      ariaInteractive.setAttribute("role", role);
+      ariaInteractive.append(nested);
+      document.body.append(ariaInteractive);
+      fireEvent.keyDown(nested, { key: "k" });
+      ariaInteractive.remove();
+    }
+    const focusable = document.createElement("div");
+    focusable.tabIndex = 0;
+    document.body.append(focusable);
+    fireEvent.keyDown(focusable, { key: "k" });
+    focusable.remove();
     expect(onSubmit).toHaveBeenCalledTimes(2);
 
     rerender(
@@ -120,7 +165,8 @@ describe("DecisionPanel", () => {
     );
     fireEvent.keyDown(document.body, { key: "k" });
     expect(onSubmit).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("正在保存");
+    expect(screen.getByRole("button", { name: "保留 (K)" })).toBeDisabled();
   });
 
   it("opens and focuses rejection choices with R without hijacking pill keys", () => {
@@ -129,5 +175,14 @@ describe("DecisionPanel", () => {
     expect(screen.getByRole("radio", { name: "鱼种错误" })).toHaveFocus();
     fireEvent.keyDown(screen.getByRole("radio", { name: "鱼种错误" }), { key: "u" });
     expect(screen.getByRole("radiogroup", { name: "拒绝原因" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "不是完整鱼体" }));
+    const outside = document.createElement("div");
+    outside.tabIndex = -1;
+    document.body.append(outside);
+    outside.focus();
+    fireEvent.keyDown(document.body, { key: "r" });
+    expect(screen.getByRole("radio", { name: "不是完整鱼体" })).toHaveFocus();
+    outside.remove();
   });
 });

@@ -241,7 +241,8 @@ describe("ReviewPage immediate decision state machine", () => {
     fireEvent.click(keep);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(screen.getByText("Piscis probatio")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
+    expect(screen.getByText("正在保存…")).toHaveAttribute("role", "status");
+    expect(screen.getByRole("button", { name: "保留 (K)" })).toBeDisabled();
     const decisionCall = fetchMock.mock.calls[1];
     expect(decisionCall[0]).toBe(
       `/sukaseafood/api/v1/reviews/${candidate.id}/decision`,
@@ -301,6 +302,72 @@ describe("ReviewPage immediate decision state machine", () => {
     expect(new Set(decisionCalls.map(([, init]) => init?.body))).toHaveLength(1);
   });
 
+  it("dismisses an ambiguous notice without retiring the operation key or visible choice", async () => {
+    const approved = { decision: "APPROVED", rejection_reason: null, notes: null };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(candidate))
+      .mockRejectedValueOnce(new TypeError("offline"))
+      .mockResolvedValueOnce(jsonResponse(decisionResponse(approved), 201))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const uuidSpy = uuidSequence(
+      "10000000-0000-4000-8000-000000000001",
+      "10000000-0000-4000-8000-000000000002",
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("Piscis probatio");
+
+    await user.click(screen.getByRole("button", { name: "保留 (K)" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("保存结果无法确认");
+    expect(screen.getByRole("button", { name: "保留 (K)" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "取消重试" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保留 (K)" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "保留 (K)" }));
+    await screen.findByText("暂时没有待审核图片。稍后重试即可。");
+
+    const decisionCalls = fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/decision"));
+    expect(decisionCalls.map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"))).toEqual([
+      "10000000-0000-4000-8000-000000000001",
+      "10000000-0000-4000-8000-000000000001",
+    ]);
+    expect(uuidSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the ambiguous key when rejection UI opens and closes without a concrete change", async () => {
+    const approved = { decision: "APPROVED", rejection_reason: null, notes: null };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(candidate))
+      .mockRejectedValueOnce(new TypeError("offline"))
+      .mockResolvedValueOnce(jsonResponse(decisionResponse(approved), 201))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    uuidSequence(
+      "10000000-0000-4000-8000-000000000001",
+      "10000000-0000-4000-8000-000000000002",
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("Piscis probatio");
+
+    await user.click(screen.getByRole("button", { name: "保留 (K)" }));
+    await screen.findByRole("alert");
+    await user.click(screen.getByRole("button", { name: "拒绝 (R)" }));
+    await user.click(screen.getByRole("button", { name: "取消拒绝" }));
+    expect(screen.getByRole("button", { name: "保留 (K)" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "保留 (K)" }));
+    await screen.findByText("暂时没有待审核图片。稍后重试即可。");
+
+    const decisionCalls = fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/decision"));
+    expect(decisionCalls.map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"))).toEqual([
+      "10000000-0000-4000-8000-000000000001",
+      "10000000-0000-4000-8000-000000000001",
+    ]);
+  });
+
   it("invalidates the failed key before retrying a changed rejection payload", async () => {
     const secondPayload = {
       decision: "REJECTED",
@@ -337,7 +404,7 @@ describe("ReviewPage immediate decision state machine", () => {
     ]);
   });
 
-  it("submits the image-error shortcut as structured IMAGE_URL_UNAVAILABLE", async () => {
+  it("submits and visibly retains the structured image-error shortcut after ambiguity", async () => {
     const rejected = {
       decision: "REJECTED",
       rejection_reason: "IMAGE_URL_UNAVAILABLE",
@@ -346,8 +413,7 @@ describe("ReviewPage immediate decision state machine", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(candidate))
-      .mockResolvedValueOnce(jsonResponse(decisionResponse(rejected), 201))
-      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+      .mockRejectedValueOnce(new TypeError("offline"));
     vi.stubGlobal("fetch", fetchMock);
     uuidSequence("10000000-0000-4000-8000-000000000001");
     const user = userEvent.setup();
@@ -358,6 +424,10 @@ describe("ReviewPage immediate decision state machine", () => {
 
     const call = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/decision"));
     expect(JSON.parse(String(call?.[1]?.body))).toEqual(rejected);
+    expect(await screen.findByRole("alert")).toHaveTextContent("保存结果无法确认");
+    expect(screen.getByRole("button", { name: "图片链接失效" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "拒绝 (R)" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("radio", { name: "图片链接失效" })).toHaveAttribute("aria-checked", "true");
   });
 
   it("treats malformed decision success as ambiguous and never advances", async () => {
@@ -373,6 +443,8 @@ describe("ReviewPage immediate decision state machine", () => {
     await user.click(screen.getByRole("button", { name: "不确定 (U)" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("保存结果无法确认");
+    expect(screen.getByRole("button", { name: "不确定 (U)" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "不确定 (U)" })).toHaveTextContent("✓");
     expect(screen.getByText("Piscis probatio")).toBeInTheDocument();
     expect(screen.getByText("本次会话已完成 0 张")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
