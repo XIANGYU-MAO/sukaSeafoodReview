@@ -302,6 +302,74 @@ describe("ReviewPage immediate decision state machine", () => {
     expect(new Set(decisionCalls.map(([, init]) => init?.body))).toHaveLength(1);
   });
 
+  it.each([408, 425, 429])(
+    "treats transient HTTP %s as ambiguous and retries the same payload with the exact key",
+    async (status) => {
+      const approved = { decision: "APPROVED", rejection_reason: null, notes: null };
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(candidate))
+        .mockResolvedValueOnce(jsonResponse({}, status))
+        .mockResolvedValueOnce(jsonResponse(decisionResponse(approved), 201))
+        .mockResolvedValueOnce(new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const uuidSpy = uuidSequence(
+        "10000000-0000-4000-8000-000000000001",
+        "10000000-0000-4000-8000-000000000002",
+      );
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText("Piscis probatio");
+
+      await user.click(screen.getByRole("button", { name: "保留 (K)" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("保存结果无法确认");
+      await user.click(screen.getByRole("button", { name: "重试保存" }));
+      await screen.findByText("暂时没有待审核图片。稍后重试即可。");
+
+      const decisionCalls = fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/decision"));
+      expect(decisionCalls.map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"))).toEqual([
+        "10000000-0000-4000-8000-000000000001",
+        "10000000-0000-4000-8000-000000000001",
+      ]);
+      expect(new Set(decisionCalls.map(([, init]) => init?.body))).toHaveLength(1);
+      expect(uuidSpy).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    ["保留 (K)", "APPROVED"],
+    ["不确定 (U)", "UNSURE"],
+  ] as const)(
+    "clears a stale rejection draft before a failed %s decision becomes selected",
+    async (buttonName, decision) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(candidate))
+        .mockRejectedValueOnce(new TypeError("offline"));
+      vi.stubGlobal("fetch", fetchMock);
+      uuidSequence("10000000-0000-4000-8000-000000000001");
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText("Piscis probatio");
+
+      await user.click(screen.getByRole("button", { name: "拒绝 (R)" }));
+      await user.click(screen.getByRole("radio", { name: "鱼种错误" }));
+      await user.click(screen.getByRole("button", { name: buttonName }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("保存结果无法确认");
+
+      expect(screen.getAllByRole("button", { pressed: true })).toHaveLength(1);
+      expect(screen.getByRole("button", { name: buttonName })).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByRole("button", { name: "拒绝 (R)" })).toHaveAttribute("aria-pressed", "false");
+      expect(screen.queryByRole("radiogroup", { name: "拒绝原因" })).not.toBeInTheDocument();
+      const decisionCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/decision"));
+      expect(JSON.parse(String(decisionCall?.[1]?.body))).toEqual({
+        decision,
+        rejection_reason: null,
+        notes: null,
+      });
+    },
+  );
+
   it("dismisses an ambiguous notice without retiring the operation key or visible choice", async () => {
     const approved = { decision: "APPROVED", rejection_reason: null, notes: null };
     const fetchMock = vi

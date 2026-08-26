@@ -136,12 +136,32 @@ describe("DecisionPanel", () => {
       editable.remove();
     }
     for (const role of [
+      "button",
       "checkbox",
+      "combobox",
+      "grid",
+      "gridcell",
+      "link",
+      "listbox",
+      "menu",
+      "menubar",
+      "menuitem",
       "searchbox",
       "menuitemcheckbox",
       "menuitemradio",
+      "option",
+      "radio",
+      "radiogroup",
+      "scrollbar",
+      "slider",
+      "spinbutton",
+      "switch",
+      "tab",
+      "tablist",
+      "textbox",
+      "tree",
+      "treegrid",
       "treeitem",
-      "gridcell",
     ]) {
       const ariaInteractive = document.createElement("div");
       const nested = document.createElement("span");
@@ -156,6 +176,13 @@ describe("DecisionPanel", () => {
     document.body.append(focusable);
     fireEvent.keyDown(focusable, { key: "k" });
     focusable.remove();
+    const programmaticallyFocusable = document.createElement("div");
+    programmaticallyFocusable.tabIndex = -1;
+    const focusableDescendant = document.createElement("span");
+    programmaticallyFocusable.append(focusableDescendant);
+    document.body.append(programmaticallyFocusable);
+    fireEvent.keyDown(focusableDescendant, { key: "k" });
+    programmaticallyFocusable.remove();
     expect(onSubmit).toHaveBeenCalledTimes(2);
 
     rerender(
