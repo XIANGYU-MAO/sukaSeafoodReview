@@ -18,6 +18,13 @@
 - SQLite 04 数据的 32 位 UUID storage 经 `UUID(...)` 规范化为与运行时一致的 36 位连字符 scope key；已覆盖 populated 04→05→04→05 和升级后同 scope 复用。
 - Mao 手工回执改为 bounded raw `application/json`，认证/CSRF 依赖先执行，随后按 Content-Type、Content-Length 和 ASGI stream 累计上限 128 KiB；不再触发 multipart parser/spool。OpenAPI 仅声明 `application/json`。
 
+### 第二次复审修复
+
+- FAILED receipt error 在持久化前统一经过敏感值检查。服务用 batch id 与配置 secret 重算 expected token，并拒绝包含 token、`RECEIPT_SECRET`、大小写变体，以及标准/URL-safe Base64（含去 padding）或 hex 显见编码的错误文本；固定返回 `RECEIPT_ERROR_SENSITIVE`，不回显命中值，整笔回滚。
+- sync 与 Mao 手工 JSON 两条路都显式把同一配置 secret 传入 `apply_receipt`；回归测试直接检查 `ExportItem.error`、AuditEvent、API response 与捕获日志，确认 token/secret/offending variant 均未出现。
+- 成功回执允许的 decoded extension 现在成为 canonical local path。original fingerprint 未变化时，同鱼种以实际 `local_relative_path` 比较，因此 unchanged 为 NO_WORK；跨鱼种 MOVE 只替换目标 species 目录并保留实际 filename/suffix。original 改变仍采用新 URL 推断 suffix，并在路径变化时保留 previous cleanup。
+- 下游本地同步计划明确服务器 `target_relative_path` 是 ADD/MOVE/REMOVE 唯一目标；composite ADD 必须先成功提交新 target 再清理旧路径，失败保留旧文件；REMOVE 不再自建 timestamp destination，receipt 报告实际服务器 target。仅更新契约与未来验收措辞，没有实现 Task 9 下载器。
+
 ## 数据库与迁移
 
 - 仍只使用 `20260826_05_export_snapshots.py`，01–04 未修改。Task 8 尚未部署，且 brief 指定新增 05，因此直接修正 05，而不是追加 06；upgrade/downgrade 均同步维护 species 约束。
@@ -39,6 +46,8 @@
 
 成功 ADD/MOVE/REMOVE 要求 64-hex SHA-256 和匹配 action/candidate stem 的安全相对路径。batch/token/expiry/item triple/version、重复项、越界项、path/hash 任一无效都会在写入前整批拒绝。失败项保持 pending；相同成功重试幂等，SHA/path 冲突返回 409。
 
+FAILED error 仍要求非空、去控制空白后不超过 2000 字符；若包含 batch token、配置 secret 或上述显见编码/大小写变体，则以固定 422 拒绝且不保存 error、不新增 receipt audit。合法失败文本仍保持 pending 并可供重试。
+
 生产 API 校验 `RECEIPT_SECRET`：缺失、过短、低熵或复用其他 secret 均拒绝启动。原报告曾把低熵 secret 测试描述为独立 RED，但该测试实际随实现提交 `2f79017` 加入；本报告纠正该历史，不把它计为严格 test-first 证据。
 
 ## TDD 与提交证据
@@ -59,6 +68,14 @@
 
 RFC 4180 现在实际断言逗号、双引号和换行的 round trip 及原始 quoting；另覆盖 inactive Species REMOVE、token-vs-browser audit actor、unsafe existing migration rejection，以及 raw JSON 的 auth/CSRF/media type/body cap/OpenAPI。
 
+第二次复审同样严格 test-first：
+
+1. `78f2098 test(review): cover receipt secrecy and canonical paths`
+2. RED：敏感 FAILED error 与 decoded suffix 聚焦命令得到 `14 failed, 12 deselected in 6.54s`。12 个 sync/manual × token/secret/大小写/Base64 场景均证明原文写入 DB；另两项分别证明 unchanged 错建 201 ADD、species MOVE 从 `.png` 退回 `.jpg`。
+3. `dd6d338 fix(review): secure receipts and canonicalize local paths`
+4. GREEN：同一命令 `14 passed, 12 deselected in 5.59s`；完整 exports/receipts `55 passed in 23.51s`。
+5. SQLite 全 API：`332 passed, 16 skipped in 176.65s`，16 项均为未提供 PostgreSQL URL 时的预期 integration skip。
+
 ## 最终验证
 
 - SQLite 全 API：`319 passed, 16 skipped in 173.01s`；16 项全部是缺少显式 PostgreSQL URL 时预期跳过的 integration。
@@ -69,3 +86,11 @@ RFC 4180 现在实际断言逗号、双引号和换行的 round trip 及原始 q
 - SQLite populated 04→05→04→05、unsafe preflight rollback、同 scope reuse 均通过聚焦测试。
 - `python -m compileall -q app tests`、`git diff --check` 通过；定向 token/secret 扫描与最终 clean status 在报告提交后复验。
 - 临时容器已用精确名称删除，并确认 `docker ps -a` 中不存在。
+
+第二次复审最终验证：
+
+- 唯一 PostgreSQL 16 容器 `sukaseafood-task8-rereview-dd6d338` 中 fresh→head、`alembic check`、05→04→05 与 offline DDL 全部成功；offline DDL 包含 05、species constraint、pending scope index 与 snapshot fingerprint。
+- 第一次真实 PostgreSQL 全套运行得到 `347 passed, 1 failed`；唯一失败是未修改的 Task 7 SQLite `test_concurrent_retry_converges_on_one_result` 偶发 `IMPORT_PREVIEW_STALE`。独立循环在前 5 次通过、第 6 次复现，且 `6e48664..HEAD` 对 import 实现/测试无差异，因此未越界修改 Task 7。
+- 相同代码与容器完整重跑：`348 passed in 162.78s`，`0 skipped`。
+- Task 8 PostgreSQL race 单独复验：`2 passed in 1.87s`，simultaneous create 与 concurrent receipt 均收敛。
+- 原临时容器已按精确名称删除；最终 compileall、diff、secret scan 与 clean status 在本报告提交后再次执行。
