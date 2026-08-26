@@ -114,7 +114,12 @@ def test_import_export_media_types_and_pagination_are_explicit(client):
 
     receipt = paths["/v1/admin/exports/{batch_id}/receipt-file"]["post"]
     assert set(receipt["requestBody"]["content"]) == {"application/json"}
+    csv_download = paths["/v1/admin/exports/{batch_id}.csv"]["get"]
     assert operation_methods(paths["/v1/admin/exports/{batch_id}.csv"]) == {"get"}
+    csv_content = csv_download["responses"]["200"]["content"]
+    assert set(csv_content) == {"text/csv"}
+    assert csv_content["text/csv"]["schema"]["type"] == "string"
+    assert "application/json" not in csv_content
 
     export_parameters = {
         parameter["name"]: parameter

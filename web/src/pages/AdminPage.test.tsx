@@ -36,7 +36,7 @@ async function openTab(name: string) {
   await userEvent.click(await screen.findByRole("tab", { name }));
 }
 
-describe("Mao admin role and accessible shell", () => {
+describe("admin authorization and accessible shell", () => {
   it("redirects a reviewer before any admin request and hides admin navigation", async () => {
     const calls: string[] = [];
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
@@ -60,6 +60,8 @@ describe("Mao admin role and accessible shell", () => {
     renderWithAuth(<App />, "/admin");
     const labels = ["审核进度", "候选图片", "鱼种管理", "审核历史", "导入", "训练集同步", "账号"];
 
+    expect(await screen.findByRole("heading", { name: "管理后台" })).toBeVisible();
+    expect(screen.queryByText("Mao 管理")).not.toBeInTheDocument();
     expect(await screen.findAllByRole("tab")).toHaveLength(7);
     for (const label of labels) expect(screen.getByRole("tab", { name: label })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "English" }));

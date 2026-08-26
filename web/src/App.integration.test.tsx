@@ -134,22 +134,43 @@ describe("production-shell integration", () => {
     expect(fetchMock.mock.calls.every(([input]) => !pathOf(input).endsWith("/auth/names"))).toBe(true);
   });
 
-  it("shows Mao's seven Chinese tabs after admin bootstrap", async () => {
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+  it("logs Mao in from a fresh 401, exposes generic admin navigation, and shows seven Chinese tabs", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = pathOf(input);
-      if (path.endsWith("/auth/me")) return Promise.resolve(jsonResponse(maoAuth));
+      if (path.endsWith("/auth/me")) return Promise.resolve(jsonResponse({}, 401));
+      if (path.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames));
+      if (path.endsWith("/auth/login")) {
+        expect(init).toEqual(expect.objectContaining({
+          method: "POST",
+          credentials: "include",
+          body: JSON.stringify({ name: "Mao", password: "temporary-password" }),
+        }));
+        return Promise.resolve(jsonResponse(maoAuth));
+      }
+      if (path.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+      if (path.endsWith("/progress")) return Promise.resolve(jsonResponse(progressFixture));
       try {
         return Promise.resolve(defaultAdminResponse(String(input)));
       } catch {
         return Promise.reject(new Error(`Unexpected request: ${String(input)} ${init?.method ?? "GET"}`));
       }
-    }));
-    renderWithStrictAuth(<App />, "/admin");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    renderWithStrictAuth(<App />);
 
-    expect(await screen.findByRole("heading", { name: "中文管理后台" })).toBeInTheDocument();
+    await user.click(await screen.findByRole("radio", { name: "Mao" }));
+    await user.type(screen.getByLabelText("密码"), "temporary-password");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+    await user.click(await screen.findByRole("link", { name: "管理后台" }));
+
+    expect(await screen.findByRole("heading", { name: "管理后台" })).toBeInTheDocument();
+    expect(screen.queryByText("Mao 管理")).not.toBeInTheDocument();
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "审核进度", "候选图片", "鱼种管理", "审核历史", "导入", "训练集同步", "账号",
     ]);
+    expect(fetchMock.mock.calls.some(([input]) => pathOf(input).endsWith("/auth/names"))).toBe(true);
+    expect(fetchMock.mock.calls.some(([input]) => pathOf(input).endsWith("/auth/login"))).toBe(true);
   });
 
   it("redirects a reviewer away from /admin before any admin request", async () => {

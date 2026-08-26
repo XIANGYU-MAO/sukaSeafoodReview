@@ -15,13 +15,21 @@ describe("deployment paths", () => {
 
   it("runs Vite locally and proxies only the canonical API prefix to FastAPI", () => {
     expect(packageJson.scripts.dev).toBe("vite");
-    const proxy = viteConfig.server?.proxy?.["/sukaseafood/api"];
+    const proxyKey = "^/sukaseafood/api(?:/|$)";
+    const proxy = viteConfig.server?.proxy?.[proxyKey];
     expect(proxy).toEqual(expect.objectContaining({ target: "http://127.0.0.1:8000" }));
     expect(typeof proxy).toBe("object");
     if (typeof proxy !== "object" || proxy === null || typeof proxy.rewrite !== "function") {
       throw new Error("Expected a configured development proxy rewrite");
     }
+    const matcher = new RegExp(proxyKey);
+    expect(matcher.test("/sukaseafood/api/v1/health")).toBe(true);
+    expect(matcher.test("/sukaseafood/api")).toBe(true);
+    expect(matcher.test("/sukaseafood/apifoo")).toBe(false);
+    expect(matcher.test("/sukaseafood/api-v1")).toBe(false);
     expect(proxy.rewrite("/sukaseafood/api/v1/health")).toBe("/v1/health");
+    expect(proxy.rewrite("/sukaseafood/api")).toBe("/");
+    expect(proxy.rewrite("/sukaseafood/apifoo")).toBe("/sukaseafood/apifoo");
     expect(proxy.rewrite("/sukaseafood/review/")).toBe("/sukaseafood/review/");
   });
 });

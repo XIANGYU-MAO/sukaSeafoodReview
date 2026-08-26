@@ -20,6 +20,7 @@ SHARED_COMMANDS_AND_FACTS = (
     "247",
     "262",
     "python.exe -m alembic upgrade head",
+    "python.exe -m app.commands.seed_species",
     "python.exe -m app.commands.seed_users --print-once",
     "python.exe -m app.commands.import_candidates",
     "python.exe -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000",
@@ -39,7 +40,7 @@ ZH_SECTIONS = (
     "账号、密码与会话",
     "导入初始 1,221 行清单",
     "审核成员工作流",
-    "Mao 的七标签中文后台",
+    "七标签中文管理后台",
     "增量 CSV 与本地下载边界",
     "验证命令",
     "故障排查",
@@ -55,7 +56,7 @@ EN_SECTIONS = (
     "Accounts, passwords, and sessions",
     "Import the initial 1,221-row manifest",
     "Reviewer workflow",
-    "Mao's seven-tab Chinese administration",
+    "Seven-tab Chinese administration",
     "Incremental CSV and local downloader boundary",
     "Verification commands",
     "Troubleshooting",
@@ -79,6 +80,28 @@ def test_bilingual_readmes_exist_and_keep_critical_commands_and_facts_in_parity(
         assert f"## {section}" in chinese
     for section in EN_SECTIONS:
         assert f"## {section}" in english
+    for text in (chinese, english):
+        assert text.index("python.exe -m app.commands.seed_species") < text.index(
+            "python.exe -m app.commands.seed_users --print-once"
+        ) < text.index("python.exe -m app.commands.import_candidates")
+
+
+def test_readmes_describe_unpublished_checkout_security_boundaries_and_extensible_catalog():
+    chinese = README_ZH.read_text(encoding="utf-8")
+    english = README_EN.read_text(encoding="utf-8")
+    checkout = "C:\\Users\\86166\\Desktop\\sukaSeafoodReview\\.worktrees\\collaborative-review"
+
+    assert checkout in chinese and checkout in english
+    assert "仅存在于本地，尚未发布" in chinese
+    assert "local and unpublished" in english
+    assert "显式合并、推送和发布后" in chinese
+    assert "explicitly merged, pushed, and published" in english
+    assert "登录是未认证入口" in chinese
+    assert "login is the unauthenticated entry point" in english
+    assert "批次 token" in chinese and "batch token" in english
+    assert "包含 `reason`" in chinese and "include `reason`" in english
+    assert "SF006" in chinese and "SF006" in english
+    assert "鱼种管理" in chinese and "Species management" in english
 
 
 def test_readmes_do_not_claim_deployment_or_embed_secret_material():
