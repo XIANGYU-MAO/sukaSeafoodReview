@@ -53,7 +53,7 @@ EXPORT_COLUMNS = [
 ]
 EXPORT_TTL = timedelta(days=7)
 MAX_RECEIPT_BYTES = 128 * 1024
-MAX_ERROR_LENGTH = 2000
+FAILED_ERROR_CODE = "LOCAL_DOWNLOAD_FAILED"
 KNOWN_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff", ".bmp"}
 TOKEN_DOMAIN = b"sukaseafood:receipt:v1:"
 CREATE_LOCK_ID = 8_260_805
@@ -586,8 +586,12 @@ async def render_batch_csv(
     return b"\xef\xbb\xbf" + output.getvalue().encode("utf-8")
 
 
-def _safe_receipt_path(value: str, expected: str) -> str:
+def _safe_receipt_path(
+    value: str, expected: str, *, allow_extension_adjustment: bool
+) -> str:
     if "\\" in value or any(ord(character) < 0x20 for character in value):
+        raise ReceiptRejected("RECEIPT_PATH_INVALID", 422)
+    if not allow_extension_adjustment and value != expected:
         raise ReceiptRejected("RECEIPT_PATH_INVALID", 422)
     path = PurePosixPath(value)
     expected_path = PurePosixPath(expected)
@@ -600,40 +604,9 @@ def _safe_receipt_path(value: str, expected: str) -> str:
     return path.as_posix()
 
 
-def _sensitive_error_variants(value: str) -> set[str]:
-    encoded = value.encode("utf-8")
-    variants = {
-        value,
-        base64.b64encode(encoded).decode("ascii"),
-        base64.urlsafe_b64encode(encoded).decode("ascii"),
-        encoded.hex(),
-    }
-    return {
-        variant.casefold()
-        for variant in variants | {variant.rstrip("=") for variant in variants}
-        if variant
-    }
-
-
-def _safe_error(value: str, sensitive_values: Iterable[str]) -> str:
-    normalized = " ".join(value.replace("\x7f", " ").split())
-    if not normalized or len(normalized) > MAX_ERROR_LENGTH:
-        raise ReceiptRejected("RECEIPT_ERROR_INVALID", 422)
-    folded = normalized.casefold()
-    sensitive_variants = {
-        variant
-        for sensitive in sensitive_values
-        for variant in _sensitive_error_variants(sensitive)
-    }
-    if any(variant in folded for variant in sensitive_variants):
-        raise ReceiptRejected("RECEIPT_ERROR_SENSITIVE", 422)
-    return normalized
-
-
 def _validate_receipt_items(
     stored_items: list[ExportItem],
     payload_items: Iterable[ReceiptItem],
-    sensitive_values: Iterable[str],
 ) -> list[tuple[ExportItem, ReceiptItem, str | None, str | None]]:
     by_triple = {
         (item.candidate_id, item.review_id, item.review_version): item
@@ -657,7 +630,9 @@ def _validate_receipt_items(
             if re.fullmatch(r"[0-9a-f]{64}", normalized_hash) is None:
                 raise ReceiptRejected("RECEIPT_HASH_INVALID", 422)
             normalized_path = _safe_receipt_path(
-                payload.relative_path, item.target_relative_path
+                payload.relative_path,
+                item.target_relative_path,
+                allow_extension_adjustment=item.action == ExportAction.ADD,
             )
             if item.status == "succeeded" and (
                 not hmac.compare_digest(item.sha256 or "", normalized_hash)
@@ -668,7 +643,7 @@ def _validate_receipt_items(
             raise ReceiptRejected("RECEIPT_SUCCESS_CONFLICT", 409)
         else:
             assert payload.error is not None
-            normalized_path = _safe_error(payload.error, sensitive_values)
+            normalized_path = FAILED_ERROR_CODE
         validated.append((item, payload, normalized_hash, normalized_path))
     return validated
 
@@ -678,7 +653,6 @@ async def apply_receipt(
     batch_id: UUID,
     items: list[ReceiptItem],
     *,
-    receipt_secret: str,
     raw_token: str | None = None,
     actor_id: UUID | None = None,
 ) -> ReceiptResponse:
@@ -712,11 +686,7 @@ async def apply_receipt(
                 )
             ).all()
         )
-        validated = _validate_receipt_items(
-            stored_items,
-            items,
-            (receipt_token(batch.id, receipt_secret), receipt_secret),
-        )
+        validated = _validate_receipt_items(stored_items, items)
         changed_ids: list[str] = []
         accepted: list[UUID] = []
         for item, payload, normalized_hash, normalized_value in validated:

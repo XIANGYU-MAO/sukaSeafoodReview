@@ -143,7 +143,6 @@ async def post_receipt_file(
     batch_id: UUID,
     request: Request,
     auth: CurrentAuth = Depends(require_admin_csrf),
-    settings: Settings = Depends(get_runtime_settings),
     db: AsyncSession = Depends(get_db),
 ) -> ReceiptResponse:
     content = await read_bounded_json_body(request, MAX_RECEIPT_BYTES)
@@ -164,7 +163,6 @@ async def post_receipt_file(
             db,
             batch_id,
             payload.items,
-            receipt_secret=_receipt_secret(settings),
             actor_id=auth.user.id,
         )
     except ReceiptRejected as exc:

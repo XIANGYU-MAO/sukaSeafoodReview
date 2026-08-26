@@ -125,14 +125,12 @@ def test_concurrent_identical_receipt_converges_without_errors_or_duplicate_audi
                     first,
                     batch_id,
                     [payload],
-                    receipt_secret=SECRET,
                     raw_token=token,
                 ),
                 apply_receipt(
                     second,
                     batch_id,
                     [payload],
-                    receipt_secret=SECRET,
                     raw_token=token,
                 ),
             )
