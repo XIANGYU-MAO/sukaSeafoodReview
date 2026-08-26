@@ -7,36 +7,12 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.api.request_body import read_bounded_json_body
 from app.schemas.exports import ReceiptRequest, ReceiptResponse
 from app.services.exports import MAX_RECEIPT_BYTES, ReceiptRejected, apply_receipt
 
 
 router = APIRouter(prefix="/sync", tags=["sync"])
-
-
-async def _bounded_body(request: Request) -> bytes:
-    declared = request.headers.get("content-length")
-    if declared is not None:
-        try:
-            if int(declared) > MAX_RECEIPT_BYTES:
-                raise HTTPException(
-                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                    detail={"code": "RECEIPT_BODY_TOO_LARGE"},
-                )
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "RECEIPT_CONTENT_LENGTH_INVALID"},
-            )
-    chunks = bytearray()
-    async for chunk in request.stream():
-        chunks.extend(chunk)
-        if len(chunks) > MAX_RECEIPT_BYTES:
-            raise HTTPException(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                detail={"code": "RECEIPT_BODY_TOO_LARGE"},
-            )
-    return bytes(chunks)
 
 
 @router.post("/batches/{batch_id}/receipt", response_model=ReceiptResponse)
@@ -57,7 +33,7 @@ async def post_batch_receipt(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "RECEIPT_NOT_AUTHORIZED"},
         )
-    content = await _bounded_body(request)
+    content = await read_bounded_json_body(request, MAX_RECEIPT_BYTES)
     try:
         payload = ReceiptRequest.model_validate_json(content)
     except ValidationError as exc:

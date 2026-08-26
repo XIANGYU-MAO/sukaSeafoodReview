@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentAuth, get_runtime_settings, require_admin_access, require_admin_csrf
+from app.api.request_body import read_bounded_json_body
 from app.config import Settings
 from app.database import get_db
 from app.schemas.exports import (
@@ -124,19 +125,27 @@ async def get_export_csv(
     )
 
 
-@router.post("/{batch_id}/receipt-file", response_model=ReceiptResponse)
+@router.post(
+    "/{batch_id}/receipt-file",
+    response_model=ReceiptResponse,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": ReceiptFileRequest.model_json_schema()
+                }
+            },
+        }
+    },
+)
 async def post_receipt_file(
     batch_id: UUID,
-    file: UploadFile = File(...),
+    request: Request,
     auth: CurrentAuth = Depends(require_admin_csrf),
     db: AsyncSession = Depends(get_db),
 ) -> ReceiptResponse:
-    content = await file.read(MAX_RECEIPT_BYTES + 1)
-    if len(content) > MAX_RECEIPT_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail={"code": "RECEIPT_BODY_TOO_LARGE"},
-        )
+    content = await read_bounded_json_body(request, MAX_RECEIPT_BYTES)
     try:
         payload = ReceiptFileRequest.model_validate_json(content)
     except ValidationError as exc:

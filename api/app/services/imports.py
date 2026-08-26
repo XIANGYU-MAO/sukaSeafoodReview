@@ -28,6 +28,7 @@ from app.models import (
 )
 from app.schemas.imports import ImportIssue, ImportPreview, ImportResult, NormalizedCandidate
 from app.services.auth import as_utc
+from app.species_codes import is_safe_species_code
 
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
@@ -356,8 +357,12 @@ def normalize_legacy_row(row: dict[str, str]) -> NormalizedCandidate:
             raise RowProblem("FIELD_TOO_LONG", "parse_errors", f"{name} exceeds its limit")
 
     species_code = _normalize_identifier(row.get("seafood_code"), "seafood_code")
-    if not species_code:
-        raise RowProblem("INVALID_SPECIES", "invalid_species", "Species code is missing")
+    if not is_safe_species_code(species_code):
+        raise RowProblem(
+            "INVALID_SPECIES",
+            "invalid_species",
+            "Species code is not a safe ASCII identifier",
+        )
     source_dataset = _normalize_identifier(
         row.get("source_dataset"), "source_dataset"
     ).upper()

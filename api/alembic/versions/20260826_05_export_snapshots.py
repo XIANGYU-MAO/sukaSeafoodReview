@@ -6,8 +6,10 @@ Create Date: 2026-08-26
 """
 
 from collections.abc import Sequence
+import re
+from uuid import UUID
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -17,17 +19,96 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+SAFE_SPECIES_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_-]{0,31}\Z", re.ASCII)
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
+
+
+def _is_safe_species_code(value: str) -> bool:
+    return (
+        SAFE_SPECIES_CODE_PATTERN.fullmatch(value) is not None
+        and value not in WINDOWS_RESERVED_NAMES
+    )
+
+
+def _species_code_check_sql(dialect: str) -> str:
+    reserved = ", ".join(f"'{name}'" for name in sorted(WINDOWS_RESERVED_NAMES))
+    if dialect == "sqlite":
+        allowed = (
+            "substr(code, 1, 1) GLOB '[A-Z]' "
+            "AND code NOT GLOB '*[^A-Z0-9_-]*'"
+        )
+    else:
+        allowed = "code ~ '^[A-Z][A-Z0-9_-]{0,31}$'"
+    return (
+        "length(code) BETWEEN 1 AND 32 "
+        f"AND {allowed} "
+        f"AND code NOT IN ({reserved})"
+    )
+
+
+def _constraint_sql() -> str:
+    return _species_code_check_sql(context.get_context().dialect.name)
+
+
+def _validate_existing_species_codes() -> None:
+    if context.is_offline_mode():
+        op.execute(
+            sa.text(
+                "DO $$ BEGIN "
+                f"IF EXISTS (SELECT 1 FROM species WHERE NOT ({_constraint_sql()})) "
+                "THEN RAISE EXCEPTION 'unsafe species codes block revision 20260826_05'; "
+                "END IF; END $$"
+            )
+        )
+        return
+    codes = list(op.get_bind().execute(sa.text("SELECT code FROM species")).scalars())
+    unsafe = sorted(code for code in codes if not _is_safe_species_code(code))
+    if unsafe:
+        raise RuntimeError(
+            "unsafe species codes block revision 20260826_05: " + ", ".join(unsafe)
+        )
+
+
+def _backfill_scope_keys() -> None:
+    if context.is_offline_mode():
+        op.execute(
+            sa.text(
+                "UPDATE export_batches SET scope_key = "
+                "CASE WHEN species_id IS NULL THEN 'ALL' "
+                "ELSE CAST(species_id AS VARCHAR(36)) END"
+            )
+        )
+        return
+    bind = op.get_bind()
+    rows = list(
+        bind.execute(
+            sa.text("SELECT id, species_id FROM export_batches")
+        ).mappings()
+    )
+    for row in rows:
+        scope_key = "ALL" if row["species_id"] is None else str(UUID(str(row["species_id"])))
+        bind.execute(
+            sa.text("UPDATE export_batches SET scope_key = :scope_key WHERE id = :id"),
+            {"scope_key": scope_key, "id": row["id"]},
+        )
+
+
 def upgrade() -> None:
+    _validate_existing_species_codes()
+    with op.batch_alter_table("species") as batch:
+        batch.create_check_constraint("ck_species_code_safe", _constraint_sql())
     with op.batch_alter_table("export_batches") as batch:
         batch.add_column(sa.Column("scope_key", sa.String(length=36), nullable=True))
         batch.add_column(sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True))
         batch.add_column(sa.Column("expired_at", sa.DateTime(timezone=True), nullable=True))
-    op.execute(
-        sa.text(
-            "UPDATE export_batches SET scope_key = "
-            "CASE WHEN species_id IS NULL THEN 'ALL' ELSE CAST(species_id AS VARCHAR(36)) END"
-        )
-    )
+    _backfill_scope_keys()
     with op.batch_alter_table("export_batches") as batch:
         batch.alter_column("scope_key", existing_type=sa.String(length=36), nullable=False)
         batch.create_check_constraint(
@@ -132,3 +213,5 @@ def downgrade() -> None:
         batch.drop_column("expired_at")
         batch.drop_column("completed_at")
         batch.drop_column("scope_key")
+    with op.batch_alter_table("species") as batch:
+        batch.drop_constraint("ck_species_code_safe", type_="check")

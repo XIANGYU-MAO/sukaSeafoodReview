@@ -30,6 +30,7 @@ from app.models import (
 )
 from app.schemas.exports import ExportBatchResponse, ReceiptItem, ReceiptResponse
 from app.services.auth import as_utc, utc_now
+from app.species_codes import is_safe_species_code
 
 
 EXPORT_COLUMNS = [
@@ -139,6 +140,8 @@ def _known_suffix(url: str) -> str:
 
 
 def _desired_path(candidate: Candidate, species: Species) -> str:
+    if not is_safe_species_code(species.code):
+        raise ExportConflict("UNSAFE_SPECIES_CODE")
     return f"images/{species.code}/{candidate.id}{_known_suffix(candidate.original_url)}"
 
 
@@ -254,7 +257,10 @@ async def derive_deltas(
             else:
                 assert local_item is not None
                 previous_path = local_item.local_relative_path or local_item.target_relative_path
-                if previous_path != desired_path:
+                original_changed = (
+                    local_item.original_fingerprint != _original_fingerprint(candidate)
+                )
+                if previous_path != desired_path and not original_changed:
                     action = (
                         ExportAction.MOVE
                         if local_item.species_code != species.code
@@ -267,12 +273,13 @@ async def derive_deltas(
                     local_item.review_id != current.id
                     or local_item.review_version != current.version
                     or local_item.candidate_version != candidate.version
-                    or local_item.original_fingerprint != _original_fingerprint(candidate)
+                    or original_changed
                     or local_item.metadata_fingerprint != _metadata_fingerprint(candidate, species)
                 ):
                     action = ExportAction.ADD
                     target_path = desired_path
-                    previous_path = None
+                    if previous_path == desired_path:
+                        previous_path = None
         elif local_present:
             assert local_item is not None
             previous_path = local_item.local_relative_path or local_item.target_relative_path
@@ -459,10 +466,13 @@ async def batch_response(
             ).where(ExportItem.batch_id == batch.id)
         )
     ).one()
+    effective_status = batch.status
+    if batch.status == "pending" and as_utc(batch.expires_at) <= utc_now():
+        effective_status = "expired"
     return ExportBatchResponse(
         id=batch.id,
         species_code=species_code,
-        status=batch.status,
+        status=effective_status,
         created_at=batch.created_at,
         expires_at=batch.expires_at,
         completed_at=batch.completed_at,
@@ -474,7 +484,6 @@ async def batch_response(
 
 
 async def list_batches(session: AsyncSession) -> list[ExportBatchResponse]:
-    await _expire_batches(session)
     batches = list(
         (
             await session.scalars(
@@ -484,12 +493,11 @@ async def list_batches(session: AsyncSession) -> list[ExportBatchResponse]:
             )
         ).all()
     )
-    await session.commit()
     return [await batch_response(session, batch) for batch in batches]
 
 
 async def pending_counts(session: AsyncSession) -> dict[str, int]:
-    await _expire_batches(session)
+    now = utc_now()
     active_species = list(
         (
             await session.scalars(
@@ -503,7 +511,11 @@ async def pending_counts(session: AsyncSession) -> dict[str, int]:
             await session.scalars(
                 select(ExportItem)
                 .join(ExportBatch, ExportBatch.id == ExportItem.batch_id)
-                .where(ExportBatch.status == "pending", ExportItem.status == "pending")
+                .where(
+                    ExportBatch.status == "pending",
+                    ExportBatch.expires_at > now,
+                    ExportItem.status == "pending",
+                )
             )
         ).all()
     )
@@ -515,7 +527,6 @@ async def pending_counts(session: AsyncSession) -> dict[str, int]:
     for delta in await derive_deltas(session, batch_id=draft_id, species_id=None):
         if delta.candidate.id not in scheduled and delta.species.code in counts:
             counts[delta.species.code] += 1
-    await session.commit()
     return counts
 
 

@@ -20,6 +20,7 @@ from pydantic import (
 
 from app.models import Decision
 from app.schemas.review import DecisionRequest
+from app.species_codes import require_safe_species_code
 
 
 TrimmedReason = Annotated[
@@ -94,6 +95,11 @@ class SpeciesCreateRequest(BaseModel):
     active: bool = True
     sort_order: int = 0
     reason: TrimmedReason
+
+    @field_validator("code")
+    @classmethod
+    def safe_code(cls, value: str) -> str:
+        return require_safe_species_code(value)
 
 
 class SpeciesPatchRequest(BaseModel):

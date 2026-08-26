@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -19,10 +20,22 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.auth import Base, TimestampMixin
+from app.species_codes import (
+    POSTGRESQL_SPECIES_CODE_CHECK_SQL,
+    SQLITE_SPECIES_CODE_CHECK_SQL,
+)
 
 
 class Species(TimestampMixin, Base):
     __tablename__ = "species"
+    __table_args__ = (
+        CheckConstraint(
+            SQLITE_SPECIES_CODE_CHECK_SQL, name="ck_species_code_safe"
+        ).ddl_if(dialect="sqlite"),
+        CheckConstraint(
+            POSTGRESQL_SPECIES_CODE_CHECK_SQL, name="ck_species_code_safe"
+        ).ddl_if(dialect="postgresql"),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)

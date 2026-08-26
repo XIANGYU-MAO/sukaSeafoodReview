@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.species_codes import require_safe_species_code
+
 
 class ExportCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -15,7 +17,7 @@ class ExportCreateRequest(BaseModel):
     @field_validator("species_code")
     @classmethod
     def normalize_species(cls, value: str | None) -> str | None:
-        return value.strip() if value is not None else None
+        return require_safe_species_code(value.strip()) if value is not None else None
 
 
 class ExportBatchResponse(BaseModel):

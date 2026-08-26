@@ -289,8 +289,10 @@ def test_preview_rejects_non_ascii_non_windows_safe_species_codes(unsafe_code):
     assert preview.blocking_errors == 1
     assert preview.new_rows == 0
     assert preview.issues[0].code == "INVALID_SPECIES"
-    assert preview.species_counts == {"SF001": 2, "SF002": 2}
-    assert preview.file_sha256 == hashlib.sha256(b"\xef\xbb\xbf" + fixture_bytes()).hexdigest()
+    assert preview.species_counts == {unsafe_code: 1}
+    assert preview.file_sha256 == hashlib.sha256(
+        csv_bytes([valid_row(seafood_code=unsafe_code)])
+    ).hexdigest()
     assert preview.preview_token is None
 
 
