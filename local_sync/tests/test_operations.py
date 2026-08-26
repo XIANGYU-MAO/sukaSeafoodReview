@@ -721,6 +721,36 @@ def test_recover_add_returns_none_only_when_no_target_candidate_exists(
     assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
 
 
+def test_recover_add_exact_completed_record_returns_canonical_skip(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    manifest_row = row()
+    content, expected_phash = encoded_image("JPEG")
+    write_file(sync_root, manifest_row.target_relative_path, content)
+    stored = index.record_success(
+        SyncResult(
+            candidate_id=manifest_row.candidate_id,
+            review_id=manifest_row.review_id,
+            review_version=manifest_row.review_version,
+            action=manifest_row.action,
+            batch_id=manifest_row.batch_id,
+            relative_path=manifest_row.target_relative_path,
+            sha256=hashlib.sha256(content).hexdigest(),
+            perceptual_hash=expected_phash,
+        )
+    )
+
+    result = recover_add(sync_root, manifest_row, index)
+
+    assert result is not None
+    assert result.status == "SKIPPED_ALREADY_COMPLETED"
+    assert result.relative_path == stored.relative_path
+    assert result.sha256 == stored.sha256
+    assert result.perceptual_hash == stored.perceptual_hash
+    assert result.completed_at == stored.completed_at
+
+
 def test_recover_add_verifies_decoder_target_and_persists_derived_metadata(
     sync_root: Path,
 ) -> None:

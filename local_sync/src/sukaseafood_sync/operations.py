@@ -464,6 +464,10 @@ def _completed_skip(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResul
         raise OperationError("COMPLETED_STATE_STALE") from None
     if digest != stored.sha256:
         raise OperationError("COMPLETED_STATE_STALE")
+    return _skipped_result(stored)
+
+
+def _skipped_result(stored: SyncRecord) -> SyncResult:
     return SyncResult(
         candidate_id=stored.candidate_id,
         review_id=stored.review_id,
@@ -827,15 +831,19 @@ def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult |
         target_image = _read_recovery_image(target, actual_relative)
 
     sha256, phash, _byte_count, _width, _height, _suffix, _owned = target_image
-    result = _desired_result(row, actual_relative, sha256, phash)
     if stored is not None and (
         stored.relative_path != actual_relative
         or stored.sha256 != sha256
         or stored.perceptual_hash != phash
     ):
         raise OperationError("COMPLETED_STATE_STALE")
+    if stored is None:
+        result = _desired_result(row, actual_relative, sha256, phash)
+    else:
+        result = _skipped_result(stored)
     _cleanup_composite_previous(root, row, actual_relative, index)
-    _record(index, result)
+    if stored is None:
+        _record(index, result)
     if staging is not None and staging_image is not None:
         try:
             _unlink_owned(

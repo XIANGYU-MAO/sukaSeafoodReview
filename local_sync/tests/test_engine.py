@@ -24,8 +24,9 @@ from sukaseafood_sync.engine import (
     SyncEngine,
     SyncEngineError,
 )
-from sukaseafood_sync.index import SyncIndex, SyncResult
+from sukaseafood_sync.index import SyncIndex, SyncIndexError, SyncResult
 from sukaseafood_sync.manifest import ExportManifest, ManifestRow
+from sukaseafood_sync.operations import OperationError
 
 
 def candidate(number: int) -> UUID:
@@ -93,7 +94,9 @@ def fake_download(root: Path, calls: list[UUID], *, fail: set[UUID] | None = Non
     def download(session, manifest_row, destination, policy, progress, cancel):
         calls.append(manifest_row.candidate_id)
         if manifest_row.candidate_id in failures:
-            raise DownloadError("image download failed after network retries")
+            raise DownloadError(
+                "image download failed after network retries", code="NETWORK_ERROR"
+            )
         staging = Path(destination).with_name(Path(destination).name + ".part")
         staging.write_bytes(JPEG)
         progress(len(JPEG), len(JPEG))
@@ -233,29 +236,86 @@ def test_receipt_contract_and_progress_are_stable_and_secret_free(
 
 
 @pytest.mark.parametrize(
-    ("message", "expected"),
+    ("lower_code", "expected"),
     [
-        ("downloaded bytes are not a safe decodable image", "INVALID_IMAGE"),
-        ("download size exceeds the configured limit", "DOWNLOAD_ERROR"),
-        ("image request failed after retriable HTTP statuses", "NETWORK_ERROR"),
+        ("NETWORK_ERROR", "NETWORK_ERROR"),
+        ("INVALID_IMAGE", "INVALID_IMAGE"),
+        ("DOWNLOAD_ERROR", "DOWNLOAD_ERROR"),
+        ("FILESYSTEM_ERROR", "FILESYSTEM_ERROR"),
+        (f"UNTRUSTED_{RECEIPT_TOKEN}", "DOWNLOAD_ERROR"),
     ],
 )
 def test_download_failures_use_stable_categories(
     sync_root: Path,
     monkeypatch: pytest.MonkeyPatch,
-    message: str,
+    lower_code: str,
     expected: str,
 ) -> None:
     sync_root.mkdir()
 
     def fail(*args, **kwargs):
-        raise DownloadError(message)
+        raise DownloadError(
+            f"same untrusted text {RECEIPT_TOKEN}", code=lower_code
+        )
 
     monkeypatch.setattr("sukaseafood_sync.engine.download_image", fail)
+    events: list[ProgressEvent] = []
     result = SyncEngine(session=Session()).run(
-        manifest(row(11)), sync_root, SyncCallbacks(), threading.Event()
+        manifest(row(11)), sync_root, SyncCallbacks(events.append), threading.Event()
     )
     assert result.receipt_items[0].error == expected
+    assert events[-2].message == f"sync.failed.{expected.casefold()}"
+    assert RECEIPT_TOKEN not in repr(result) + repr(events)
+
+
+@pytest.mark.parametrize(
+    ("lower_code", "expected"),
+    [
+        ("TARGET_CONFLICT", "FILESYSTEM_ERROR"),
+        ("SOURCE_STATE_MISSING", "OPERATION_ERROR"),
+        ("INDEX_READ_FAILED", "INDEX_ERROR"),
+        ("ADD_RECOVERY_INVALID", "INVALID_IMAGE"),
+        ("LOG_SETUP_FAILED", "SETUP_ERROR"),
+        ("UNEXPECTED_OPERATION_FAILURE", "UNEXPECTED_ERROR"),
+        (f"UNTRUSTED_{RECEIPT_TOKEN}", "OPERATION_ERROR"),
+    ],
+)
+def test_operation_failures_use_explicit_stable_categories(
+    sync_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lower_code: str,
+    expected: str,
+) -> None:
+    sync_root.mkdir()
+
+    def fail_recovery(*args, **kwargs):
+        raise OperationError(lower_code)
+
+    monkeypatch.setattr("sukaseafood_sync.engine.recover_add", fail_recovery)
+    events: list[ProgressEvent] = []
+    result = SyncEngine(session=Session()).run(
+        manifest(row(14)), sync_root, SyncCallbacks(events.append), threading.Event()
+    )
+
+    assert result.receipt_items[0].error == expected
+    assert events[-2].message == f"sync.failed.{expected.casefold()}"
+    assert RECEIPT_TOKEN not in repr(result) + repr(events)
+
+
+def test_direct_index_failure_has_index_category(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_root.mkdir()
+
+    def fail_recovery(*args, **kwargs):
+        raise SyncIndexError(f"untrusted {RECEIPT_TOKEN}")
+
+    monkeypatch.setattr("sukaseafood_sync.engine.recover_add", fail_recovery)
+    result = SyncEngine(session=Session()).run(
+        manifest(row(15)), sync_root, SyncCallbacks(), threading.Event()
+    )
+
+    assert result.receipt_items[0].error == "INDEX_ERROR"
 
 
 def test_unexpected_failure_does_not_expose_exception_graph_or_stop_batch(
@@ -453,6 +513,14 @@ def test_session_ownership_and_setup_validation(
         )
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+
+    unsafe_root = sync_root / "not-a-directory"
+    unsafe_root.write_text("file", encoding="utf-8")
+    with pytest.raises(SyncEngineError, match="ROOT_UNSAFE") as setup_caught:
+        SyncEngine(session=Session()).run(
+            manifest(row(54)), unsafe_root, SyncCallbacks(), threading.Event()
+        )
+    assert setup_caught.value.code == "ROOT_UNSAFE"
 
 
 def test_engine_creates_a_new_selected_training_root(

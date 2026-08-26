@@ -29,9 +29,16 @@ _FORMAT_SUFFIXES = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
 class DownloadError(RuntimeError):
     """An original image could not be downloaded and safely validated."""
 
+    def __init__(self, message: str, *, code: str = "DOWNLOAD_ERROR") -> None:
+        self.code = code
+        super().__init__(message)
+
 
 class DownloadCancelled(DownloadError):
     """The caller cancelled an in-progress download."""
+
+    def __init__(self, message: str = "download cancelled") -> None:
+        super().__init__(message, code="CANCELLED")
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +93,9 @@ def _lstat(path: Path) -> os.stat_result | None:
     except FileNotFoundError:
         return None
     except OSError:
-        raise DownloadError("download path cannot be inspected") from None
+        raise DownloadError(
+            "download path cannot be inspected", code="FILESYSTEM_ERROR"
+        ) from None
 
 
 def _regular_non_reparse(metadata: os.stat_result) -> bool:
@@ -116,18 +125,26 @@ def _remove_owned_staging(path: Path, owned: os.stat_result | None) -> None:
 
 def _prepare_paths(destination: Path) -> Path:
     if not destination.parent.is_dir():
-        raise DownloadError("destination parent must already exist")
+        raise DownloadError(
+            "destination parent must already exist", code="FILESYSTEM_ERROR"
+        )
     if _lstat(destination) is not None:
-        raise DownloadError("destination already exists or is unsafe")
+        raise DownloadError(
+            "destination already exists or is unsafe", code="FILESYSTEM_ERROR"
+        )
     staging = destination.with_name(destination.name + ".part")
     existing = _lstat(staging)
     if existing is not None:
         if not _regular_non_reparse(existing):
-            raise DownloadError("staging path is not a safe regular file")
+            raise DownloadError(
+                "staging path is not a safe regular file", code="FILESYSTEM_ERROR"
+            )
         try:
             staging.unlink()
         except OSError:
-            raise DownloadError("stale staging file cannot be removed") from None
+            raise DownloadError(
+                "stale staging file cannot be removed", code="FILESYSTEM_ERROR"
+            ) from None
     return staging
 
 
@@ -162,7 +179,7 @@ def _request(
         if cancel():
             raise DownloadCancelled("download cancelled")
         if current in visited:
-            raise DownloadError("redirect loop rejected")
+            raise DownloadError("redirect loop rejected", code="NETWORK_ERROR")
         visited.add(current)
         response: requests.Response | None = None
         request_failed = False
@@ -195,7 +212,9 @@ def _request(
         location = response.headers.get("Location")
         response.close()
         if redirects >= policy.max_redirects or location is None:
-            raise DownloadError("redirect limit or location rejected")
+            raise DownloadError(
+                "redirect limit or location rejected", code="NETWORK_ERROR"
+            )
         try:
             location_parts = urlsplit(location)
             if location_parts.scheme and _validated_https_url(location) is None:
@@ -205,7 +224,7 @@ def _request(
             following = None
         current = _validated_https_url(following) if following is not None else None
         if current is None:
-            raise DownloadError("redirect target rejected")
+            raise DownloadError("redirect target rejected", code="NETWORK_ERROR")
         redirects += 1
 
 
@@ -218,7 +237,7 @@ def _content_length(response: requests.Response, maximum: int) -> int | None:
     if raw is None:
         return None
     if not raw.isdigit():
-        raise DownloadError("Content-Length is malformed")
+        raise DownloadError("Content-Length is malformed", code="INVALID_IMAGE")
     parsed = int(raw)
     if parsed > maximum:
         raise DownloadError("download size exceeds the configured limit")
@@ -250,11 +269,15 @@ def _open_new_staging(path: Path):
     try:
         descriptor = os.open(path, flags, 0o600)
     except OSError:
-        raise DownloadError("staging file cannot be created safely") from None
+        raise DownloadError(
+            "staging file cannot be created safely", code="FILESYSTEM_ERROR"
+        ) from None
     metadata = os.fstat(descriptor)
     if not _regular_non_reparse(metadata):
         os.close(descriptor)
-        raise DownloadError("staging path is not a safe regular file")
+        raise DownloadError(
+            "staging path is not a safe regular file", code="FILESYSTEM_ERROR"
+        )
     return os.fdopen(descriptor, "w+b"), metadata
 
 
@@ -288,11 +311,17 @@ def _validate_image(stream) -> tuple[str, str, int, int]:
     except Exception:
         decode_failed = True
     if decode_failed:
-        raise DownloadError("downloaded bytes are not a safe decodable image")
+        raise DownloadError(
+            "downloaded bytes are not a safe decodable image", code="INVALID_IMAGE"
+        )
     if unsupported:
-        raise DownloadError("downloaded image is not a supported image format")
+        raise DownloadError(
+            "downloaded image is not a supported image format", code="INVALID_IMAGE"
+        )
     if zero_sized or decoded_format is None:
-        raise DownloadError("downloaded bytes are not a safe decodable image")
+        raise DownloadError(
+            "downloaded bytes are not a safe decodable image", code="INVALID_IMAGE"
+        )
     return decoded_format, perceptual_hash, width, height
 
 
@@ -328,7 +357,9 @@ def _stream_response(
             except requests.RequestException:
                 transport_failed = True
             except Exception:
-                failed = DownloadError("download stream could not be saved")
+                failed = DownloadError(
+                    "download stream could not be saved", code="FILESYSTEM_ERROR"
+                )
             if failed is None and not transport_failed:
                 try:
                     stream.flush()
@@ -337,7 +368,9 @@ def _stream_response(
                 except DownloadError as error:
                     failed = error
                 except OSError:
-                    failed = DownloadError("download stream could not be saved")
+                    failed = DownloadError(
+                        "download stream could not be saved", code="FILESYSTEM_ERROR"
+                    )
     finally:
         if failed is not None or transport_failed:
             _remove_owned_staging(staging, owned)
@@ -385,7 +418,10 @@ def download_image(
             if status in _RETRY_STATUSES:
                 retry_delay = _retry_after(response, policy)
             elif not 200 <= status < 300:
-                raise DownloadError("image request failed with a non-retriable HTTP status")
+                raise DownloadError(
+                    "image request failed with a non-retriable HTTP status",
+                    code="NETWORK_ERROR",
+                )
             else:
                 (
                     owned,
@@ -398,7 +434,10 @@ def download_image(
                 ) = _stream_response(response, staging, policy, progress, cancel)
                 try:
                     if _lstat(target) is not None:
-                        raise DownloadError("destination appeared during download")
+                        raise DownloadError(
+                            "destination appeared during download",
+                            code="FILESYSTEM_ERROR",
+                        )
                     current = _lstat(staging)
                     if (
                         current is None
@@ -406,7 +445,8 @@ def download_image(
                         or not _same_file(current, owned)
                     ):
                         raise DownloadError(
-                            "verified staging file changed unexpectedly"
+                            "verified staging file changed unexpectedly",
+                            code="FILESYSTEM_ERROR",
                         )
                     return DownloadResult(
                         staging_path=staging,
@@ -429,8 +469,13 @@ def download_image(
 
         if attempt + 1 >= policy.attempts:
             if transport_failed:
-                raise DownloadError("image download failed after network retries")
-            raise DownloadError("image request failed after retriable HTTP statuses")
+                raise DownloadError(
+                    "image download failed after network retries", code="NETWORK_ERROR"
+                )
+            raise DownloadError(
+                "image request failed after retriable HTTP statuses",
+                code="NETWORK_ERROR",
+            )
         if cancel():
             raise DownloadCancelled("download cancelled")
         delay = (
@@ -440,4 +485,4 @@ def download_image(
         )
         time.sleep(delay)
 
-    raise DownloadError("image download failed")
+    raise DownloadError("image download failed", code="NETWORK_ERROR")

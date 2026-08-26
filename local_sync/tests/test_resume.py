@@ -6,11 +6,11 @@ from uuid import UUID
 
 import pytest
 
-from sukaseafood_sync.downloader import DownloadCancelled
+from sukaseafood_sync.downloader import DownloadCancelled, DownloadResult
 from sukaseafood_sync.engine import ProgressEvent, SyncCallbacks, SyncEngine
 from sukaseafood_sync.index import SyncIndex
 
-from test_engine import Session, fake_download, manifest, row
+from test_engine import JPEG, PHASH, SHA256, Session, fake_download, local, manifest, row
 
 
 def test_cancelled_batch_keeps_first_durable_item_and_rerun_skips_its_network(
@@ -51,7 +51,9 @@ def test_cancelled_batch_keeps_first_durable_item_and_rerun_skips_its_network(
     )
 
     assert not second_result.cancelled
-    assert second_result.counts == {"succeeded": 2, "failed": 0, "skipped": 0}
+    assert second_result.counts == {"succeeded": 1, "failed": 0, "skipped": 1}
+    assert second_result.receipt_items[0].status == "SUCCEEDED"
+    assert second_result.receipt_items[1].status == "SUCCEEDED"
     assert second_run_calls == [second.candidate_id]
 
 
@@ -105,6 +107,92 @@ def test_cancellation_during_rate_wait_prevents_next_request(
     assert [event.phase for event in events][-2:] == ["WAITING", "CANCELLED"]
 
 
+def test_default_wait_polls_is_set_only_event_during_commons_delay(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_root.mkdir()
+    first = row(123, source_url="https://commons.wikimedia.org/wiki/File:One")
+    second = row(124, source_url="https://en.wikipedia.org/wiki/Two")
+    calls: list[UUID] = []
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image", fake_download(sync_root, calls)
+    )
+
+    class IsSetOnly:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        def is_set(self) -> bool:
+            return self.cancelled
+
+        def set(self) -> None:
+            self.cancelled = True
+
+    event = IsSetOnly()
+    sleeps: list[float] = []
+
+    def cancel_on_first_poll(delay: float) -> None:
+        sleeps.append(delay)
+        event.set()
+
+    monkeypatch.setattr("sukaseafood_sync.engine.time.sleep", cancel_on_first_poll)
+    result = SyncEngine(session=Session(), monotonic=lambda: 0.0).run(
+        manifest(first, second), sync_root, SyncCallbacks(), event
+    )
+
+    assert result.cancelled
+    assert calls == [first.candidate_id]
+    assert sleeps and max(sleeps) <= 0.1
+
+
+def test_cancellation_after_download_preserves_staging_for_network_free_resume(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_root.mkdir()
+    item = row(125)
+    cancel_event = threading.Event()
+    first_calls: list[UUID] = []
+
+    def download_then_cancel(session, manifest_row, destination, policy, progress, cancel):
+        first_calls.append(manifest_row.candidate_id)
+        staging = Path(destination).with_name(Path(destination).name + ".part")
+        staging.write_bytes(JPEG)
+        cancel_event.set()
+        return DownloadResult(
+            staging, SHA256, PHASH, len(JPEG), "JPEG", ".jpg", 11, 7
+        )
+
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image", download_then_cancel
+    )
+    first = SyncEngine(session=Session()).run(
+        manifest(item), sync_root, SyncCallbacks(), cancel_event
+    )
+
+    staging = local(sync_root, item.target_relative_path).with_name(
+        item.target_relative_path.name + ".part"
+    )
+    assert first.cancelled
+    assert first.counts == {"succeeded": 0, "failed": 0, "skipped": 0}
+    assert first.receipt_items == ()
+    assert staging.read_bytes() == JPEG
+    assert SyncIndex(sync_root).get_completed(
+        item.candidate_id, item.review_id, item.review_version, "ADD"
+    ) is None
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("recovery must happen before network")
+
+    monkeypatch.setattr("sukaseafood_sync.engine.download_image", no_network)
+    second = SyncEngine(session=Session()).run(
+        manifest(item), sync_root, SyncCallbacks(), threading.Event()
+    )
+
+    assert second.counts == {"succeeded": 1, "failed": 0, "skipped": 0}
+    assert second.receipt_items[0].status == "SUCCEEDED"
+    assert not staging.exists()
+
+
 def test_add_recovery_happens_before_wait_or_network(
     sync_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -125,6 +213,6 @@ def test_add_recovery_happens_before_wait_or_network(
         wait=lambda delay, event: waits.append(delay) or False,
     ).run(manifest(first, second), sync_root, SyncCallbacks(), threading.Event())
 
-    assert result.counts == {"succeeded": 2, "failed": 0, "skipped": 0}
+    assert result.counts == {"succeeded": 1, "failed": 0, "skipped": 1}
     assert calls == [first.candidate_id, second.candidate_id]
     assert waits == []

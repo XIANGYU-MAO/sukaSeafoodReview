@@ -107,6 +107,31 @@ _KNOWN_SOURCE_DOMAINS = {
     "gbif": ("gbif.org",),
     "fish-vista": ("fishair.org", "fish-vista.org", "fishvista.org"),
 }
+_WAIT_POLL_SECONDS = 0.05
+_DOWNLOAD_FAILURE_CODES = frozenset(
+    {"NETWORK_ERROR", "INVALID_IMAGE", "DOWNLOAD_ERROR", "FILESYSTEM_ERROR"}
+)
+_INVALID_IMAGE_OPERATION_CODES = frozenset({"ADD_RECOVERY_INVALID"})
+_FILESYSTEM_OPERATION_CODES = frozenset(
+    {
+        "ROOT_UNSAFE",
+        "PATH_UNSAFE",
+        "PARENT_UNSAFE",
+        "SOURCE_UNSAFE",
+        "TARGET_UNSAFE",
+        "TARGET_CONFLICT",
+        "STAGING_FILE_UNSAFE",
+        "STAGING_PATH_INVALID",
+        "STAGING_CONTENT_MISMATCH",
+        "FILESYSTEM_OPERATION_FAILED",
+        "LOG_WRITE_FAILED",
+    }
+)
+_INDEX_OPERATION_CODES = frozenset({"INDEX_READ_FAILED", "INDEX_WRITE_FAILED"})
+_SETUP_OPERATION_CODES = frozenset(
+    {"LOG_PATH_UNSAFE", "LOG_SETUP_FAILED", "OPERATION_SETUP_FAILED"}
+)
+_UNEXPECTED_OPERATION_CODES = frozenset({"UNEXPECTED_OPERATION_FAILURE"})
 
 
 def _host_matches(host: str, domain: str) -> bool:
@@ -142,25 +167,31 @@ def _default_wait(delay: float, cancel_event: CancelEvent) -> bool:
     event_wait = getattr(cancel_event, "wait", None)
     if callable(event_wait):
         return bool(event_wait(delay))
-    time.sleep(delay)
-    return cancel_event.is_set()
+    deadline = time.monotonic() + max(0.0, delay)
+    while True:
+        if cancel_event.is_set():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_WAIT_POLL_SECONDS, remaining))
 
 
 def _download_failure_code(error: DownloadError) -> str:
-    message = str(error).casefold()
-    if "decod" in message or "image format" in message:
-        return "INVALID_IMAGE"
-    if any(
-        marker in message
-        for marker in ("network", "request", "http status", "redirect")
-    ):
-        return "NETWORK_ERROR"
-    return "DOWNLOAD_ERROR"
+    return error.code if error.code in _DOWNLOAD_FAILURE_CODES else "DOWNLOAD_ERROR"
 
 
 def _operation_failure_code(error: OperationError) -> str:
-    if error.code.startswith("INDEX_"):
+    if error.code in _INVALID_IMAGE_OPERATION_CODES:
+        return "INVALID_IMAGE"
+    if error.code in _FILESYSTEM_OPERATION_CODES:
+        return "FILESYSTEM_ERROR"
+    if error.code in _INDEX_OPERATION_CODES:
         return "INDEX_ERROR"
+    if error.code in _SETUP_OPERATION_CODES:
+        return "SETUP_ERROR"
+    if error.code in _UNEXPECTED_OPERATION_CODES:
+        return "UNEXPECTED_ERROR"
     return "OPERATION_ERROR"
 
 
@@ -193,6 +224,7 @@ class SyncEngine:
         total: int,
         row: ManifestRow | None,
         phase: str,
+        message: str | None = None,
         downloaded_bytes: int | None = None,
         total_bytes: int | None = None,
     ) -> None:
@@ -202,7 +234,7 @@ class SyncEngine:
             candidate_id=str(row.candidate_id) if row is not None else None,
             species_code=row.species_code if row is not None else None,
             phase=phase,
-            message=f"sync.{phase.casefold()}",
+            message=message or f"sync.{phase.casefold()}",
             downloaded_bytes=downloaded_bytes,
             total_bytes=total_bytes,
         )
@@ -515,7 +547,12 @@ class SyncEngine:
                     counts["failed"] += 1
                     receipts.append(self._failed_receipt(row, failure_code))
                     self._emit(
-                        callbacks, current=current, total=total, row=row, phase="FAILED"
+                        callbacks,
+                        current=current,
+                        total=total,
+                        row=row,
+                        phase="FAILED",
+                        message=f"sync.failed.{failure_code.casefold()}",
                     )
                     continue
                 if cancelled:
