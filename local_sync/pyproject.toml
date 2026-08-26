@@ -7,10 +7,14 @@ name = "sukaseafood-sync"
 version = "0.1.0"
 description = "Safe local training-set synchronization for SukaSeafood"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "requests>=2.32,<3",
+    "Pillow>=10.4,<13",
+    "ImageHash>=4.3,<5",
+]
 
 [project.optional-dependencies]
-test = ["pytest>=8.3,<9"]
+test = ["pytest>=8.3,<9", "responses>=0.25,<1"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
