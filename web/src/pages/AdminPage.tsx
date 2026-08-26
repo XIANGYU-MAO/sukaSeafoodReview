@@ -59,7 +59,7 @@ export function AdminPage({ csrfToken, retryBootstrap }: { csrfToken: string; re
   };
 
   return <main className="admin-workspace" lang="zh-CN">
-    <div className="admin-heading"><p className="eyebrow">Mao 管理</p><h1>中文管理后台</h1><p>管理共享审核、目录、导入和本地训练集同步。</p></div>
+    <div className="admin-heading"><p className="eyebrow">SukaSeafood</p><h1>管理后台</h1><p>管理共享审核、目录、导入和本地训练集同步。</p></div>
     {usersQuery.error || speciesQuery.error || sourcesQuery.error ? <div role="alert" className="notice notice--error">管理选项加载失败。<button className="text-button" type="button" onClick={refreshDirectories}>重试</button></div> : null}
     <div className="admin-tabs" role="tablist" aria-label="后台管理功能">
       {TABS.map(([key, label], index) => <button

@@ -10,16 +10,16 @@ Reviewers can view and edit only their own current history, while everyone can s
 
 ## Repository and current development context
 
-The current implementation branch is `codex/collaborative-review`. This development checkout uses `C:\Users\86166\Desktop\sukaSeafoodReview\.worktrees\collaborative-review`; `.worktrees` is a local Git isolation detail, not a runtime requirement.
+As of 2026-08-26, this implementation is local and unpublished. It is on branch `codex/collaborative-review` in `C:\Users\86166\Desktop\sukaSeafoodReview\.worktrees\collaborative-review`. The `origin` remote currently has no published refs; `https://github.com/XIANGYU-MAO/sukaSeafoodReview.git` is only the target URL. `.worktrees` is a local Git isolation detail, not a runtime requirement.
 
-Normal users should clone the repository and run the commands in this document from its root:
+Only after this branch has been explicitly merged, pushed, and published may other users run the following clone command; it is not a working acquisition path today:
 
 ```powershell
 git clone https://github.com/XIANGYU-MAO/sukaSeafoodReview.git
 Set-Location .\sukaSeafoodReview
 ```
 
-Do not copy or depend on another machine's `.worktrees` directory. This document describes the current core code; it does not imply that the production-release or Windows-downloader stage has been completed.
+Until then, local commands run from the repository root of the current checkout above. Do not copy or depend on another machine's `.worktrees` directory. This document describes current core code; it does not claim a merge, push, production release, or completed Windows-downloader stage.
 
 ## Architecture and data flow
 
@@ -57,7 +57,7 @@ Copy-Item .\api\.env.example .\api\.env
 
 `api/.env` is local-only. Replace the three `change-me-*` values with different local random values. Do not commit the file or reuse production values.
 
-Terminal 1: load `.env` into the current PowerShell process, migrate, seed the six accounts, and start the API:
+Terminal 1: load `.env` into the current PowerShell process, migrate, seed the default species and six accounts, and start the API:
 
 ```powershell
 Get-Content .\api\.env | Where-Object { $_ -match '^[^#][^=]*=' } | ForEach-Object {
@@ -66,11 +66,12 @@ Get-Content .\api\.env | Where-Object { $_ -match '^[^#][^=]*=' } | ForEach-Obje
 }
 Set-Location .\api
 .\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m app.commands.seed_species
 .\.venv\Scripts\python.exe -m app.commands.seed_users --print-once
 .\.venv\Scripts\python.exe -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-The first seed prints one temporary password for each account exactly once. Store and distribute them securely at once. Running the command again against the same database neither prints nor replaces them.
+The species seed only fills missing SF001–SF005 defaults. It does not overwrite Mao's edits or delete or reject future species such as SF006; a no-op rerun prints nothing. The first account seed prints one temporary password for each account exactly once. Store and distribute them securely at once. Running it again against the same database neither prints nor replaces them.
 
 Terminal 2: install Web dependencies and start Vite:
 
@@ -86,13 +87,13 @@ Open `http://localhost:5173/sukaseafood/review/`. The development example intent
 
 The public name order is fixed: Hassan, Mao, Xinhui, Wahid, Sharmaa, Yiming. Mao is `admin`; all others are `reviewer`. Registration, social login, and arbitrary accounts are unsupported. A first login must change the temporary password. A successful password change revokes all sessions and returns to login; an administrator reset also revokes that reviewer's sessions.
 
-Sessions are stored in the database. The browser receives only an HttpOnly, SameSite=Lax cookie with `Path=/sukaseafood`. A refresh restores the session through `/sukaseafood/api/v1/auth/me`. Production must use `SECURE_COOKIE=true` over HTTPS; production configuration rejects `SECURE_COOKIE=false`. Every mutation requires the CSRF value derived from the same session, and each concrete review submission also needs its own Idempotency-Key.
+Sessions are stored in the database. The browser receives only an HttpOnly, SameSite=Lax cookie with `Path=/sukaseafood`. A refresh restores the session through `/sukaseafood/api/v1/auth/me`. Production must use `SECURE_COOKIE=true` over HTTPS; production configuration rejects `SECURE_COOKIE=false`. In this flow, login is the unauthenticated entry point. After login, browser-authenticated state mutations use the session and its derived CSRF value, and each concrete review submission also needs its own Idempotency-Key. The later local-sync tool submits `/v1/sync/batches/{batch_id}/receipt` with a batch token, not a browser session or CSRF.
 
 Temporary and reset passwords are shown once. Never put passwords, session cookies, CSRF values, receipt secrets, database URLs, or SSH credentials in Git, screenshots, logs, or issue reports.
 
 ## Import the initial 1,221-row manifest
 
-The real legacy manifest is `C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector\output\candidates.csv`. Run the read-only dry-run from a terminal in which the API environment has already been loaded:
+The real legacy manifest is `C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector\output\candidates.csv`. Confirm that the default species seed has run, then run the read-only dry-run from a terminal in which the API environment has already been loaded:
 
 ```powershell
 Set-Location .\api
@@ -115,19 +116,19 @@ The CLI dry-run writes no candidates and creates no committable preview token. A
 
 Aggregate progress contains only counts and six member aggregates—no notes, image URLs, candidate IDs, review IDs, or personal history items. Member work totals count all submitted attempts, while the overall total describes the active dataset; after Mao reopens an item, those totals can legitimately differ.
 
-## Mao's seven-tab Chinese administration
+## Seven-tab Chinese administration
 
-After Mao logs in, administration remains Chinese. A reviewer who enters `/admin` is redirected to review before any admin request is made. The seven tabs are:
+The page has the generic title “管理后台” (Administration), while Mao remains its only authorized account. After Mao logs in, the interface remains Chinese. A reviewer who enters `/admin` is redirected to review before any admin request is made. The seven tabs are:
 
 1. 审核进度 — team aggregates and current assignments.
 2. 候选图片 — filters, safe metadata corrections, release, and transfer of unsubmitted current candidates.
-3. 鱼种管理 — create, edit, deactivate, and reactivate species with immutable Windows-safe codes.
+3. 鱼种管理 (Species management) — create, edit, deactivate, and reactivate species with immutable Windows-safe codes. The default seed is not a five-species ceiling: before importing SF006 or any future species, Mao adds its directory entry here under the safe-code rules.
 4. 审核历史 — cross-member filtering, version-protected corrections, and reopening for a specified active reviewer who has never reviewed the candidate.
 5. 导入 — CSV preview and atomic commit.
 6. 训练集同步 — pending counts, immutable incremental batches, small CSV downloads, and JSON receipt-file upload.
 7. 账号 — the fixed directory and reviewer password reset; Mao is not reset through the Web UI.
 
-Every admin mutation requires Mao's session, CSRF, a reason, and any required second confirmation. The interface does not render raw server errors, free-text failed-receipt content, import tokens, or dismissed one-time passwords.
+Browser-based admin mutations require Mao's session, CSRF, and the confirmations specified by each API. Only admin data operations whose request models include `reason`—such as candidate, species, review-history, and account changes—require and audit a reason. Import preview/commit, export batches, and receipts follow their own token, confirmation, and authentication contracts and do not invent `reason`. The interface does not render raw server errors, free-text failed-receipt content, import tokens, or dismissed one-time passwords.
 
 ## Incremental CSV and local downloader boundary
 

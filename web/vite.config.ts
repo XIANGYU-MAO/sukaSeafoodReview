@@ -6,9 +6,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/sukaseafood/api": {
+      "^/sukaseafood/api(?:/|$)": {
         target: "http://127.0.0.1:8000",
-        rewrite: (path) => path.replace(/^\/sukaseafood\/api/, ""),
+        rewrite: (path) => path.replace(/^\/sukaseafood\/api(?:\/|$)/, "/"),
       },
     },
   },

@@ -107,7 +107,16 @@ async def post_export(
     return await batch_response(db, result.batch, created=result.created)
 
 
-@router.get("/{batch_id}.csv")
+@router.get(
+    "/{batch_id}.csv",
+    response_class=Response,
+    responses={
+        status.HTTP_200_OK: {
+            "description": "Incremental training-sync batch",
+            "content": {"text/csv": {"schema": {"type": "string"}}},
+        }
+    },
+)
 async def get_export_csv(
     batch_id: UUID,
     _: CurrentAuth = Depends(require_admin_access),

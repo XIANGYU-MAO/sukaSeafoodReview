@@ -185,4 +185,3 @@ def test_seed_only_fills_missing_defaults_and_preserves_edits_and_future_species
     ) == ("Mao 自定义名称", "Mao custom name", False, 99)
     assert by_code["SF006"].scientific_name == "Piscis futurus"
     assert by_code["SF003"].name_zh == by_code["SF003"].name_en == "Ikan Merah"
-

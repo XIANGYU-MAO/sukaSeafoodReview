@@ -10,16 +10,16 @@
 
 ## 仓库与当前开发上下文
 
-当前实现分支是 `codex/collaborative-review`。本次开发工作树位于 `C:\Users\86166\Desktop\sukaSeafoodReview\.worktrees\collaborative-review`；`.worktrees` 是本机 Git 隔离实现细节，不是使用前提。
+截至 2026-08-26，当前实现仅存在于本地，尚未发布：分支是 `codex/collaborative-review`，工作树位于 `C:\Users\86166\Desktop\sukaSeafoodReview\.worktrees\collaborative-review`。远端 `origin` 当前没有已发布引用；`https://github.com/XIANGYU-MAO/sukaSeafoodReview.git` 只是目标地址。`.worktrees` 是本机 Git 隔离实现细节，不是运行时要求。
 
-普通使用者应直接克隆仓库，然后从仓库根目录执行本文命令：
+只有该分支被显式合并、推送和发布后，其他使用者才可以执行以下 clone；当前不能把它当成可运行的获取方式：
 
 ```powershell
 git clone https://github.com/XIANGYU-MAO/sukaSeafoodReview.git
 Set-Location .\sukaSeafoodReview
 ```
 
-不要复制或依赖另一台机器的 `.worktrees` 目录。本文描述当前核心代码，不表示生产发布或 Windows 下载器阶段已经完成。
+在此之前，本机命令必须从上述当前 checkout 的仓库根目录运行。不要复制或依赖另一台机器的 `.worktrees` 目录。本文描述当前核心代码，不表示已合并、已推送、生产发布或 Windows 下载器阶段已经完成。
 
 ## 架构与数据流
 
@@ -57,7 +57,7 @@ Copy-Item .\api\.env.example .\api\.env
 
 `api/.env` 只供本机使用。把三个 `change-me-*` 值替换为彼此不同的本地随机值，不要提交该文件，也不要复用生产值。
 
-终端 1：加载 `.env` 到当前 PowerShell 进程，迁移、初始化六账号并启动 API：
+终端 1：加载 `.env` 到当前 PowerShell 进程，迁移、初始化默认鱼种与六账号并启动 API：
 
 ```powershell
 Get-Content .\api\.env | Where-Object { $_ -match '^[^#][^=]*=' } | ForEach-Object {
@@ -66,11 +66,12 @@ Get-Content .\api\.env | Where-Object { $_ -match '^[^#][^=]*=' } | ForEach-Obje
 }
 Set-Location .\api
 .\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m app.commands.seed_species
 .\.venv\Scripts\python.exe -m app.commands.seed_users --print-once
 .\.venv\Scripts\python.exe -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-首次 seed 会在终端中各显示一次六个临时密码；立即安全保存并分发。相同数据库再次运行不会输出或替换密码。
+鱼种 seed 只补齐缺失的 SF001–SF005 默认目录，不覆盖 Mao 已编辑的字段，不删除或拒绝 SF006 等未来鱼种；重复运行没有新增项时不输出。账号首次 seed 会在终端中各显示一次六个临时密码；立即安全保存并分发。相同数据库再次运行不会输出或替换密码。
 
 终端 2：安装网页依赖并启动 Vite：
 
@@ -86,13 +87,13 @@ npm run dev
 
 公开姓名顺序固定为 Hassan、Mao、Xinhui、Wahid、Sharmaa、Yiming；除 Mao 为 `admin` 外，其余均为 `reviewer`。不支持注册、社交登录或自定义账号。首次登录必须修改临时密码，修改成功会撤销全部会话并返回登录页；管理员重置成员密码也会撤销该成员会话。
 
-会话保存在数据库，浏览器只接收 HttpOnly、SameSite=Lax、`Path=/sukaseafood` Cookie。刷新页面通过 `/sukaseafood/api/v1/auth/me` 恢复会话。生产必须在 HTTPS 下使用 `SECURE_COOKIE=true`；`SECURE_COOKIE=false` 会被生产配置拒绝。所有写操作要求同一会话派生的 CSRF 值，审核提交还要求每个具体操作独立的 Idempotency-Key。
+会话保存在数据库，浏览器只接收 HttpOnly、SameSite=Lax、`Path=/sukaseafood` Cookie。刷新页面通过 `/sukaseafood/api/v1/auth/me` 恢复会话。生产必须在 HTTPS 下使用 `SECURE_COOKIE=true`；`SECURE_COOKIE=false` 会被生产配置拒绝。登录是未认证入口；登录成功后，浏览器发起的已认证状态变更使用会话和同一会话派生的 CSRF，审核提交还要求每个具体操作独立的 Idempotency-Key。后续本地同步工具向 `/v1/sync/batches/{batch_id}/receipt` 提交回执时使用批次 token，不使用浏览器会话或 CSRF。
 
 临时密码和重置密码只显示一次。不要把密码、会话 Cookie、CSRF、回执密钥、数据库 URL 或 SSH 凭据写进 Git、截图、日志或问题单。
 
 ## 导入初始 1,221 行清单
 
-真实旧清单路径是 `C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector\output\candidates.csv`。先在已经加载 API 环境变量的终端执行只读 dry-run：
+真实旧清单路径是 `C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector\output\candidates.csv`。先确认已经运行默认鱼种 seed，再在已经加载 API 环境变量的终端执行只读 dry-run：
 
 ```powershell
 Set-Location .\api
@@ -115,19 +116,19 @@ dry-run 不写候选、不生成可提交预览令牌。确认报告后，Mao �
 
 汇总进度只包含数量和六名成员的聚合，不包含备注、图片 URL、候选 ID、审核 ID或个人历史条目。成员工作量按所有已提交尝试计数；总体进度描述当前活跃数据，因此 Mao 重新打开记录后两种总计可能不同。
 
-## Mao 的七标签中文后台
+## 七标签中文管理后台
 
-Mao 登录后看到固定中文后台，且普通成员直接访问 `/admin` 会在发出任何管理请求前返回审核首页。七个标签是：
+管理页面的通用标题是“管理后台”，其唯一授权账号仍是 Mao。Mao 登录后看到固定中文界面，普通成员直接访问 `/admin` 会在发出任何管理请求前返回审核首页。七个标签是：
 
 1. 审核进度：全组聚合和当前占用。
 2. 候选图片：筛选、修正安全元数据、释放或转交尚未提交的当前图片。
-3. 鱼种管理：新增、编辑、停用和重新启用 Windows 安全的不可变鱼种代码。
+3. 鱼种管理：新增、编辑、停用和重新启用 Windows 安全的不可变鱼种代码。默认 seed 不是五种上限；导入 SF006 或其他未来鱼种的行之前，Mao 应先在此添加符合安全代码规则的目录项。
 4. 审核历史：跨成员筛选、受版本保护的修正，以及指定从未审核该候选的活跃成员重新审核。
 5. 导入：CSV 预检查与原子 commit。
 6. 训练集同步：查看待处理数、创建不可变增量批次、下载小型 CSV、上传 JSON 回执文件。
 7. 账号：查看固定目录并重置普通成员密码；不在网页重置 Mao。
 
-所有管理写操作需要 Mao 会话、CSRF、明确原因和必要的二次确认。后台不会显示原始服务器错误、失败回执自由文本、导入令牌或已关闭的一次性密码。
+浏览器中的管理写操作需要 Mao 会话、CSRF 和各 API 规定的必要确认。只有候选、鱼种、审核历史、账号等请求模型包含 `reason` 的管理数据操作才要求并审计明确原因；导入预览/commit、导出批次和回执按各自的 token、确认及认证合同执行，不虚构 `reason`。后台不会显示原始服务器错误、失败回执自由文本、导入令牌或已关闭的一次性密码。
 
 ## 增量 CSV 与本地下载边界
 
