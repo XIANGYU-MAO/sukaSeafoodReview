@@ -138,6 +138,62 @@ def test_batch_json_history_never_exposes_token_and_digest_is_recomputable(setti
     assert history.status_code == 200
 
 
+def test_export_history_pages_over_more_than_one_hundred_rows(settings):
+    seed = create_seed(settings)
+
+    async def add_history():
+        engine = create_async_engine(settings.DATABASE_URL)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        now = datetime.now(timezone.utc)
+        async with factory() as db:
+            db.add_all([
+                ExportBatch(
+                    created_by_id=seed.mao_id,
+                    species_id=None,
+                    scope_key="ALL",
+                    receipt_token_hash=f"{index:064x}",
+                    status="completed",
+                    expires_at=now + timedelta(days=7),
+                    completed_at=now,
+                    created_at=now - timedelta(minutes=index),
+                )
+                for index in range(105)
+            ])
+            await db.commit()
+        await engine.dispose()
+
+    asyncio.run(add_history())
+    with TestClient(create_app(settings)) as client:
+        first = client.get("/v1/admin/exports", params={"limit": 100, "offset": 0}, headers=mao_headers(seed))
+        second = client.get("/v1/admin/exports", params={"limit": 100, "offset": 100}, headers=mao_headers(seed))
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["total"] == second.json()["total"] == 105
+    assert len(first.json()["items"]) == 100
+    assert len(second.json()["items"]) == 5
+    assert set(item["id"] for item in first.json()["items"]).isdisjoint(item["id"] for item in second.json()["items"])
+
+
+def test_admin_partial_receipt_accepts_one_success_and_reports_other_batch_item_pending(settings):
+    seed = create_seed(settings, decisions=(Decision.APPROVED, Decision.APPROVED))
+    with TestClient(create_app(settings)) as client:
+        created = create_batch(client, seed)
+        _, rows = download(client, seed, created.json()["id"])
+        response = client.post(
+            f"/v1/admin/exports/{created.json()['id']}/receipt-file",
+            json={"batch_id": created.json()["id"], "items": [success_receipt(rows[0])]},
+            headers=mao_headers(seed, csrf=True),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "batch_id": created.json()["id"],
+        "status": "pending",
+        "accepted_candidate_ids": [rows[0]["candidate_id"]],
+        "pending_candidate_ids": [rows[1]["candidate_id"]],
+    }
+
+
 def test_same_scope_reuses_cross_scope_overlaps_no_work_and_expiry_regenerates(settings):
     seed = create_seed(settings, (Decision.APPROVED, Decision.REJECTED))
     with TestClient(create_app(settings)) as client:

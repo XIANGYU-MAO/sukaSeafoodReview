@@ -58,6 +58,7 @@ export const speciesItems = [
 ];
 
 export const speciesFixture = { total: 2, items: speciesItems };
+export const sourcesFixture = { sources: ["GBIF", "INATURALIST", "WIKIMEDIA_COMMONS"] };
 
 export const progressFixture = {
   total: 3,
@@ -199,10 +200,11 @@ export function defaultAdminResponse(url: string): Response {
   if (url.endsWith("/progress")) return jsonResponse(progressFixture);
   if (url.includes("/admin/current")) return jsonResponse(currentFixture);
   if (url.includes("/admin/users")) return jsonResponse(usersFixture);
+  if (url.includes("/admin/sources")) return jsonResponse(sourcesFixture);
   if (url.includes("/admin/species")) return jsonResponse(speciesFixture);
   if (url.includes("/admin/candidates")) return jsonResponse(candidatesFixture);
   if (url.includes("/admin/reviews")) return jsonResponse(reviewsFixture);
   if (url.endsWith("/admin/exports/pending-counts")) return jsonResponse({ SF001: 2, SF002: 0 });
-  if (url.endsWith("/admin/exports")) return jsonResponse(exportsFixture);
+  if (url.endsWith("/admin/exports") || url.includes("/admin/exports?")) return jsonResponse(exportsFixture);
   throw new Error(`Unexpected request: ${url}`);
 }

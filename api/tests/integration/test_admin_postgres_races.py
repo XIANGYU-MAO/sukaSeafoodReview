@@ -1,5 +1,6 @@
 import asyncio
 import os
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -11,6 +12,7 @@ from app.models import (
     Base,
     Candidate,
     Decision,
+    ExportBatch,
     Review,
     ReviewRevision,
     Species,
@@ -28,9 +30,11 @@ from app.services.admin import (
     patch_candidate,
     patch_species,
     reopen_review,
+    list_admin_sources,
     transfer_current,
 )
 from app.services.auth import utc_now
+from app.services.exports import list_batches
 from app.services.pool import get_or_open_current
 from tests.review_support import candidate_record
 
@@ -571,3 +575,48 @@ def test_concurrent_admin_transfers_to_one_target_return_success_and_stable_conf
     assert target_assignments == 1
     assert sorted(candidate.version for candidate in candidates) == [1, 2]
     assert audit_count == 1
+
+
+def test_admin_source_catalog_and_export_pagination_run_on_real_postgres():
+    async def operation(engine):
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as db:
+            mao = User(
+                name="Mao",
+                role="admin",
+                password_hash="test",
+                must_change_password=False,
+            )
+            species = Species(
+                code="SF001",
+                name_zh="测试鱼",
+                name_en="Test fish",
+                scientific_name="Piscis probatio",
+            )
+            db.add_all([mao, species])
+            await db.flush()
+            db.add_all([
+                candidate_record(species.id, 1, source_dataset="Wikimedia"),
+                candidate_record(species.id, 2, source_dataset="iNaturalist"),
+            ])
+            now = utc_now()
+            db.add_all([
+                ExportBatch(
+                    created_by_id=mao.id,
+                    species_id=None,
+                    scope_key="all",
+                    receipt_token_hash=f"{index:064x}",
+                    status="completed",
+                    expires_at=now + timedelta(days=7),
+                    completed_at=now,
+                )
+                for index in range(1, 22)
+            ])
+            await db.commit()
+            sources = await list_admin_sources(db)
+            total, batches = await list_batches(db, limit=10, offset=10)
+            return sources.sources, total, len(batches)
+
+    sources, total, page_size = asyncio.run(in_isolated_schema(operation))
+    assert sources == ["iNaturalist", "Wikimedia"]
+    assert (total, page_size) == (21, 10)

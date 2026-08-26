@@ -102,6 +102,16 @@ def test_species_list_filters_sorts_paginates_and_counts_candidates(settings):
     }
 
 
+def test_admin_sources_returns_only_distinct_deterministic_catalog_values(settings):
+    seed = asyncio.run(seed_catalog(settings))
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/v1/admin/sources", headers=admin_headers(seed))
+
+    assert response.status_code == 200
+    assert response.json() == {"sources": ["iNaturalist", "Wikimedia"]}
+    assert "candidate" not in response.text.lower()
+
+
 def test_species_create_and_edit_trim_fields_keep_code_immutable_and_audit(settings):
     seed = asyncio.run(seed_catalog(settings))
     headers = admin_headers(seed, csrf=True)

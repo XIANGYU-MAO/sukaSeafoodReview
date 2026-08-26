@@ -128,6 +128,8 @@ describe("progress/current and candidate safety", () => {
           ...candidateFixture,
           version: 2,
           current_reviewer: { id: IDS.xinhui, display_name: "Xinhui", active: true },
+          current_started_at: "2026-08-26T03:00:00Z",
+          current_review: null,
         });
       }
     });
@@ -151,6 +153,7 @@ describe("progress/current and candidate safety", () => {
           species: { ...currentFixture.items[0].species, id: IDS.species2, code: "SF002", name_zh: "测试鱼二" },
           version: 2,
           current_reviewer: { id: IDS.xinhui, display_name: "Xinhui", active: true },
+          current_started_at: "2026-08-26T03:00:00Z",
           current_review: null,
         });
       }
@@ -198,7 +201,7 @@ describe("species and review administration", () => {
   it("enforces Windows-safe species codes, reserved names, reasons, immutable code and no delete", async () => {
     const fetchMock = mockAdmin((url, init) => {
       if (url.endsWith("/admin/species") && init?.method === "POST") {
-        return jsonResponse({ ...speciesFixture.items[0], id: IDS.batch, code: "SF003", candidate_count: 0 }, 201);
+        return jsonResponse({ ...speciesFixture.items[0], id: IDS.batch, code: "SF003", name_zh: "新鱼", name_en: "New fish", scientific_name: "Piscis novus", sort_order: 0, candidate_count: 0 }, 201);
       }
     });
     const user = userEvent.setup();
@@ -224,7 +227,16 @@ describe("species and review administration", () => {
   it("creates a safe species and explicitly confirms stopping an existing species", async () => {
     const fetchMock = mockAdmin((url, init) => {
       if (url.endsWith("/admin/species") && init?.method === "POST") {
-        return jsonResponse({ ...speciesFixture.items[0], id: IDS.batch, code: "SF003", candidate_count: 0 }, 201);
+        return jsonResponse({
+          ...speciesFixture.items[0],
+          id: IDS.batch,
+          code: "SF003",
+          name_zh: "新鱼",
+          name_en: "New fish",
+          scientific_name: "Piscis novus",
+          sort_order: 0,
+          candidate_count: 0,
+        }, 201);
       }
       if (url.endsWith(`/admin/species/${IDS.species1}`) && init?.method === "PATCH") {
         return jsonResponse({ ...speciesFixture.items[0], active: false });
@@ -368,7 +380,7 @@ describe("import, export and one-time password workflows", () => {
           : jsonResponse({ ...exportBatch, created: creations === 3 }, creations === 3 ? 201 : 200);
       }
       if (url.endsWith(`/admin/exports/${IDS.batch}/receipt-file`) && init?.method === "POST") {
-        return jsonResponse({ batch_id: IDS.batch, status: "pending", accepted_candidate_ids: [IDS.candidate], pending_candidate_ids: [] });
+        return jsonResponse({ batch_id: IDS.batch, status: "completed", accepted_candidate_ids: [IDS.candidate], pending_candidate_ids: [] });
       }
     });
     const user = userEvent.setup();
