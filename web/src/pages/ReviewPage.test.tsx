@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { I18nProvider } from "../i18n/I18nProvider";
 import { deferred, jsonResponse } from "../test/helpers";
+import { progressFixture } from "../test/task11Fixtures";
 import { ReviewPage } from "./ReviewPage";
 
 const reviewerId = "8de1871b-677f-4ea8-8e11-1f4d49a88c86";
@@ -52,6 +53,12 @@ function renderPage(
   retryBootstrap = vi.fn(async () => undefined),
   strict = false,
 ) {
+  const suppliedFetch = globalThis.fetch;
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) =>
+    String(input).endsWith("/progress")
+      ? Promise.resolve(jsonResponse(progressFixture))
+      : suppliedFetch(input, init),
+  );
   const page = (
     <I18nProvider initialLocale="zh">
       <ReviewPage

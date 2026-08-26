@@ -36,7 +36,7 @@ function renderPage(retryBootstrap = vi.fn(async () => undefined), strict = fals
 
 describe("ReviewPage team progress", () => {
   it("loads aggregate progress without CSRF alongside the current image", async () => {
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/reviews/current")) return Promise.resolve(jsonResponse(candidate));
       if (url.endsWith("/progress")) return Promise.resolve(jsonResponse(progressFixture));

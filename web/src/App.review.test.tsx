@@ -57,6 +57,7 @@ describe("authenticated review integration", () => {
         const url = String(input);
         if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
         if (url.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+        if (url.endsWith("/progress")) return Promise.resolve(jsonResponse(progressFixture));
         if (url.endsWith("/auth/logout")) return Promise.resolve(jsonResponse({}, 503));
         return Promise.reject(new Error(`Unexpected request: ${url}`));
       }),

@@ -1,11 +1,11 @@
 import { type ReactNode, useEffect, useState } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 
 import { useAuth } from "./auth/AuthProvider";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { LoginPage } from "./pages/LoginPage";
+import { HistoryPage } from "./pages/HistoryPage";
 import { ReviewPage } from "./pages/ReviewPage";
-import type { MessageKey } from "./i18n/catalog";
 import { I18nProvider, useI18n } from "./i18n/I18nProvider";
 
 export const APP_PATHS = ["/", "/history", "/admin"] as const;
@@ -55,6 +55,7 @@ export function App() {
           element={
             <AuthenticatedShell
               name={authenticatedUser.name}
+              isAdmin={authenticatedUser.role === "admin"}
               onChangePassword={() => setChangingPassword(true)}
               onLogout={auth.logout}
             >
@@ -71,12 +72,14 @@ export function App() {
           element={
             <AuthenticatedShell
               name={authenticatedUser.name}
+              isAdmin={authenticatedUser.role === "admin"}
               onChangePassword={() => setChangingPassword(true)}
               onLogout={auth.logout}
             >
-              <LocalizedDeferredPage
-                titleKey="historyDeferredTitle"
-                descriptionKey="historyDeferredDescription"
+              <HistoryPage
+                csrfToken={authenticatedUser.csrf_token}
+                reviewerId={authenticatedUser.id}
+                retryBootstrap={auth.retryBootstrap}
               />
             </AuthenticatedShell>
           }
@@ -86,6 +89,7 @@ export function App() {
           element={
             <AuthenticatedShell
               name={authenticatedUser.name}
+              isAdmin={authenticatedUser.role === "admin"}
               onChangePassword={() => setChangingPassword(true)}
               onLogout={auth.logout}
             >
@@ -105,12 +109,13 @@ export function App() {
 
 interface AuthenticatedShellProps {
   name: string;
+  isAdmin: boolean;
   onChangePassword: () => void;
   onLogout: () => Promise<void>;
   children: ReactNode;
 }
 
-function AuthenticatedShell({ name, onChangePassword, onLogout, children }: AuthenticatedShellProps) {
+function AuthenticatedShell({ name, isAdmin, onChangePassword, onLogout, children }: AuthenticatedShellProps) {
   const { locale, t, toggleLocale } = useI18n();
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState(false);
@@ -135,6 +140,11 @@ function AuthenticatedShell({ name, onChangePassword, onLogout, children }: Auth
           <p className="eyebrow">SukaSeafood</p>
           <strong>{t("shellTitle")}</strong>
         </div>
+        <nav className="shell-navigation" aria-label={t("shellTitle")}>
+          <NavLink to="/" end>{t("navReview")}</NavLink>
+          <NavLink to="/history">{t("navHistory")}</NavLink>
+          {isAdmin ? <NavLink to="/admin">{t("navAdmin")}</NavLink> : null}
+        </nav>
         <div className="user-actions">
           <span className="user-badge">{name}</span>
           <button className="secondary-button language-toggle" type="button" onClick={toggleLocale}>
@@ -159,17 +169,6 @@ function AuthenticatedShell({ name, onChangePassword, onLogout, children }: Auth
       {children}
     </div>
   );
-}
-
-function LocalizedDeferredPage({
-  titleKey,
-  descriptionKey,
-}: {
-  titleKey: MessageKey;
-  descriptionKey: MessageKey;
-}) {
-  const { t } = useI18n();
-  return <DeferredPage eyebrow={t("comingNext")} title={t(titleKey)} description={t(descriptionKey)} />;
 }
 
 function DeferredPage({

@@ -41,9 +41,15 @@ class HistoryItem(BaseModel):
     source_url: str
 
 
+class HistoryFacets(BaseModel):
+    species: list[SpeciesSummary]
+    sources: list[str]
+
+
 class HistoryResponse(BaseModel):
     total: int
     items: list[HistoryItem]
+    filters: HistoryFacets
 
 
 class HistoryEditRequest(DecisionRequest):

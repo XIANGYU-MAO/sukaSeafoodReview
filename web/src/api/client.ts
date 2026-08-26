@@ -7,12 +7,14 @@ const SAFE_PROTOCOL_FAILURE = "服务返回了无效响应，请重试。";
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: string;
+  readonly body: unknown;
 
-  constructor(status: number, detail = SAFE_FALLBACK) {
+  constructor(status: number, detail = SAFE_FALLBACK, body?: unknown) {
     super(detail);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.body = body;
   }
 }
 
@@ -43,7 +45,8 @@ export async function request<T = void>(
   });
 
   if (!response.ok) {
-    throw new ApiError(response.status, await safeErrorDetail(response));
+    const error = await safeErrorPayload(response);
+    throw new ApiError(response.status, error.detail, error.body);
   }
   if (response.status === 204) {
     return undefined as T;
@@ -64,10 +67,10 @@ function normalizePath(path: string): string {
   return path.startsWith("/") ? path : `/${path}`;
 }
 
-async function safeErrorDetail(response: Response): Promise<string> {
+async function safeErrorPayload(response: Response): Promise<{ detail: string; body?: unknown }> {
   const contentType = response.headers.get("Content-Type") ?? "";
   if (!contentType.toLowerCase().includes("application/json")) {
-    return SAFE_FALLBACK;
+    return { detail: SAFE_FALLBACK };
   }
   try {
     const body: unknown = await response.json();
@@ -78,10 +81,11 @@ async function safeErrorDetail(response: Response): Promise<string> {
       typeof body.detail === "string" &&
       body.detail.trim()
     ) {
-      return body.detail;
+      return { detail: body.detail, body };
     }
+    return { detail: SAFE_FALLBACK, body };
   } catch {
     // Malformed JSON receives the same opaque fallback as HTML/plain text.
   }
-  return SAFE_FALLBACK;
+  return { detail: SAFE_FALLBACK };
 }

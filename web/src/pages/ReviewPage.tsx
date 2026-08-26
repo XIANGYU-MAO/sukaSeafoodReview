@@ -3,13 +3,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, request } from "../api/client";
 import {
   parseCandidateResponse,
+  parseProgressResponse,
   parseReviewResponse,
   type CandidateResponse,
   type DecisionPayload,
+  type ProgressResponse,
 } from "../api/types";
 import { DecisionPanel } from "../components/DecisionPanel";
 import { ImageStage } from "../components/ImageStage";
 import { ProgressSummary } from "../components/ProgressSummary";
+import { TeamProgress } from "../components/TeamProgress";
 import { sourceLabel } from "../i18n/catalog";
 import { useI18n } from "../i18n/I18nProvider";
 
@@ -21,6 +24,7 @@ interface ReviewPageProps {
 
 type CurrentStatus = "loading" | "ready" | "empty" | "error" | "auth-refresh";
 type DecisionError = "ambiguous" | "rejected" | "conflict" | null;
+type ProgressStatus = "loading" | "ready" | "error" | "auth-refresh";
 
 interface DecisionOperation {
   candidateId: string;
@@ -41,10 +45,14 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
   const [retryPayload, setRetryPayload] = useState<DecisionPayload | null>(null);
   const [sessionCompleted, setSessionCompleted] = useState(0);
   const [panelResetSignal, setPanelResetSignal] = useState(0);
+  const [progress, setProgress] = useState<ProgressResponse | null>(null);
+  const [progressStatus, setProgressStatus] = useState<ProgressStatus>("loading");
   const currentGeneration = useRef(0);
   const currentController = useRef<AbortController | null>(null);
   const decisionGeneration = useRef(0);
   const decisionController = useRef<AbortController | null>(null);
+  const progressGeneration = useRef(0);
+  const progressController = useRef<AbortController | null>(null);
   const pendingRef = useRef(false);
   const operationRef = useRef<DecisionOperation | null>(null);
 
@@ -90,8 +98,35 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
     }
   }, [csrfToken, retryBootstrap]);
 
+  const loadProgress = useCallback(async () => {
+    const generation = progressGeneration.current + 1;
+    progressGeneration.current = generation;
+    progressController.current?.abort();
+    const controller = new AbortController();
+    progressController.current = controller;
+    setProgressStatus("loading");
+    try {
+      const raw = await request<unknown>("/progress", { signal: controller.signal });
+      const validated = parseProgressResponse(raw);
+      if (controller.signal.aborted || generation !== progressGeneration.current) return;
+      setProgress(validated);
+      setProgressStatus("ready");
+    } catch (error) {
+      if (controller.signal.aborted || generation !== progressGeneration.current) return;
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+        setProgressStatus("auth-refresh");
+        await retryBootstrap();
+      } else {
+        setProgressStatus("error");
+      }
+    } finally {
+      if (progressController.current === controller) progressController.current = null;
+    }
+  }, [retryBootstrap]);
+
   useEffect(() => {
     void loadCurrent();
+    void loadProgress();
     return () => {
       currentGeneration.current += 1;
       currentController.current?.abort();
@@ -100,8 +135,11 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
       decisionController.current?.abort();
       decisionController.current = null;
       pendingRef.current = false;
+      progressGeneration.current += 1;
+      progressController.current?.abort();
+      progressController.current = null;
     };
-  }, [loadCurrent]);
+  }, [loadCurrent, loadProgress]);
 
   const submitDecision = useCallback(async (payload: DecisionPayload) => {
     if (pendingRef.current || !candidate) return;
@@ -147,6 +185,7 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
       setSessionCompleted((count) => count + 1);
       setPanelResetSignal((signal) => signal + 1);
       setCandidate(null);
+      void loadProgress();
       await loadCurrent();
     } catch (error) {
       if (controller.signal.aborted || generation !== decisionGeneration.current) return;
@@ -178,7 +217,7 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
         setPending(false);
       }
     }
-  }, [candidate, csrfToken, loadCurrent, replaceOperation, retryBootstrap, reviewerId]);
+  }, [candidate, csrfToken, loadCurrent, loadProgress, replaceOperation, retryBootstrap, reviewerId]);
 
   function handlePayloadChange(nextPayload: DecisionPayload) {
     const active = operationRef.current;
@@ -311,6 +350,21 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
           </section>
         </article>
       ) : null}
+
+      <section className="review-progress-region">
+        {progressStatus === "loading" && progress === null ? (
+          <div className="progress-loading" aria-hidden="true"><span className="spinner" /></div>
+        ) : null}
+        {progressStatus === "error" ? (
+          <div className="notice notice--error progress-error" role="alert">
+            <span>{t("progressLoadError")}</span>
+            <button className="text-button" type="button" onClick={() => void loadProgress()}>
+              {t("retryProgress")}
+            </button>
+          </div>
+        ) : null}
+        {progress !== null ? <TeamProgress data={progress} /> : null}
+      </section>
     </main>
   );
 }

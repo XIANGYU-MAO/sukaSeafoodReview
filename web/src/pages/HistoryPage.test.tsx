@@ -91,7 +91,7 @@ describe("HistoryPage private filters and paging", () => {
     }));
     const user = userEvent.setup();
     renderPage();
-    await screen.findByText("page:1:File:Fish.jpg");
+    await screen.findByText(/page:1:File:Fish\.jpg/);
     await user.selectOptions(screen.getByRole("combobox", { name: "结果" }), "APPROVED");
     await user.click(screen.getByRole("button", { name: "应用筛选" }));
     await user.selectOptions(screen.getByRole("combobox", { name: "结果" }), "UNSURE");
@@ -101,6 +101,33 @@ describe("HistoryPage private filters and paging", () => {
     await act(async () => stale.resolve(jsonResponse({ ...historyFixture, items: [{ ...historyItem, decision: "APPROVED", rejection_reason: null }] })));
     expect(signals[1].aborted).toBe(true);
     expect(screen.queryByText("已保留", { selector: ".history-decision" })).not.toBeInTheDocument();
+  });
+
+  it("moves to the last valid page when an edit leaves the current page empty", async () => {
+    const urls: string[] = [];
+    let getCalls = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/history?")) {
+        urls.push(url);
+        getCalls += 1;
+        if (getCalls <= 2) return Promise.resolve(jsonResponse({ ...historyFixture, total: 21 }));
+        if (getCalls === 3) return Promise.resolve(jsonResponse({ ...historyFixture, total: 20, items: [] }));
+        return Promise.resolve(jsonResponse({ ...historyFixture, total: 20 }));
+      }
+      return Promise.resolve(jsonResponse(editedReview({ decision: "UNSURE", whole_fish: "REVIEW", exact_species_verified: "REVIEW" })));
+    }));
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/page:1:File:Fish\.jpg/);
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(urls.at(-1)).toContain("offset=20"));
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+    await user.click(screen.getByRole("button", { name: "不确定" }));
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(urls.at(-1)).toBe("/sukaseafood/api/v1/history?limit=20&offset=0"));
+    expect(await screen.findByText(/page:1:File:Fish\.jpg/)).toBeInTheDocument();
   });
 
   it.each([401, 403])("delegates history status %s to auth bootstrap", async (status) => {

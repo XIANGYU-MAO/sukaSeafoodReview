@@ -147,7 +147,7 @@ describe("authenticated password and logout flows", () => {
     renderWithAuth(<App />);
     await user.click(await screen.findByRole("button", { name: "退出登录" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("退出失败，请重试");
+    expect(await screen.findByText("退出失败，请重试。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "修改密码 / Change password" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重试退出" }));
     expect(await screen.findByRole("heading", { name: "登录审核平台" })).toBeInTheDocument();

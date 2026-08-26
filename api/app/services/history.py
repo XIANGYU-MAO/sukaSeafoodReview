@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Candidate, Review, ReviewRevision, Species
 from app.schemas.history import (
     HistoryEditRequest,
+    HistoryFacets,
     HistoryFilters,
     HistoryItem,
     HistoryResponse,
@@ -93,6 +94,31 @@ async def get_history(
             .limit(filters.limit)
         )
     ).all()
+    species_rows = (
+        await session.execute(
+            select(
+                Species.code,
+                Species.name_zh,
+                Species.name_en,
+                Species.scientific_name,
+                Species.sort_order,
+            )
+            .join(Candidate, Candidate.species_id == Species.id)
+            .join(Review, Review.candidate_id == Candidate.id)
+            .where(Review.reviewer_id == reviewer_id)
+            .distinct()
+            .order_by(Species.sort_order, Species.code)
+        )
+    ).all()
+    source_rows = (
+        await session.scalars(
+            select(Candidate.source_dataset)
+            .join(Review, Review.candidate_id == Candidate.id)
+            .where(Review.reviewer_id == reviewer_id)
+            .distinct()
+            .order_by(Candidate.source_dataset)
+        )
+    ).all()
     items = [
         HistoryItem(
             id=review.id,
@@ -122,7 +148,22 @@ async def get_history(
         )
         for review, candidate, species in rows
     ]
-    return HistoryResponse(total=total, items=items)
+    return HistoryResponse(
+        total=total,
+        items=items,
+        filters=HistoryFacets(
+            species=[
+                SpeciesSummary(
+                    code=code,
+                    name_zh=name_zh,
+                    name_en=name_en,
+                    scientific_name=scientific_name,
+                )
+                for code, name_zh, name_en, scientific_name, _ in species_rows
+            ],
+            sources=list(source_rows),
+        ),
+    )
 
 
 async def edit_review(
