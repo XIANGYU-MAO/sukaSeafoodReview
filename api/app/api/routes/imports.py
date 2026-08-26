@@ -6,6 +6,7 @@ from app.database import get_db
 from app.schemas.imports import ImportCommitRequest, ImportPreview, ImportResult
 from app.services.imports import (
     ImportConflict,
+    ImportFileFatal,
     MAX_UPLOAD_BYTES,
     commit_candidate_csv,
     stage_candidate_csv,
@@ -34,8 +35,14 @@ async def preview_import(
             db,
             content,
             actor_id=auth.user.id,
+            actor_session_id=auth.session.id,
             filename=file.filename,
         )
+    except ImportFileFatal as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "report": exc.report},
+        ) from exc
     except ImportConflict as exc:
         _raise_import_conflict(exc)
 
@@ -51,6 +58,7 @@ async def commit_import(
             db,
             payload.preview_token,
             auth.user.id,
+            actor_session_id=auth.session.id,
         )
     except ImportConflict as exc:
         _raise_import_conflict(exc)

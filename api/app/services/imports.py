@@ -18,7 +18,14 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AuditEvent, Candidate, CandidateImportPreview, Species, User
+from app.models import (
+    AuditEvent,
+    Candidate,
+    CandidateImportPreview,
+    Session,
+    Species,
+    User,
+)
 from app.schemas.imports import ImportIssue, ImportPreview, ImportResult, NormalizedCandidate
 from app.services.auth import as_utc
 
@@ -55,6 +62,18 @@ FIELD_LIMITS = {
     "source_location": 512,
     "source_date": 512,
 }
+CANDIDATE_FINAL_LIMITS = {
+    "source_dataset": 128,
+    "source_record_id": 255,
+    "preview_url": 2048,
+    "original_url": 2048,
+    "source_url": 2048,
+    "creator": 512,
+    "license": 255,
+    "license_url": 2048,
+    "attribution": 1024,
+    "location": 512,
+}
 MAPPED_FIELDS = {
     "seafood_code",
     "source_dataset",
@@ -80,6 +99,10 @@ LOCAL_OR_REVIEW_FIELDS = {
     "verified_by",
     "verification_notes",
 }
+MAPPED_FIELDS_CASEFOLD = {item.casefold() for item in MAPPED_FIELDS}
+LOCAL_OR_REVIEW_FIELDS_CASEFOLD = {
+    item.casefold() for item in LOCAL_OR_REVIEW_FIELDS
+}
 LICENSE_PATTERN = re.compile(
     r"^(?:CC-(?:BY|BY-NC|BY-NC-SA|BY-SA)|CC0|PUBLIC-DOMAIN)(?:[- ]\d+(?:\.\d+)?)?$",
     re.IGNORECASE,
@@ -94,6 +117,13 @@ TRACKING_QUERY_NAMES = {"fbclid", "gclid"}
 @dataclass(frozen=True)
 class ImportConflict(Exception):
     code: str
+
+
+@dataclass(frozen=True)
+class ImportFileFatal(Exception):
+    code: str
+    status_code: int
+    report: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -119,22 +149,52 @@ def _trim(value: str | None) -> str:
     return value.strip() if value is not None else ""
 
 
+def _contains_control(value: str) -> bool:
+    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+
+
+def _normalize_identifier(value: str | None, field: str) -> str:
+    raw = value or ""
+    if _contains_control(raw):
+        raise RowProblem(
+            "INVALID_CONTROL_CHARACTER",
+            "parse_errors",
+            f"{field} contains a control character",
+        )
+    return raw.strip()
+
+
+def _normalize_human_text(value: str | None, field: str) -> str:
+    raw = value or ""
+    raw = raw.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    if _contains_control(raw):
+        raise RowProblem(
+            "INVALID_CONTROL_CHARACTER",
+            "parse_errors",
+            f"{field} contains a control character",
+        )
+    return " ".join(raw.split())
+
+
 def _bounded_issue(
-    issues: list[ImportIssue],
+    report: ImportPreview,
     *,
     row: int | None,
     code: str,
     message: str,
     blocking: bool = True,
 ) -> None:
-    if len(issues) < MAX_ISSUE_DETAILS:
-        issues.append(
+    if len(report.issues) < MAX_ISSUE_DETAILS:
+        report.issues.append(
             ImportIssue(row=row, code=code, message=message, blocking=blocking)
         )
-    elif blocking:
-        for index in range(len(issues) - 1, -1, -1):
-            if not issues[index].blocking:
-                issues[index] = ImportIssue(
+        return
+    report.issues_truncated = True
+    report.omitted_issue_details += 1
+    if blocking:
+        for index in range(len(report.issues) - 1, -1, -1):
+            if not report.issues[index].blocking:
+                report.issues[index] = ImportIssue(
                     row=row, code=code, message=message, blocking=True
                 )
                 break
@@ -148,15 +208,19 @@ def _increment_count(counts: dict[str, int], key: str) -> None:
 
 
 def _normalize_url(value: str | None, *, optional: bool = False) -> str | None:
+    if value is not None and _contains_control(value):
+        raise RowProblem(
+            "INVALID_CONTROL_CHARACTER",
+            "missing_urls",
+            "URL contains a control character",
+        )
+    if value is not None and any(character.isspace() for character in value):
+        raise RowProblem("UNSAFE_URL", "missing_urls", "URL contains whitespace")
     raw = _trim(value)
     if not raw:
         if optional:
             return None
         raise RowProblem("MISSING_URL", "missing_urls", "A required URL is missing")
-    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw):
-        raise RowProblem("UNSAFE_URL", "missing_urls", "URL contains control characters")
-    if any(character.isspace() for character in raw):
-        raise RowProblem("UNSAFE_URL", "missing_urls", "URL contains whitespace")
     parsed = urlsplit(raw)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         raise RowProblem("UNSAFE_URL", "missing_urls", "URL must be absolute HTTP(S)")
@@ -238,7 +302,7 @@ def _inat_urls(value: str) -> tuple[str, str] | None:
 
 
 def _normalize_license(value: str | None) -> str:
-    license_value = _trim(value).upper().replace("_", "-")
+    license_value = _normalize_identifier(value, "license").upper().replace("_", "-")
     if not license_value or LICENSE_PATTERN.fullmatch(license_value) is None:
         raise RowProblem(
             "INVALID_LICENSE", "invalid_licenses", "License is not redistributable"
@@ -247,7 +311,7 @@ def _normalize_license(value: str | None) -> str:
 
 
 def _normalize_date(value: str | None) -> tuple[date | None, list[str]]:
-    raw = _trim(value)
+    raw = _normalize_human_text(value, "source_date")
     if not raw:
         return None, []
     if re.match(r"^\d{4}-\d{2}-\d{2}(?:\D|$)", raw):
@@ -271,20 +335,39 @@ def _normalize_date(value: str | None) -> tuple[date | None, list[str]]:
     return None, ["UNPARSED_SOURCE_DATE"]
 
 
+def _validate_final_candidate_values(values: dict[str, str | None]) -> None:
+    for field, limit in CANDIDATE_FINAL_LIMITS.items():
+        value = values[field]
+        if value is not None and len(value) > limit:
+            raise RowProblem(
+                "FIELD_TOO_LONG", "parse_errors", f"{field} exceeds its database limit"
+            )
+        if value is not None and _contains_control(value):
+            raise RowProblem(
+                "INVALID_CONTROL_CHARACTER",
+                "parse_errors",
+                f"{field} contains a control character",
+            )
+
+
 def normalize_legacy_row(row: dict[str, str]) -> NormalizedCandidate:
     for name, limit in FIELD_LIMITS.items():
         if len(row.get(name, "")) > limit:
             raise RowProblem("FIELD_TOO_LONG", "parse_errors", f"{name} exceeds its limit")
 
-    species_code = _trim(row.get("seafood_code"))
+    species_code = _normalize_identifier(row.get("seafood_code"), "seafood_code")
     if not species_code:
         raise RowProblem("INVALID_SPECIES", "invalid_species", "Species code is missing")
-    source_dataset = _trim(row.get("source_dataset")).upper()
+    source_dataset = _normalize_identifier(
+        row.get("source_dataset"), "source_dataset"
+    ).upper()
     if source_dataset not in SUPPORTED_SOURCES:
         raise RowProblem(
             "UNSUPPORTED_SOURCE", "invalid_sources", "Source dataset is unsupported"
         )
-    source_record_id = _trim(row.get("source_record_id"))
+    source_record_id = _normalize_identifier(
+        row.get("source_record_id"), "source_record_id"
+    )
     if not source_record_id:
         raise RowProblem(
             "MISSING_SOURCE_IDENTITY", "parse_errors", "Source record ID is missing"
@@ -322,16 +405,23 @@ def normalize_legacy_row(row: dict[str, str]) -> NormalizedCandidate:
     else:
         preview_url = original_url = image_url
 
-    creator = _trim(row.get("creator")) or None
+    creator = _normalize_human_text(row.get("creator"), "creator") or None
     license_value = _normalize_license(row.get("license"))
-    attribution = _trim(row.get("attribution")) or creator
+    attribution = _normalize_human_text(row.get("attribution"), "attribution") or creator
     if attribution is None:
         attribution = f"{source_dataset} {source_record_id}"
-    location = _trim(row.get("source_location")) or None
+    location = _normalize_human_text(row.get("source_location"), "source_location") or None
 
     metadata: dict[str, Any] = {}
     for key, value in row.items():
-        lowered_key = key.lower()
+        if _contains_control(key):
+            raise RowProblem(
+                "INVALID_CONTROL_CHARACTER",
+                "parse_errors",
+                "Metadata key contains a control character",
+            )
+        normalized_key = key.strip()
+        lowered_key = normalized_key.casefold()
         unsafe_local_or_review_key = (
             "path" in lowered_key
             or "hash" in lowered_key
@@ -340,13 +430,13 @@ def normalize_legacy_row(row: dict[str, str]) -> NormalizedCandidate:
             or lowered_key.endswith("_review")
         )
         if (
-            key not in MAPPED_FIELDS
-            and key not in LOCAL_OR_REVIEW_FIELDS
+            lowered_key not in MAPPED_FIELDS_CASEFOLD
+            and lowered_key not in LOCAL_OR_REVIEW_FIELDS_CASEFOLD
             and not unsafe_local_or_review_key
             and value is not None
-            and _trim(value)
+            and _normalize_human_text(value, normalized_key)
         ):
-            metadata[key] = _trim(value)
+            metadata[normalized_key] = _normalize_human_text(value, normalized_key)
     raw_urls = {}
     if raw_source_url != source_url:
         raw_urls["source_url"] = raw_source_url
@@ -356,12 +446,28 @@ def normalize_legacy_row(row: dict[str, str]) -> NormalizedCandidate:
         raw_urls["license_url"] = raw_license_url
     if raw_urls:
         metadata["raw_urls"] = raw_urls
-    if len(json.dumps(metadata, ensure_ascii=False).encode("utf-8")) > 65_536:
-        raise RowProblem("METADATA_TOO_LARGE", "parse_errors", "Metadata is too large")
-
     observed_on, warnings = _normalize_date(row.get("source_date"))
     if warnings:
-        metadata["raw_source_date"] = _trim(row.get("source_date"))
+        metadata["raw_source_date"] = _normalize_human_text(
+            row.get("source_date"), "source_date"
+        )
+
+    _validate_final_candidate_values(
+        {
+            "source_dataset": source_dataset,
+            "source_record_id": source_record_id,
+            "preview_url": preview_url,
+            "original_url": original_url,
+            "source_url": source_url,
+            "creator": creator,
+            "license": license_value,
+            "license_url": license_url,
+            "attribution": attribution,
+            "location": location,
+        }
+    )
+    if len(json.dumps(metadata, ensure_ascii=False).encode("utf-8")) > 65_536:
+        raise RowProblem("METADATA_TOO_LARGE", "parse_errors", "Metadata is too large")
 
     return NormalizedCandidate(
         species_code=species_code,
@@ -389,6 +495,7 @@ def _file_error(content: bytes, code: str, message: str) -> ImportPreview:
         can_commit=False,
         source_counts={source: 0 for source in SUPPORTED_SOURCES},
         issues=[ImportIssue(code=code, message=message)],
+        fatal_file_code=code,
     )
 
 
@@ -433,10 +540,11 @@ def _parse_candidate_csv(content: bytes) -> ImportPreview:
             if report.total > MAX_ROWS:
                 return _file_error(content, "CSV_TOO_MANY_ROWS", "CSV row limit exceeded")
             if len(values) != len(header):
+                report.fatal_file_code = "CSV_MALFORMED"
                 report.parse_errors += 1
                 report.blocking_errors += 1
                 _bounded_issue(
-                    report.issues,
+                    report,
                     row=row_number,
                     code="CSV_MALFORMED",
                     message="CSV row has the wrong number of fields",
@@ -456,7 +564,7 @@ def _parse_candidate_csv(content: bytes) -> ImportPreview:
                 for warning in normalized.normalization_warnings:
                     report.warnings += 1
                     _bounded_issue(
-                        report.issues,
+                        report,
                         row=row_number,
                         code=warning,
                         message="Source date was preserved as provenance but not imported",
@@ -466,16 +574,17 @@ def _parse_candidate_csv(content: bytes) -> ImportPreview:
                 setattr(report, exc.category, getattr(report, exc.category) + 1)
                 report.blocking_errors += 1
                 _bounded_issue(
-                    report.issues,
+                    report,
                     row=row_number,
                     code=exc.code,
                     message=exc.message,
                 )
     except csv.Error:
+        report.fatal_file_code = "CSV_MALFORMED"
         report.parse_errors += 1
         report.blocking_errors += 1
         _bounded_issue(
-            report.issues,
+            report,
             row=None,
             code="CSV_MALFORMED",
             message="CSV syntax is malformed",
@@ -576,7 +685,7 @@ def _classify(
             report.invalid_species += 1
             report.blocking_errors += 1
             _bounded_issue(
-                report.issues,
+                report,
                 row=source_row,
                 code="INVALID_SPECIES",
                 message="Species does not exist or is inactive",
@@ -589,7 +698,7 @@ def _classify(
             if _material(prior) == _material(row):
                 report.exact_duplicates += 1
                 _bounded_issue(
-                    report.issues,
+                    report,
                     row=source_row,
                     code="EXACT_DUPLICATE",
                     message="Exact duplicate source record will be skipped",
@@ -599,7 +708,7 @@ def _classify(
                 report.conflicting_identities += 1
                 report.blocking_errors += 1
                 _bounded_issue(
-                    report.issues,
+                    report,
                     row=source_row,
                     code="CONFLICTING_SOURCE_IDENTITY",
                     message="Source identity has conflicting normalized content",
@@ -613,7 +722,7 @@ def _classify(
             report.possible_url_duplicates += 1
             report.warnings += 1
             _bounded_issue(
-                report.issues,
+                report,
                 row=source_row,
                 code="POSSIBLE_URL_DUPLICATE",
                 message="Original URL is already associated with another source identity",
@@ -625,7 +734,7 @@ def _classify(
             if _material(database_row) == _material(row):
                 report.exact_duplicates += 1
                 _bounded_issue(
-                    report.issues,
+                    report,
                     row=source_row,
                     code="EXACT_DUPLICATE",
                     message="Exact duplicate source record will be skipped",
@@ -635,7 +744,7 @@ def _classify(
                 report.conflicting_identities += 1
                 report.blocking_errors += 1
                 _bounded_issue(
-                    report.issues,
+                    report,
                     row=source_row,
                     code="CONFLICTING_SOURCE_IDENTITY",
                     message="Source identity conflicts with an existing candidate",
@@ -707,7 +816,9 @@ def _sanitize_filename(value: str | None) -> str:
     return (sanitized or "candidates.csv")[:255]
 
 
-async def _lock_valid_mao(session: AsyncSession, actor_id: UUID) -> User:
+async def _lock_valid_mao_session(
+    session: AsyncSession, actor_id: UUID, actor_session_id: UUID
+) -> tuple[User, Session]:
     actor = await session.scalar(
         select(User)
         .where(User.id == actor_id)
@@ -722,7 +833,23 @@ async def _lock_valid_mao(session: AsyncSession, actor_id: UUID) -> User:
         or actor.must_change_password
     ):
         raise ImportConflict("IMPORT_ACTOR_NOT_ALLOWED")
-    return actor
+    actor_session = await session.scalar(
+        select(Session)
+        .where(
+            Session.id == actor_session_id,
+            Session.user_id == actor_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if (
+        actor_session is None
+        or actor_session.revoked_at is not None
+        or as_utc(actor_session.expires_at) <= _now()
+        or actor_session.password_version != actor.password_version
+    ):
+        raise ImportConflict("IMPORT_ACTOR_NOT_ALLOWED")
+    return actor, actor_session
 
 
 async def stage_candidate_csv(
@@ -730,10 +857,11 @@ async def stage_candidate_csv(
     content: bytes,
     *,
     actor_id: UUID,
+    actor_session_id: UUID,
     filename: str | None,
 ) -> ImportPreview:
     try:
-        await _lock_valid_mao(session, actor_id)
+        await _lock_valid_mao_session(session, actor_id, actor_session_id)
         expired_ids = select(CandidateImportPreview.id).where(
             CandidateImportPreview.expires_at < _now(),
             CandidateImportPreview.committed_at.is_(None),
@@ -751,12 +879,21 @@ async def stage_candidate_csv(
             "CSV_DUPLICATE_HEADERS",
             "CSV_MALFORMED",
         }
-        if any(issue.code in fatal_file_codes for issue in report.issues):
+        if report.fatal_file_code in fatal_file_codes:
             await session.rollback()
-            return report
+            code = report.fatal_file_code
+            assert code is not None
+            raise ImportFileFatal(
+                code=code,
+                status_code=413
+                if code in {"CSV_TOO_LARGE", "CSV_TOO_MANY_ROWS"}
+                else 422,
+                report=_safe_report(report),
+            )
         raw_token = secrets.token_urlsafe(32)
         stage = CandidateImportPreview(
             actor_id=actor_id,
+            actor_session_id=actor_session_id,
             token_digest=_token_digest(raw_token),
             file_sha256=report.file_sha256,
             filename=_sanitize_filename(filename),
@@ -798,12 +935,16 @@ def _candidate_record(species_id: UUID, row: NormalizedCandidate) -> Candidate:
 
 
 async def _committed_retry(
-    session: AsyncSession, preview_token: str, actor_id: UUID
+    session: AsyncSession,
+    preview_token: str,
+    actor_id: UUID,
+    actor_session_id: UUID,
 ) -> ImportResult | None:
     stage = await session.scalar(
         select(CandidateImportPreview).where(
             CandidateImportPreview.token_digest == _token_digest(preview_token),
             CandidateImportPreview.actor_id == actor_id,
+            CandidateImportPreview.actor_session_id == actor_session_id,
         )
     )
     if stage is not None and stage.committed_at is not None and stage.result_json is not None:
@@ -812,18 +953,22 @@ async def _committed_retry(
 
 
 async def _commit_once(
-    session: AsyncSession, preview_token: str, actor_id: UUID
+    session: AsyncSession,
+    preview_token: str,
+    actor_id: UUID,
+    actor_session_id: UUID,
 ) -> ImportResult:
     condition = (
         CandidateImportPreview.token_digest == _token_digest(preview_token),
         CandidateImportPreview.actor_id == actor_id,
+        CandidateImportPreview.actor_session_id == actor_session_id,
     )
     exists_for_actor = await session.scalar(
         select(CandidateImportPreview.id).where(*condition)
     )
     if exists_for_actor is None:
         raise ImportConflict("IMPORT_PREVIEW_NOT_FOUND")
-    await _lock_valid_mao(session, actor_id)
+    await _lock_valid_mao_session(session, actor_id, actor_session_id)
     stage = await session.scalar(
         select(CandidateImportPreview)
         .where(*condition)
@@ -889,18 +1034,26 @@ async def _commit_once(
 
 
 async def commit_candidate_csv(
-    session: AsyncSession, preview_token: str, actor_id: UUID
+    session: AsyncSession,
+    preview_token: str,
+    actor_id: UUID,
+    *,
+    actor_session_id: UUID,
 ) -> ImportResult:
     for attempt in range(3):
         try:
-            return await _commit_once(session, preview_token, actor_id)
+            return await _commit_once(
+                session, preview_token, actor_id, actor_session_id
+            )
         except ImportConflict:
             if session.in_transaction():
                 await session.rollback()
             raise
         except IntegrityError as exc:
             await session.rollback()
-            retry = await _committed_retry(session, preview_token, actor_id)
+            retry = await _committed_retry(
+                session, preview_token, actor_id, actor_session_id
+            )
             if retry is not None:
                 return retry
             message = str(exc).lower()

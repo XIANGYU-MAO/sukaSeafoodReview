@@ -22,6 +22,7 @@ def upgrade() -> None:
         "candidate_import_previews",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("actor_id", sa.Uuid(), nullable=False),
+        sa.Column("actor_session_id", sa.Uuid(), nullable=False),
         sa.Column("token_digest", sa.String(length=64), nullable=False),
         sa.Column("file_sha256", sa.String(length=64), nullable=False),
         sa.Column("filename", sa.String(length=255), nullable=False),
@@ -44,12 +45,20 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(["actor_id"], ["users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["actor_session_id"], ["sessions.id"], ondelete="CASCADE"
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(
         "ix_candidate_import_previews_actor_id",
         "candidate_import_previews",
         ["actor_id"],
+    )
+    op.create_index(
+        "ix_candidate_import_previews_actor_session_id",
+        "candidate_import_previews",
+        ["actor_session_id"],
     )
     op.create_index(
         "ix_candidate_import_previews_expires_at",

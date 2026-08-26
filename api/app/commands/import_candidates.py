@@ -25,7 +25,7 @@ async def _dry_run(settings: Settings, content: bytes) -> dict:
     try:
         async with factory() as session:
             report = await dry_run_candidate_csv(session, content)
-            return report.model_dump(mode="json")
+            return report.model_dump(mode="json", exclude={"preview_token"})
     finally:
         await engine.dispose()
 

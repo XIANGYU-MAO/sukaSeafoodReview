@@ -54,6 +54,8 @@ class ImportPreview(BaseModel):
     can_commit: bool = False
     file_sha256: str
     issues: list[ImportIssue] = Field(default_factory=list)
+    issues_truncated: bool = False
+    omitted_issue_details: int = 0
     preview_token: str | None = None
     normalized_rows: list[NormalizedCandidate] = Field(
         default_factory=list, exclude=True
@@ -62,6 +64,7 @@ class ImportPreview(BaseModel):
         default_factory=list, exclude=True
     )
     database_fingerprint: str = Field(default="", exclude=True)
+    fatal_file_code: str | None = Field(default=None, exclude=True)
 
 
 class ImportCommitRequest(BaseModel):

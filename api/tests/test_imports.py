@@ -359,7 +359,7 @@ def test_issue_details_are_bounded_while_counts_remain_complete():
 def test_final_normalized_values_fit_columns_and_reject_controls():
     raw_http_url = "http://example.test/" + "a" * (2048 - len("http://example.test/"))
     overlong_after_https = preview_candidate_csv(
-        csv_bytes([valid_row(image_url=raw_http_url)])
+        csv_bytes([valid_row(source_dataset="GBIF", image_url=raw_http_url)])
     )
     nul_identifier = preview_candidate_csv(
         csv_bytes([valid_row(source_record_id="unsafe\x00record")])
@@ -370,13 +370,18 @@ def test_final_normalized_values_fit_columns_and_reject_controls():
             headers=(*REQUIRED_HEADERS, "provenance"),
         )
     )
+    url_whitespace = preview_candidate_csv(
+        csv_bytes([valid_row(image_url=" https://example.test/fish.jpg")])
+    )
 
     assert overlong_after_https.issues[0].code == "FIELD_TOO_LONG"
     assert nul_identifier.issues[0].code == "INVALID_CONTROL_CHARACTER"
     assert metadata_nul.issues[0].code == "INVALID_CONTROL_CHARACTER"
+    assert url_whitespace.issues[0].code == "UNSAFE_URL"
     assert not overlong_after_https.can_commit
     assert not nul_identifier.can_commit
     assert not metadata_nul.can_commit
+    assert not url_whitespace.can_commit
 
 
 def test_human_text_controls_are_normalized_and_metadata_keys_are_casefolded():
@@ -384,7 +389,7 @@ def test_human_text_controls_are_normalized_and_metadata_keys_are_casefolded():
         valid_row(
             creator=" Ada\r\nLovelace\t ",
             attribution=" Ada\r\nLovelace\t / CC-BY ",
-            location=" sea\r\n bay\t ",
+            source_location=" sea\r\n bay\t ",
             **{
                 " LOCAL_PATH ": "do-not-import",
                 "Status": "approved",

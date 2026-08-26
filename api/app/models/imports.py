@@ -34,6 +34,9 @@ class CandidateImportPreview(TimestampMixin, Base):
     actor_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    actor_session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
     token_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)

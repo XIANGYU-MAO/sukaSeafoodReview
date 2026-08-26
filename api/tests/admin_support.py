@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import Settings
-from app.models import Base, Candidate, Session, Species, User
+from app.models import Base, Session, Species, User
 from app.services.auth import csrf_token, session_digest
 from tests.review_support import candidate_record
 
