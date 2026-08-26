@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import FrozenInstanceError
+import os
 from pathlib import Path, PurePosixPath
 from uuid import UUID, uuid4
 
@@ -17,11 +18,33 @@ from conftest import (
     write_manifest,
 )
 from sukaseafood_sync.manifest import (
+    MAX_MANIFEST_BYTES,
     ManifestError,
     load_manifest,
     resolve_inside,
     validate_relative_path,
 )
+
+
+def write_lexical_manifest(
+    directory: Path,
+    creator_cell: str,
+    *,
+    record_newline: str = "\r\n",
+) -> Path:
+    row = valid_row()
+    cells = [row[column] for column in EXPORT_COLUMNS]
+    cells[EXPORT_COLUMNS.index("creator")] = creator_cell
+    path = directory / "lexical.csv"
+    path.write_bytes(
+        (
+            ",".join(EXPORT_COLUMNS)
+            + record_newline
+            + ",".join(cells)
+            + record_newline
+        ).encode("utf-8")
+    )
+    return path
 
 
 def test_loads_exact_server_csv_with_bom_rfc_quotes_and_newlines() -> None:
@@ -116,6 +139,34 @@ def test_rejects_empty_manifest_and_malformed_csv(tmp_path: Path) -> None:
         load_manifest(malformed)
 
 
+@pytest.mark.parametrize(
+    "creator_cell",
+    ['Naked"Quote', '"Closed quote"garbage'],
+    ids=["naked-quote", "garbage-after-closing-quote"],
+)
+def test_rejects_non_rfc_quote_lexemes_without_exposing_token(
+    tmp_path: Path, creator_cell: str
+) -> None:
+    path = write_lexical_manifest(tmp_path, creator_cell)
+
+    with pytest.raises(ManifestError, match="malformed CSV") as caught:
+        load_manifest(path)
+
+    assert RECEIPT_TOKEN not in str(caught.value)
+
+
+@pytest.mark.parametrize("embedded_newline", ["\r\n", "\n"])
+def test_accepts_escaped_quotes_commas_and_embedded_record_newlines(
+    tmp_path: Path, embedded_newline: str
+) -> None:
+    creator = f'"Fish, ""Quoted""{embedded_newline}Creator"'
+    manifest = load_manifest(
+        write_lexical_manifest(tmp_path, creator, record_newline=embedded_newline)
+    )
+
+    assert manifest.rows[0].creator == f'Fish, "Quoted"{embedded_newline}Creator'
+
+
 def test_rejects_invalid_utf8_file_size_and_row_count(tmp_path: Path) -> None:
     invalid_utf8 = tmp_path / "invalid.csv"
     invalid_utf8.write_bytes(b"\xff\xfe")
@@ -134,6 +185,54 @@ def test_rejects_invalid_utf8_file_size_and_row_count(tmp_path: Path) -> None:
         load_manifest(oversized)
     with pytest.raises(ManifestError, match="10,000"):
         load_manifest(too_many)
+
+
+def test_manifest_is_opened_once_in_binary_mode(tmp_path: Path, monkeypatch) -> None:
+    path = write_manifest(tmp_path)
+    actual_open = Path.open
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def tracked_open(self: Path, *args: object, **kwargs: object):
+        calls.append((args, kwargs))
+        return actual_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+
+    load_manifest(path)
+
+    assert calls == [(('rb',), {})]
+
+
+def test_oversize_is_decided_from_bounded_open_handle_not_path_stat(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = write_manifest(tmp_path)
+    with path.open("ab") as stream:
+        stream.truncate(MAX_MANIFEST_BYTES + 1)
+    actual_stat = Path.stat
+
+    class SizeLie:
+        def __init__(self, actual) -> None:
+            self._actual = actual
+            self.st_size = 0
+
+        def __getattr__(self, name: str):
+            return getattr(self._actual, name)
+
+    def misleading_stat(self: Path, *args: object, **kwargs: object):
+        actual = actual_stat(self, *args, **kwargs)
+        return SizeLie(actual) if self == path else actual
+
+    monkeypatch.setattr(Path, "stat", misleading_stat)
+
+    with pytest.raises(ManifestError, match="20 MiB"):
+        load_manifest(path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="/dev/null regular-file probe is POSIX-only")
+def test_rejects_nonregular_manifest_handle() -> None:
+    with pytest.raises(ManifestError, match="regular file"):
+        load_manifest(Path("/dev/null"))
 
 
 @pytest.mark.parametrize(

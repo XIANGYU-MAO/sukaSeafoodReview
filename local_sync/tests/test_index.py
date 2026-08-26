@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
+import os
 from pathlib import Path, PurePosixPath
 import sqlite3
+import stat
+from threading import Barrier
 from uuid import UUID, uuid4
 
 import pytest
@@ -72,6 +76,77 @@ def test_connection_context_closes_owned_connection(sync_root: Path) -> None:
 
     with pytest.raises(sqlite3.ProgrammingError):
         connection.execute("SELECT 1")
+
+
+def test_rejects_index_symlink_outside_root_without_touching_target(
+    sync_root: Path, tmp_path: Path
+) -> None:
+    sync_root.mkdir()
+    outside = tmp_path / "outside.sqlite3"
+    original = b"outside-target-must-remain-byte-identical"
+    outside.write_bytes(original)
+    index_path = sync_root / ".sukaseafood-sync.sqlite3"
+    try:
+        index_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"file symlink creation unavailable: {exc}")
+
+    with pytest.raises(SyncIndexError, match="symlink|reparse"):
+        SyncIndex(sync_root)
+
+    assert outside.read_bytes() == original
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse attribute is Windows-only")
+def test_rejects_windows_reparse_point_before_sqlite_open(
+    sync_root: Path, tmp_path: Path
+) -> None:
+    sync_root.mkdir()
+    outside = tmp_path / "outside-directory"
+    outside.mkdir()
+    marker = outside / "marker.bin"
+    marker.write_bytes(b"unchanged")
+    index_path = sync_root / ".sukaseafood-sync.sqlite3"
+    try:
+        index_path.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory reparse creation unavailable: {exc}")
+    attributes = getattr(os.lstat(index_path), "st_file_attributes", 0)
+    assert attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+    with pytest.raises(SyncIndexError, match="reparse"):
+        SyncIndex(sync_root)
+
+    assert marker.read_bytes() == b"unchanged"
+
+
+@pytest.mark.parametrize("attempt", range(3))
+def test_concurrent_first_initialization_is_serialized_and_idempotent(
+    sync_root: Path, attempt: int
+) -> None:
+    root = sync_root / f"attempt-{attempt}"
+    worker_count = 16
+    barrier = Barrier(worker_count)
+
+    def construct() -> Path:
+        barrier.wait(timeout=10)
+        return SyncIndex(root).path
+
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        paths = list(pool.map(lambda _number: construct(), range(worker_count)))
+
+    expected = root.resolve() / ".sukaseafood-sync.sqlite3"
+    assert paths == [expected] * worker_count
+    with closing(sqlite3.connect(expected)) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        objects = connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+    assert [(kind, name, table) for kind, name, table, _sql in objects] == [
+        ("index", "sqlite_autoindex_synced_items_1", "synced_items"),
+        ("table", "synced_items", "synced_items"),
+    ]
 
 
 def test_records_and_checks_exact_four_part_completion_key(sync_root: Path) -> None:
@@ -326,6 +401,89 @@ def test_rejects_current_version_schema_with_wrong_types_or_nullability(
 
     with pytest.raises(SyncIndexError, match="incompatible"):
         SyncIndex(sync_root)
+
+
+def test_rejects_exact_columns_and_primary_key_when_checks_are_missing(
+    sync_root: Path,
+) -> None:
+    sync_root.mkdir()
+    db = sync_root / ".sukaseafood-sync.sqlite3"
+    with closing(sqlite3.connect(db)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE synced_items (
+                candidate_id TEXT NOT NULL,
+                review_id TEXT NOT NULL,
+                review_version INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                batch_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                perceptual_hash TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                receipt_submitted_at TEXT,
+                PRIMARY KEY (candidate_id, review_id, review_version, action)
+            )
+            """
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+
+    with pytest.raises(SyncIndexError, match="incompatible"):
+        SyncIndex(sync_root)
+
+
+def test_rejects_sha_corrupting_trigger_before_any_record_and_without_db_change(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    with index.connect() as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER corrupt_sha AFTER INSERT ON synced_items
+            BEGIN
+                UPDATE synced_items SET sha256 = '0' WHERE rowid = NEW.rowid;
+            END
+            """
+        )
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    before = index.path.read_bytes()
+
+    with pytest.raises(SyncIndexError, match="incompatible"):
+        SyncIndex(sync_root)
+
+    assert index.path.read_bytes() == before
+    with closing(sqlite3.connect(index.path)) as connection:
+        assert connection.execute("SELECT count(*) FROM synced_items").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'corrupt_sha'"
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "object_sql",
+    [
+        "CREATE TABLE unexpected_table (value TEXT)",
+        "CREATE VIEW unexpected_view AS SELECT candidate_id FROM synced_items",
+        "CREATE INDEX unexpected_index ON synced_items(sha256)",
+    ],
+    ids=["table", "view", "index"],
+)
+def test_rejects_every_unexpected_user_schema_object(
+    sync_root: Path, object_sql: str
+) -> None:
+    index = SyncIndex(sync_root)
+    with index.connect() as connection:
+        connection.execute(object_sql)
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    before = index.path.read_bytes()
+
+    with pytest.raises(SyncIndexError, match="incompatible"):
+        SyncIndex(sync_root)
+
+    assert index.path.read_bytes() == before
 
 
 def test_rejects_unversioned_existing_database_instead_of_rewriting(
