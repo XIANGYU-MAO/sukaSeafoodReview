@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -282,15 +283,47 @@ def test_rejects_stored_path_that_now_resolves_through_symlink(
 def test_rejects_future_or_incompatible_existing_schema(sync_root: Path) -> None:
     sync_root.mkdir()
     db = sync_root / ".sukaseafood-sync.sqlite3"
-    with sqlite3.connect(db) as connection:
+    with closing(sqlite3.connect(db)) as connection:
         connection.execute("PRAGMA user_version = 99")
+        connection.commit()
     with pytest.raises(SyncIndexError, match="newer schema version"):
         SyncIndex(sync_root)
 
     db.unlink()
-    with sqlite3.connect(db) as connection:
+    with closing(sqlite3.connect(db)) as connection:
         connection.execute("CREATE TABLE synced_items (candidate_id TEXT)")
         connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+    with pytest.raises(SyncIndexError, match="incompatible"):
+        SyncIndex(sync_root)
+
+
+def test_rejects_current_version_schema_with_wrong_types_or_nullability(
+    sync_root: Path,
+) -> None:
+    sync_root.mkdir()
+    db = sync_root / ".sukaseafood-sync.sqlite3"
+    with closing(sqlite3.connect(db)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE synced_items (
+                candidate_id TEXT,
+                review_id TEXT NOT NULL,
+                review_version TEXT NOT NULL,
+                action TEXT NOT NULL,
+                batch_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                perceptual_hash TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                receipt_submitted_at TEXT,
+                PRIMARY KEY (candidate_id, review_id, review_version, action)
+            )
+            """
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+
     with pytest.raises(SyncIndexError, match="incompatible"):
         SyncIndex(sync_root)
 
@@ -300,12 +333,13 @@ def test_rejects_unversioned_existing_database_instead_of_rewriting(
 ) -> None:
     sync_root.mkdir()
     db = sync_root / ".sukaseafood-sync.sqlite3"
-    with sqlite3.connect(db) as connection:
+    with closing(sqlite3.connect(db)) as connection:
         connection.execute("CREATE TABLE unrelated (value TEXT)")
+        connection.commit()
 
     with pytest.raises(SyncIndexError, match="unversioned"):
         SyncIndex(sync_root)
-    with sqlite3.connect(db) as connection:
+    with closing(sqlite3.connect(db)) as connection:
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall() == [("unrelated",)]

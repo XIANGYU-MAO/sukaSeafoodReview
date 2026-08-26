@@ -20,6 +20,7 @@ from sukaseafood_sync.manifest import (
     ManifestError,
     load_manifest,
     resolve_inside,
+    validate_relative_path,
 )
 
 
@@ -233,6 +234,7 @@ def test_license_url_is_optional_but_otherwise_uses_same_https_rules(
         'images/SF006/bad<name>.jpg',
         "images/SF006/bad:name.jpg",
         "images/SF006/bad\x00name.jpg",
+        "images/SF006/bad\x7fname.jpg",
     ],
 )
 def test_rejects_windows_unsafe_relative_paths(tmp_path: Path, target: str) -> None:
@@ -240,6 +242,11 @@ def test_rejects_windows_unsafe_relative_paths(tmp_path: Path, target: str) -> N
 
     with pytest.raises(ManifestError, match="target_relative_path"):
         load_manifest(path)
+
+
+def test_shared_path_validator_rejects_delete_control_character() -> None:
+    with pytest.raises(ManifestError, match="control"):
+        validate_relative_path("images/SF006/bad\x7fname.jpg")
 
 
 @pytest.mark.parametrize(
