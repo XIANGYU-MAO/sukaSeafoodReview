@@ -3,9 +3,13 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
+import os
 from pathlib import Path, PurePosixPath
 import re
 import sqlite3
+import stat
+import time
 from typing import Iterator, Literal
 from uuid import UUID
 
@@ -61,6 +65,20 @@ CREATE TABLE synced_items (
     PRIMARY KEY (candidate_id, review_id, review_version, action)
 )
 """
+
+
+def _normalized_sql(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip()).casefold()
+
+
+_SCHEMA_FINGERPRINT = hashlib.sha256(
+    _normalized_sql(_CREATE_SCHEMA).encode("utf-8")
+).hexdigest()
+_EXPECTED_OBJECTS = {
+    ("index", "sqlite_autoindex_synced_items_1", "synced_items"),
+    ("table", "synced_items", "synced_items"),
+}
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class SyncIndexError(ValueError):
@@ -176,75 +194,152 @@ class SyncIndex:
             raise SyncIndexError("training root must be a directory")
         self.root = selected.resolve()
         self.path = self.root / INDEX_FILENAME
+        self._validate_index_path()
         self._initialize()
 
-    @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(
-            self.path,
-            timeout=BUSY_TIMEOUT_MS / 1_000,
-            isolation_level="DEFERRED",
-        )
+    def _validate_index_path(self) -> None:
+        if self.path.parent != self.root:
+            raise SyncIndexError("index path must remain inside the selected root")
+        try:
+            metadata = os.lstat(self.path)
+        except FileNotFoundError:
+            if self.path.resolve(strict=False).parent != self.root:
+                raise SyncIndexError("index path must remain inside the selected root")
+            return
+        except OSError as exc:
+            raise SyncIndexError("index path cannot be inspected safely") from exc
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise SyncIndexError("index path must not be a symlink or reparse point")
+        if attributes & _REPARSE_POINT:
+            raise SyncIndexError("index path must not be a reparse point")
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SyncIndexError("index path must be a regular file")
+        try:
+            resolved = self.path.resolve(strict=True)
+            resolved.relative_to(self.root)
+        except (OSError, ValueError) as exc:
+            raise SyncIndexError("index path must remain inside the selected root") from exc
+
+    def _open_connection(self) -> sqlite3.Connection:
+        self._validate_index_path()
+        try:
+            connection = sqlite3.connect(
+                self.path,
+                timeout=BUSY_TIMEOUT_MS / 1_000,
+                isolation_level=None,
+            )
+        except sqlite3.Error as exc:
+            raise SyncIndexError("index database cannot be opened") from exc
         connection.row_factory = sqlite3.Row
         try:
+            self._validate_index_path()
             connection.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA synchronous = FULL")
-            connection.execute("PRAGMA journal_mode = WAL")
+        except Exception:
+            connection.close()
+            raise
+        return connection
+
+    @staticmethod
+    def _verify_connection_pragmas(
+        connection: sqlite3.Connection, *, require_wal: bool
+    ) -> None:
+        busy_timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+        foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+        synchronous = int(connection.execute("PRAGMA synchronous").fetchone()[0])
+        journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
+        if (
+            busy_timeout < BUSY_TIMEOUT_MS
+            or foreign_keys != 1
+            or synchronous < 2
+            or (require_wal and journal_mode.casefold() != "wal")
+        ):
+            raise SyncIndexError("required SQLite durability settings are unavailable")
+
+    @staticmethod
+    def _enable_wal(connection: sqlite3.Connection) -> None:
+        deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1_000
+        while True:
+            try:
+                mode = str(
+                    connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+                )
+                if mode.casefold() == "wal":
+                    return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).casefold() and "busy" not in str(exc).casefold():
+                    raise SyncIndexError("SQLite WAL mode cannot be enabled") from exc
+            if time.monotonic() >= deadline:
+                raise SyncIndexError("SQLite WAL mode cannot be enabled under contention")
+            time.sleep(0.01)
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        connection = self._open_connection()
+        try:
+            self._enable_wal(connection)
+            self._verify_connection_pragmas(connection, require_wal=True)
             yield connection
         finally:
             connection.close()
 
     def _initialize(self) -> None:
-        connection = sqlite3.connect(
-            self.path,
-            timeout=BUSY_TIMEOUT_MS / 1_000,
-            isolation_level="DEFERRED",
-        )
-        connection.row_factory = sqlite3.Row
+        connection = self._open_connection()
         try:
-            connection.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA synchronous = FULL")
+            connection.execute("BEGIN IMMEDIATE")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            tables = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            objects = list(
+                connection.execute(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                    "ORDER BY type, name"
                 )
-            }
+            )
             if version > SCHEMA_VERSION:
                 raise SyncIndexError(
                     f"index uses newer schema version {version}; supported version is {SCHEMA_VERSION}"
                 )
             if version == 0:
-                if tables:
+                if objects:
                     raise SyncIndexError("refusing to rewrite an unversioned existing database")
-                try:
-                    connection.execute("BEGIN IMMEDIATE")
-                    connection.execute(_CREATE_SCHEMA)
-                    connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-                    connection.commit()
-                except Exception:
-                    connection.rollback()
-                    raise
+                connection.execute(_CREATE_SCHEMA)
+                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise SyncIndexError(f"unsupported schema version {version}")
             self._verify_schema(connection)
-            connection.execute("PRAGMA journal_mode = WAL")
+            self._verify_connection_pragmas(connection, require_wal=False)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
+        wal_connection = self._open_connection()
+        try:
+            self._enable_wal(wal_connection)
+            self._verify_connection_pragmas(wal_connection, require_wal=True)
+        finally:
+            wal_connection.close()
 
     @staticmethod
     def _verify_schema(connection: sqlite3.Connection) -> None:
-        tables = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        objects = list(
+            connection.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                "ORDER BY type, name"
             )
-        }
+        )
+        object_keys = {(row[0], row[1], row[2]) for row in objects}
+        table_sql = next(
+            (row[3] for row in objects if row[0] == "table" and row[1] == "synced_items"),
+            None,
+        )
+        table_fingerprint = (
+            hashlib.sha256(_normalized_sql(table_sql).encode("utf-8")).hexdigest()
+            if isinstance(table_sql, str)
+            else None
+        )
         table_info = list(connection.execute("PRAGMA table_info(synced_items)"))
         columns = tuple(row[1] for row in table_info)
         column_shape = tuple(
@@ -258,12 +353,15 @@ class SyncIndex:
             )
             if row[5]
         )
+        integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
         if (
-            tables != {"synced_items"}
+            object_keys != _EXPECTED_OBJECTS
+            or table_fingerprint != _SCHEMA_FINGERPRINT
             or columns != _COLUMNS
             or column_shape != _COLUMN_SHAPE
             or primary_key
             != ("candidate_id", "review_id", "review_version", "action")
+            or integrity != "ok"
         ):
             raise SyncIndexError("existing index schema is incompatible")
 

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, field
+import io
+import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -311,21 +314,102 @@ def _parse_row(raw: dict[str, str], row_number: int) -> tuple[ManifestRow, str]:
     return row, token
 
 
+def _read_manifest_bytes(path: Path) -> bytes:
+    try:
+        with path.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ManifestError("manifest must be a regular file")
+            content = stream.read(MAX_MANIFEST_BYTES + 1)
+            after = os.fstat(stream.fileno())
+    except ManifestError:
+        raise
+    except OSError as exc:
+        raise ManifestError("manifest file cannot be read") from exc
+    if len(content) > MAX_MANIFEST_BYTES:
+        raise ManifestError("manifest file exceeds 20 MiB")
+    if (
+        before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or len(content) != after.st_size
+    ):
+        raise ManifestError("manifest file changed while it was being read")
+    return content
+
+
+def _consume_record_newline(text: str, position: int) -> int:
+    if text[position] == "\n":
+        return position + 1
+    if position + 1 < len(text) and text[position + 1] == "\n":
+        return position + 2
+    raise ManifestError("manifest contains malformed CSV")
+
+
+def _validate_csv_lexemes(text: str) -> None:
+    field_start = "field_start"
+    unquoted = "unquoted"
+    quoted = "quoted"
+    after_quote = "after_quote"
+    state = field_start
+    position = 0
+    while position < len(text):
+        character = text[position]
+        if state == field_start:
+            if character == '"':
+                state = quoted
+                position += 1
+            elif character == ",":
+                position += 1
+            elif character in {"\r", "\n"}:
+                position = _consume_record_newline(text, position)
+            else:
+                state = unquoted
+                position += 1
+        elif state == unquoted:
+            if character == '"':
+                raise ManifestError("manifest contains malformed CSV")
+            if character == ",":
+                state = field_start
+                position += 1
+            elif character in {"\r", "\n"}:
+                state = field_start
+                position = _consume_record_newline(text, position)
+            else:
+                position += 1
+        elif state == quoted:
+            if character == '"':
+                state = after_quote
+            position += 1
+        else:
+            if character == '"':
+                state = quoted
+                position += 1
+            elif character == ",":
+                state = field_start
+                position += 1
+            elif character in {"\r", "\n"}:
+                state = field_start
+                position = _consume_record_newline(text, position)
+            else:
+                raise ManifestError("manifest contains malformed CSV")
+    if state == quoted:
+        raise ManifestError("manifest contains malformed CSV")
+
+
 def load_manifest(path: Path) -> ExportManifest:
     """Load an exact fail-closed server export CSV."""
 
     manifest_path = Path(path)
     try:
-        size = manifest_path.stat().st_size
-    except OSError as exc:
-        raise ManifestError("manifest file cannot be read") from exc
-    if size > MAX_MANIFEST_BYTES:
-        raise ManifestError("manifest file exceeds 20 MiB")
+        decoded = _read_manifest_bytes(manifest_path).decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ManifestError("manifest must be valid UTF-8") from exc
+    _validate_csv_lexemes(decoded)
 
     rows: list[ManifestRow] = []
     tokens: list[str] = []
     try:
-        with manifest_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        with io.StringIO(decoded, newline="") as stream:
             reader = csv.reader(stream, strict=True)
             header = next(reader, None)
             if header is None or tuple(header) != EXPORT_COLUMNS:
@@ -342,12 +426,8 @@ def load_manifest(path: Path) -> ExportManifest:
                 )
                 rows.append(parsed)
                 tokens.append(token)
-    except UnicodeDecodeError as exc:
-        raise ManifestError("manifest must be valid UTF-8") from exc
     except csv.Error as exc:
         raise ManifestError("manifest contains malformed CSV") from exc
-    except OSError as exc:
-        raise ManifestError("manifest file cannot be read") from exc
 
     if not rows:
         raise ManifestError("manifest must contain at least one row")
