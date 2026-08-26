@@ -370,11 +370,11 @@ class SyncIndex:
                 if current is None:
                     return
                 self._validate_sqlite_metadata(current, label=label)
+                if attempt + 1 == attempts:
+                    raise SyncIndexError(
+                        f"{label} path must remain inside the selected root"
+                    )
                 if os.path.samestat(metadata, current):
-                    if attempt + 1 == attempts:
-                        raise SyncIndexError(
-                            f"{label} path must remain inside the selected root"
-                        )
                     time.sleep(0)
                 continue
             if resolution_missing:

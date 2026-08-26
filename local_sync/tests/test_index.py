@@ -328,6 +328,36 @@ def test_sidecar_transient_resolution_failure_then_identity_change_retries(
     assert journal.read_bytes() == b"second SQLite sidecar identity"
 
 
+def test_changed_sidecar_with_persistent_resolution_failure_exhausts_bound(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    journal = Path(f"{index.path}-journal")
+    journal.write_bytes(b"initial regular SQLite sidecar")
+    original_resolve = Path.resolve
+    resolutions = 0
+
+    def replace_and_fail_every_time(
+        candidate: Path, strict: bool = False
+    ) -> Path:
+        nonlocal resolutions
+        if candidate == journal and strict:
+            retired = sync_root / f"retired-failed-resolution-{resolutions}"
+            journal.replace(retired)
+            resolutions += 1
+            journal.write_bytes(f"regular sidecar identity {resolutions}".encode())
+            raise OSError("persistent SQLite sidecar resolution failure")
+        return original_resolve(candidate, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", replace_and_fail_every_time)
+
+    with pytest.raises(SyncIndexError, match="sidecar.*selected root"):
+        index._validate_sqlite_path(journal, sidecar=True)
+
+    assert resolutions == 2
+    assert journal.read_bytes() == b"regular sidecar identity 2"
+
+
 def test_same_sidecar_with_persistent_resolution_failure_exhausts_bound(
     sync_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
