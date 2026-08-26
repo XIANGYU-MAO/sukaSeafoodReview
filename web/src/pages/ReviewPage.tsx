@@ -29,6 +29,8 @@ interface DecisionOperation {
   fingerprint: string;
 }
 
+const DEFINITIVE_DECISION_REJECTION_STATUSES = new Set([400, 404, 410, 413, 415, 422]);
+
 export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPageProps) {
   const { locale, t } = useI18n();
   const [candidate, setCandidate] = useState<CandidateResponse | null>(null);
@@ -158,7 +160,10 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
         setDecisionError("conflict");
         setPanelResetSignal((signal) => signal + 1);
         await loadCurrent();
-      } else if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
+      } else if (
+        error instanceof ApiError &&
+        DEFINITIVE_DECISION_REJECTION_STATUSES.has(error.status)
+      ) {
         replaceOperation(null);
         setRetryPayload(nextOperation.payload);
         setDecisionError("rejected");

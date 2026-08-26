@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useI18n } from "../i18n/I18nProvider";
 
@@ -30,7 +30,7 @@ export function ImageStage({
   const activeAttempt = useRef(attempt);
   activeAttempt.current = attempt;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setState("loading");
   }, [previewUrl]);
 

@@ -36,11 +36,14 @@ export function DecisionPanel({
   }, [resetSignal]);
 
   useEffect(() => {
-    if (selectedPayload?.decision !== "REJECTED") return;
-    setRejectOpen(true);
-    setReason(selectedPayload.rejection_reason);
-    setNotes(selectedPayload.notes ?? "");
-    setValidationError(null);
+    if (selectedPayload?.decision === "REJECTED") {
+      setRejectOpen(true);
+      setReason(selectedPayload.rejection_reason);
+      setNotes(selectedPayload.notes ?? "");
+      setValidationError(null);
+    } else if (selectedPayload) {
+      clearRejectDraft();
+    }
   }, [selectedPayload?.decision, selectedPayload?.notes, selectedPayload?.rejection_reason]);
 
   useEffect(() => {
@@ -55,6 +58,18 @@ export function DecisionPanel({
     setRejectOpen(true);
     setValidationError(null);
     setRejectFocusRequest((request) => request + 1);
+  }
+
+  function clearRejectDraft() {
+    setRejectOpen(false);
+    setReason(null);
+    setNotes("");
+    setValidationError(null);
+  }
+
+  function submitSimpleDecision(decision: "APPROVED" | "UNSURE") {
+    clearRejectDraft();
+    onSubmit(simplePayload(decision));
   }
 
   useEffect(() => {
@@ -72,10 +87,10 @@ export function DecisionPanel({
       }
       switch (event.key.toLowerCase()) {
         case "k":
-          onSubmit(simplePayload("APPROVED"));
+          submitSimpleDecision("APPROVED");
           break;
         case "u":
-          onSubmit(simplePayload("UNSURE"));
+          submitSimpleDecision("UNSURE");
           break;
         case "r":
           openReject();
@@ -125,7 +140,8 @@ export function DecisionPanel({
     });
   }
 
-  const rejectSelected = selectedPayload?.decision === "REJECTED" || reason !== null;
+  const rejectSelected =
+    selectedPayload?.decision === "REJECTED" || (selectedPayload === null && reason !== null);
 
   return (
     <section className="decision-panel" aria-label={t("reviewTitle")}>
@@ -137,7 +153,7 @@ export function DecisionPanel({
           type="button"
           disabled={pending}
           aria-pressed={selectedPayload?.decision === "APPROVED"}
-          onClick={() => onSubmit(simplePayload("APPROVED"))}
+          onClick={() => submitSimpleDecision("APPROVED")}
         >
           {selectedPayload?.decision === "APPROVED" ? <span aria-hidden="true">✓ </span> : null}
           {t("keep")}
@@ -159,7 +175,7 @@ export function DecisionPanel({
           type="button"
           disabled={pending}
           aria-pressed={selectedPayload?.decision === "UNSURE"}
-          onClick={() => onSubmit(simplePayload("UNSURE"))}
+          onClick={() => submitSimpleDecision("UNSURE")}
         >
           {selectedPayload?.decision === "UNSURE" ? <span aria-hidden="true">✓ </span> : null}
           {t("unsure")}
@@ -220,31 +236,54 @@ const INTERACTIVE_ROLES = new Set([
   "button",
   "checkbox",
   "combobox",
+  "grid",
+  "gridcell",
   "link",
   "listbox",
+  "menu",
+  "menubar",
   "menuitem",
   "menuitemcheckbox",
   "menuitemradio",
   "option",
   "radio",
+  "radiogroup",
   "searchbox",
+  "scrollbar",
   "slider",
   "spinbutton",
   "switch",
   "tab",
+  "tablist",
   "textbox",
+  "tree",
+  "treegrid",
   "treeitem",
-  "gridcell",
 ]);
+
+const NATIVE_INTERACTIVE_SELECTOR = [
+  "input",
+  "textarea",
+  "select",
+  "button",
+  "a",
+  "area",
+  "label",
+  "summary",
+  "audio[controls]",
+  "video[controls]",
+  "iframe",
+  "embed",
+  "object",
+].join(", ");
 
 function isInteractiveTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
   for (let element: Element | null = target; element; element = element.parentElement) {
-    if (element.matches("input, textarea, select, button, a, area, summary")) return true;
+    if (element.matches(NATIVE_INTERACTIVE_SELECTOR)) return true;
     const contentEditable = element.getAttribute("contenteditable");
     if (contentEditable !== null && contentEditable.toLowerCase() !== "false") return true;
-    const tabIndex = element.getAttribute("tabindex");
-    if (tabIndex !== null && Number(tabIndex) >= 0) return true;
+    if (element.hasAttribute("tabindex")) return true;
     const roles = (element.getAttribute("role") ?? "").toLowerCase().split(/\s+/);
     if (roles.some((role) => INTERACTIVE_ROLES.has(role))) return true;
   }
