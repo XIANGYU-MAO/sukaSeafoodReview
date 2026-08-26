@@ -422,6 +422,7 @@ def test_production_api_requires_an_explicit_trusted_proxy_network():
         SESSION_HOURS=12,
         SESSION_SECRET="test-session-secret",
         CSRF_SECRET="test-csrf-secret",
+        RECEIPT_SECRET="test-receipt-secret-that-is-independent-and-long",
         APP_ENV="production",
         TRUSTED_PROXY_CIDRS=("10.20.0.0/24",),
     )

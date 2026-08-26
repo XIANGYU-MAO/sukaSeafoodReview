@@ -23,6 +23,7 @@ class Settings:
     SESSION_SECRET: str
     CSRF_SECRET: str
     APP_ENV: str
+    RECEIPT_SECRET: str | None = None
     TRUSTED_PROXY_CIDRS: tuple[str, ...] = ()
     secure_cookie: bool = True
     app_name: str = "SukaSeafood Review API"
@@ -39,6 +40,19 @@ class Settings:
                 ) from exc
             if network.prefixlen == 0:
                 raise ValueError("Trusted proxy CIDR cannot cover the full network")
+
+    def validate_api_secrets(self) -> None:
+        if self.APP_ENV.lower() != "production":
+            return
+        receipt_secret = getattr(self, "RECEIPT_SECRET", None)
+        if (
+            receipt_secret is None
+            or len(receipt_secret) < 32
+            or len(set(receipt_secret)) < 8
+        ):
+            raise ValueError("RECEIPT_SECRET must be a strong independent secret")
+        if receipt_secret in {self.SESSION_SECRET, self.CSRF_SECRET}:
+            raise ValueError("RECEIPT_SECRET must be independent from other secrets")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -59,6 +73,7 @@ class Settings:
             SESSION_HOURS=int(os.environ["SESSION_HOURS"]),
             SESSION_SECRET=os.environ["SESSION_SECRET"],
             CSRF_SECRET=os.environ["CSRF_SECRET"],
+            RECEIPT_SECRET=os.getenv("RECEIPT_SECRET"),
             APP_ENV=os.environ["APP_ENV"],
             TRUSTED_PROXY_CIDRS=tuple(
                 value.strip()

@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import admin, auth, health, history, imports, progress, reviews
+from app.api.routes import admin, auth, exports, health, history, imports, progress, reviews, sync
 from app.config import Settings, get_settings
 from app.database import create_database_engine, create_session_factory
 from app.services.auth import LoginLimiter, parse_trusted_proxy_networks
@@ -12,6 +12,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     runtime = settings or get_settings()
     if runtime.APP_ENV.lower() == "production" and not runtime.TRUSTED_PROXY_CIDRS:
         raise ValueError("TRUSTED_PROXY_CIDRS is required for the production API")
+    Settings.validate_api_secrets(runtime)
     engine = create_database_engine(runtime)
 
     @asynccontextmanager
@@ -33,4 +34,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(history.router, prefix="/v1")
     app.include_router(admin.router, prefix="/v1")
     app.include_router(imports.router, prefix="/v1")
+    app.include_router(exports.router, prefix="/v1")
+    app.include_router(sync.router, prefix="/v1")
     return app

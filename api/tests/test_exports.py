@@ -424,7 +424,13 @@ def test_production_api_rejects_missing_weak_or_reused_receipt_secret(tmp_path):
         APP_ENV="production",
         TRUSTED_PROXY_CIDRS=("127.0.0.1/32",),
     )
-    for value in (None, "weak", common["SESSION_SECRET"], common["CSRF_SECRET"]):
+    for value in (
+        None,
+        "weak",
+        "x" * 64,
+        common["SESSION_SECRET"],
+        common["CSRF_SECRET"],
+    ):
         with pytest.raises(ValueError, match="RECEIPT_SECRET"):
             create_app(Settings(**common, RECEIPT_SECRET=value))
 
