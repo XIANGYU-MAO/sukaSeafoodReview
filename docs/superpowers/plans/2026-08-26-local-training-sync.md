@@ -14,10 +14,11 @@
 
 - 原图由 Mao 的 Windows 电脑直接访问外部来源，不经过生产服务器。
 - 只下载当前增量 CSV 中 action=ADD 且本地尚未成功处理的项目。
-- 成功文件路径固定为 images/{species_code}/{candidate_id}.{extension}。
+- 所有操作的目标和成功回执路径都必须使用服务器 CSV 的精确 `target_relative_path`；客户端不得自行重算目录、扩展名或 REMOVE 位置。
 - 下载先写 .part 文件，验证和哈希成功后再原子改名。
 - 每项计算 SHA-256 和感知哈希；完全相同字节不重复保存。
-- MOVE 不重新下载相同图片；REMOVE 移到 _removed，不永久删除。
+- MOVE 不重新下载相同图片并移动到精确 `target_relative_path`；REMOVE 从 `previous_relative_path` 移到服务器给出的精确 `_removed/...` target，不永久删除。
+- 带 `previous_relative_path` 的 composite ADD 必须先下载并原子提交新 target，只有新文件成功后才清理/移动旧路径；下载或验证失败必须保留旧文件。
 - 下载失败不记成功，并保留给下一次增量同步。
 - 重复运行同一 CSV 不重复下载已经成功的 candidate_id + review_id + review_version。
 - 回执上传失败时必须保存 download_receipt.json。
@@ -100,7 +101,7 @@ class ManifestRow:
     attribution: str
 ~~~
 
-同一文件所有行必须拥有相同 batch_id 和 receipt_token。original_url 必须为 HTTPS；ADD 必须有 original_url；MOVE/REMOVE 必须有 previous_relative_path。
+同一文件所有行必须拥有相同 batch_id 和 receipt_token。original_url 必须为 HTTPS；ADD 必须有 original_url，且 composite refresh ADD 可以有 previous_relative_path；MOVE/REMOVE 必须有 previous_relative_path。三种 action 都把服务器 `target_relative_path` 作为唯一目标，成功回执必须报告该精确 target（仅 ADD 下载解码时允许服务器契约认可的受控图片扩展调整）。
 
 - [ ] **Step 4: 实现本地 SQLite 索引**
 
@@ -212,11 +213,21 @@ def test_identical_sha_uses_existing_file(sync_root, index, add_row, existing_fi
     result = apply_add(sync_root, add_row, result_with_sha(existing_file.sha256), index)
     assert result.status == "SUCCEEDED"
     assert result.relative_path == existing_file.relative_path
+
+def test_composite_add_cleans_previous_only_after_new_target_succeeds(sync_root, index, composite_add_row):
+    result = apply_add(sync_root, composite_add_row, verified_download(), index)
+    assert result.relative_path == composite_add_row.target_relative_path
+    assert not resolve_inside(sync_root, composite_add_row.previous_relative_path).exists()
+
+def test_failed_composite_add_preserves_previous(sync_root, index, composite_add_row):
+    with pytest.raises(DownloadError):
+        apply_add(sync_root, composite_add_row, failed_download(), index)
+    assert resolve_inside(sync_root, composite_add_row.previous_relative_path).exists()
 ~~~
 
 - [ ] **Step 2: 写 MOVE 和可恢复 REMOVE 测试**
 
-MOVE 使用 os.replace 移动到新鱼种目录；目标已存在且 SHA 相同则只更新索引；SHA 不同则报冲突。REMOVE 移入 _removed/{timestamp}/{previous_relative_path} 并记录恢复位置。
+MOVE 使用 os.replace 从 previous 移到服务器给出的精确 target；目标已存在且 SHA 相同则只更新索引，SHA 不同则报冲突。REMOVE 同样使用服务器给出的精确 `_removed/...` target，不生成客户端 timestamp 路径，并记录该恢复位置。ADD/MOVE/REMOVE 的成功 `SyncResult.relative_path` 与回执都必须等于实际使用的服务器 target（仅受控 decoded-extension ADD 例外，且该实际路径随后成为服务器 canonical local state）。
 
 - [ ] **Step 3: 实现根目录边界检查**
 
@@ -410,7 +421,7 @@ git commit -m "feat(sync): add Windows GUI and CLI"
 
 - [ ] **Step 1: 写本地端到端测试**
 
-使用 responses 提供两张有效图、一张 429 后成功图、一张无效图；运行两次同一 CSV。断言第二次没有请求已经成功的三张，失败项仍请求，receipt 和 canonical_manifest.csv 正确。
+使用 responses 提供两张有效图、一张 429 后成功图、一张无效图，并包含带 previous 的 composite ADD、保留 decoded suffix 的 MOVE 与服务器指定 `_removed/...` target 的 REMOVE。运行两次同一 CSV；断言第二次不请求已成功项目、失败项仍请求、composite ADD 只在新 target 成功后清理旧路径、所有操作与 receipt 使用服务器精确 target，且 canonical_manifest.csv 正确。
 
 - [ ] **Step 2: 编写 PyInstaller 配置**
 

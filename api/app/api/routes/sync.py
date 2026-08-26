@@ -6,8 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import get_runtime_settings
 from app.database import get_db
 from app.api.request_body import read_bounded_json_body
+from app.config import Settings
 from app.schemas.exports import ReceiptRequest, ReceiptResponse
 from app.services.exports import MAX_RECEIPT_BYTES, ReceiptRejected, apply_receipt
 
@@ -19,6 +21,7 @@ router = APIRouter(prefix="/sync", tags=["sync"])
 async def post_batch_receipt(
     batch_id: UUID,
     request: Request,
+    settings: Settings = Depends(get_runtime_settings),
     db: AsyncSession = Depends(get_db),
 ) -> ReceiptResponse:
     authorization = request.headers.get("Authorization", "")
@@ -42,8 +45,17 @@ async def post_batch_receipt(
             detail={"code": "RECEIPT_INVALID"},
         ) from exc
     try:
+        if not settings.RECEIPT_SECRET:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "EXPORTS_NOT_CONFIGURED"},
+            )
         return await apply_receipt(
-            db, batch_id, payload.items, raw_token=raw_token
+            db,
+            batch_id,
+            payload.items,
+            receipt_secret=settings.RECEIPT_SECRET,
+            raw_token=raw_token,
         )
     except ReceiptRejected as exc:
         raise HTTPException(

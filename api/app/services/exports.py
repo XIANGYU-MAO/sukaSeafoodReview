@@ -145,6 +145,12 @@ def _desired_path(candidate: Candidate, species: Species) -> str:
     return f"images/{species.code}/{candidate.id}{_known_suffix(candidate.original_url)}"
 
 
+def _same_content_path(previous_path: str, species: Species) -> str:
+    if not is_safe_species_code(species.code):
+        raise ExportConflict("UNSAFE_SPECIES_CODE")
+    return f"images/{species.code}/{PurePosixPath(previous_path).name}"
+
+
 def _removed_path(batch_id: UUID, candidate: Candidate, previous_path: str) -> str:
     suffix = PurePosixPath(previous_path).suffix.lower()
     if suffix not in KNOWN_IMAGE_EXTENSIONS | {".image"}:
@@ -260,6 +266,8 @@ async def derive_deltas(
                 original_changed = (
                     local_item.original_fingerprint != _original_fingerprint(candidate)
                 )
+                if not original_changed:
+                    desired_path = _same_content_path(previous_path, species)
                 if previous_path != desired_path and not original_changed:
                     action = (
                         ExportAction.MOVE
@@ -592,15 +600,40 @@ def _safe_receipt_path(value: str, expected: str) -> str:
     return path.as_posix()
 
 
-def _safe_error(value: str) -> str:
+def _sensitive_error_variants(value: str) -> set[str]:
+    encoded = value.encode("utf-8")
+    variants = {
+        value,
+        base64.b64encode(encoded).decode("ascii"),
+        base64.urlsafe_b64encode(encoded).decode("ascii"),
+        encoded.hex(),
+    }
+    return {
+        variant.casefold()
+        for variant in variants | {variant.rstrip("=") for variant in variants}
+        if variant
+    }
+
+
+def _safe_error(value: str, sensitive_values: Iterable[str]) -> str:
     normalized = " ".join(value.replace("\x7f", " ").split())
     if not normalized or len(normalized) > MAX_ERROR_LENGTH:
         raise ReceiptRejected("RECEIPT_ERROR_INVALID", 422)
+    folded = normalized.casefold()
+    sensitive_variants = {
+        variant
+        for sensitive in sensitive_values
+        for variant in _sensitive_error_variants(sensitive)
+    }
+    if any(variant in folded for variant in sensitive_variants):
+        raise ReceiptRejected("RECEIPT_ERROR_SENSITIVE", 422)
     return normalized
 
 
 def _validate_receipt_items(
-    stored_items: list[ExportItem], payload_items: Iterable[ReceiptItem]
+    stored_items: list[ExportItem],
+    payload_items: Iterable[ReceiptItem],
+    sensitive_values: Iterable[str],
 ) -> list[tuple[ExportItem, ReceiptItem, str | None, str | None]]:
     by_triple = {
         (item.candidate_id, item.review_id, item.review_version): item
@@ -635,7 +668,7 @@ def _validate_receipt_items(
             raise ReceiptRejected("RECEIPT_SUCCESS_CONFLICT", 409)
         else:
             assert payload.error is not None
-            normalized_path = _safe_error(payload.error)
+            normalized_path = _safe_error(payload.error, sensitive_values)
         validated.append((item, payload, normalized_hash, normalized_path))
     return validated
 
@@ -645,6 +678,7 @@ async def apply_receipt(
     batch_id: UUID,
     items: list[ReceiptItem],
     *,
+    receipt_secret: str,
     raw_token: str | None = None,
     actor_id: UUID | None = None,
 ) -> ReceiptResponse:
@@ -678,7 +712,11 @@ async def apply_receipt(
                 )
             ).all()
         )
-        validated = _validate_receipt_items(stored_items, items)
+        validated = _validate_receipt_items(
+            stored_items,
+            items,
+            (receipt_token(batch.id, receipt_secret), receipt_secret),
+        )
         changed_ids: list[str] = []
         accepted: list[UUID] = []
         for item, payload, normalized_hash, normalized_value in validated:

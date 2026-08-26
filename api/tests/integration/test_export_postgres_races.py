@@ -121,8 +121,20 @@ def test_concurrent_identical_receipt_converges_without_errors_or_duplicate_audi
             batch_id = created.batch.id
         async with factory() as first, factory() as second:
             results = await asyncio.gather(
-                apply_receipt(first, batch_id, [payload], raw_token=token),
-                apply_receipt(second, batch_id, [payload], raw_token=token),
+                apply_receipt(
+                    first,
+                    batch_id,
+                    [payload],
+                    receipt_secret=SECRET,
+                    raw_token=token,
+                ),
+                apply_receipt(
+                    second,
+                    batch_id,
+                    [payload],
+                    receipt_secret=SECRET,
+                    raw_token=token,
+                ),
             )
         async with factory() as verify:
             stored = await verify.scalar(select(ExportItem).where(ExportItem.candidate_id == candidate_id))
