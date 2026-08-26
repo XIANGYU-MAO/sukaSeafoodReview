@@ -18,6 +18,14 @@ from .operations import (
     apply_remove,
     recover_add,
 )
+from .receipt import (
+    Receipt,
+    ReceiptError,
+    SubmitResult,
+    build_receipt,
+    save_receipt_file,
+    submit_receipt,
+)
 
 __all__ = [
     "BatchResult",
@@ -28,17 +36,23 @@ __all__ = [
     "OperationLogger",
     "ProgressEvent",
     "ReceiptItem",
+    "Receipt",
+    "ReceiptError",
     "SyncCallbacks",
     "SyncEngine",
     "SyncEngineError",
     "SyncIndex",
     "SyncRecord",
     "SyncResult",
+    "SubmitResult",
     "apply_add",
     "apply_move",
     "apply_remove",
     "recover_add",
+    "build_receipt",
     "load_manifest",
+    "save_receipt_file",
+    "submit_receipt",
 ]
 
 __version__ = "0.1.0"
