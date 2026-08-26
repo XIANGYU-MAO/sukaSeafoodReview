@@ -264,6 +264,37 @@ describe("HistoryPage links, privacy, and editing", () => {
     expect(screen.queryByText("修改已保存")).not.toBeInTheDocument();
   });
 
+  it.each([
+    ["another valid review ID", { id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }],
+    ["a nonincremented version", { version: 5 }],
+  ])("rejects a successful edit receipt for %s without refetching or losing the draft", async (_label, overrides) => {
+    let historyGets = 0;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/history?")) {
+        historyGets += 1;
+        return Promise.resolve(jsonResponse(historyFixture));
+      }
+      return Promise.resolve(jsonResponse(editedReview({
+        decision: "UNSURE",
+        whole_fish: "REVIEW",
+        exact_species_verified: "REVIEW",
+        ...overrides,
+      })));
+    }));
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "编辑" }));
+    await user.click(screen.getByRole("button", { name: "不确定" }));
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("修改失败");
+    expect(screen.getByRole("button", { name: "不确定" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "重试修改" })).toBeInTheDocument();
+    expect(screen.queryByText("修改已保存")).not.toBeInTheDocument();
+    expect(historyGets).toBe(1);
+  });
+
   it("replaces a valid stale conflict with latest state and requires an explicit new submit", async () => {
     let patchCalls = 0;
     const latest = editedReview({ decision: "UNSURE", whole_fish: "REVIEW", exact_species_verified: "REVIEW" });
