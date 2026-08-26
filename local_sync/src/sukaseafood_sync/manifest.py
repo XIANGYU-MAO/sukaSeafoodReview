@@ -50,8 +50,13 @@ _WINDOWS_RESERVED = frozenset(
         "PRN",
         "AUX",
         "NUL",
+        "CONIN$",
+        "CONOUT$",
+        "CLOCK$",
         *(f"COM{number}" for number in range(1, 10)),
         *(f"LPT{number}" for number in range(1, 10)),
+        *(f"COM{number}" for number in "¹²³"),
+        *(f"LPT{number}" for number in "¹²³"),
     }
 )
 
@@ -117,8 +122,10 @@ def _uuid(value: str, field_name: str) -> UUID:
     _bounded_text(value, field_name, required=True, allow_newlines=False)
     try:
         parsed = UUID(value)
-    except (ValueError, AttributeError) as exc:
-        raise _error(field_name, "must be a canonical UUID") from exc
+    except (ValueError, AttributeError):
+        parsed = None
+    if parsed is None:
+        raise _error(field_name, "must be a canonical UUID") from None
     if str(parsed) != value:
         raise _error(field_name, "must be a canonical UUID")
     return parsed
@@ -128,7 +135,12 @@ def _positive_integer(value: str, field_name: str) -> int:
     _bounded_text(value, field_name, required=True, allow_newlines=False)
     if _INTEGER_PATTERN.fullmatch(value) is None:
         raise _error(field_name, "must be a positive integer")
-    parsed = int(value)
+    try:
+        parsed = int(value)
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        raise _error(field_name, "must be a positive safe integer") from None
     if not 1 <= parsed <= MAX_SAFE_INTEGER:
         raise _error(field_name, "must be a positive safe integer")
     return parsed
@@ -155,8 +167,10 @@ def _https_url(value: str, field_name: str, *, required: bool = True) -> str | N
     try:
         parsed = urlsplit(checked)
         _ = parsed.port
-    except ValueError as exc:
-        raise _error(field_name, "must be an absolute HTTPS URL") from exc
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        raise _error(field_name, "must be an absolute HTTPS URL") from None
     if (
         parsed.scheme.lower() != "https"
         or not parsed.netloc
@@ -168,17 +182,27 @@ def _https_url(value: str, field_name: str, *, required: bool = True) -> str | N
     return checked
 
 
+def _is_windows_reserved_component(component: str) -> bool:
+    device_stem = component.partition(".")[0].upper()
+    return device_stem in _WINDOWS_RESERVED
+
+
+def _utf16_code_units(value: str) -> int:
+    return sum(2 if ord(character) > 0xFFFF else 1 for character in value)
+
+
 def _validate_windows_component(component: str, field_name: str) -> None:
     if not component or component in {".", ".."}:
         raise _error(field_name, "must be a safe relative path without empty or dot segments")
+    if _utf16_code_units(component) > 255:
+        raise _error(field_name, "contains a component exceeding 255 UTF-16 code units")
     if component.endswith((".", " ")):
         raise _error(field_name, "contains a Windows-unsafe trailing dot or space")
     if any(character in _WINDOWS_INVALID for character in component):
         raise _error(field_name, "contains a Windows-invalid path character")
     if any(unicodedata.category(character) == "Cc" for character in component):
         raise _error(field_name, "contains a control character")
-    device_stem = component.split(".", 1)[0].upper()
-    if device_stem in _WINDOWS_RESERVED:
+    if _is_windows_reserved_component(component):
         raise _error(field_name, "contains a Windows reserved device name")
 
 
@@ -211,12 +235,14 @@ def resolve_inside(root: Path, relative: str | PurePosixPath) -> Path:
     """Resolve a validated POSIX relative path and reject root/symlink escapes."""
 
     safe = validate_relative_path(relative)
-    resolved_root = Path(root).resolve()
-    resolved = resolved_root.joinpath(*safe.parts).resolve(strict=False)
     try:
+        resolved_root = Path(root).resolve()
+        resolved = resolved_root.joinpath(*safe.parts).resolve(strict=False)
         resolved.relative_to(resolved_root)
-    except ValueError as exc:
-        raise ManifestError("relative_path resolves outside the selected root") from exc
+    except (OSError, ValueError):
+        resolved = None
+    if resolved is None:
+        raise ManifestError("relative_path resolves outside the selected root") from None
     return resolved
 
 
@@ -324,6 +350,7 @@ def _parse_row(raw: dict[str, str], row_number: int) -> tuple[ManifestRow, str]:
 
 
 def _read_manifest_bytes(path: Path) -> bytes:
+    read_failed = False
     try:
         with path.open("rb") as stream:
             before = os.fstat(stream.fileno())
@@ -333,8 +360,10 @@ def _read_manifest_bytes(path: Path) -> bytes:
             after = os.fstat(stream.fileno())
     except ManifestError:
         raise
-    except OSError as exc:
-        raise ManifestError("manifest file cannot be read") from exc
+    except OSError:
+        read_failed = True
+    if read_failed:
+        raise ManifestError("manifest file cannot be read") from None
     if len(content) > MAX_MANIFEST_BYTES:
         raise ManifestError("manifest file exceeds 20 MiB")
     if (
@@ -411,12 +440,15 @@ def load_manifest(path: Path) -> ExportManifest:
     manifest_path = Path(path)
     try:
         decoded = _read_manifest_bytes(manifest_path).decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise ManifestError("manifest must be valid UTF-8") from exc
+    except UnicodeDecodeError:
+        decoded = None
+    if decoded is None:
+        raise ManifestError("manifest must be valid UTF-8") from None
     _validate_csv_lexemes(decoded)
 
     rows: list[ManifestRow] = []
     tokens: list[str] = []
+    csv_failed = False
     try:
         with io.StringIO(decoded, newline="") as stream:
             reader = csv.reader(stream, strict=True)
@@ -435,8 +467,10 @@ def load_manifest(path: Path) -> ExportManifest:
                 )
                 rows.append(parsed)
                 tokens.append(token)
-    except csv.Error as exc:
-        raise ManifestError("manifest contains malformed CSV") from exc
+    except csv.Error:
+        csv_failed = True
+    if csv_failed:
+        raise ManifestError("manifest contains malformed CSV") from None
 
     if not rows:
         raise ManifestError("manifest must contain at least one row")
