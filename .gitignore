@@ -2,7 +2,11 @@
 .superpowers/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 api/.env
 web/node_modules/
 web/dist/
+local_sync/.build/
+local_sync/build/
+local_sync/dist/

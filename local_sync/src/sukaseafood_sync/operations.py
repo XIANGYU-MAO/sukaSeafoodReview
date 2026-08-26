@@ -797,6 +797,12 @@ def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult |
     target_relative, _previous = _validated_row_path(row, "ADD")
     stored = _index_exact(index, row)
     candidates = _recovery_target_candidates(root, target_relative)
+    if row.previous_relative_path is not None:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if candidate[0] != row.previous_relative_path
+        ]
     if len(candidates) > 1:
         raise OperationError("ADD_RECOVERY_AMBIGUOUS")
 

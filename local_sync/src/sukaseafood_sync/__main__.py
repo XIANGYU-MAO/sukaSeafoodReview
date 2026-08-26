@@ -4,10 +4,10 @@ import sys
 
 
 if sys.argv[1:]:
-    from .cli import main
+    from sukaseafood_sync.cli import main
 
     raise SystemExit(main())
 
-from .gui import main as gui_main
+from sukaseafood_sync.gui import main as gui_main
 
 raise SystemExit(gui_main())

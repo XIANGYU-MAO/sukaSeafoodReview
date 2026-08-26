@@ -576,6 +576,12 @@ class SyncEngine:
                     pass
 
         if not cancelled:
+            from .canonical import CanonicalManifestError, write_canonical_manifest
+
+            try:
+                write_canonical_manifest(safe_root, manifest, tuple(receipts))
+            except CanonicalManifestError:
+                raise SyncEngineError("CANONICAL_MANIFEST_ERROR") from None
             self._emit(
                 callbacks,
                 current=len(receipts),

@@ -1,0 +1,28 @@
+# Exact Python 3.12 Windows build environment resolved on 2026-08-27.
+# Install every line with --no-deps, then install this local package with
+# --no-deps --no-build-isolation so no unpinned dependency is resolved.
+altgraph==0.17.5
+certifi==2026.7.22
+charset-normalizer==3.5.1
+colorama==0.4.6
+idna==3.19
+ImageHash==4.3.2
+iniconfig==2.3.0
+numpy==2.5.2
+packaging==26.3
+pefile==2024.8.26
+Pillow==12.3.0
+pluggy==1.6.0
+Pygments==2.21.0
+PyInstaller==6.22.2
+pyinstaller-hooks-contrib==2026.7
+pytest==8.4.2
+PyWavelets==1.9.0
+pywin32-ctypes==0.2.3
+PyYAML==6.0.3
+requests==2.34.2
+responses==0.26.2
+scipy==1.18.1
+setuptools==80.9.0
+urllib3==2.7.0
+wheel==0.48.0

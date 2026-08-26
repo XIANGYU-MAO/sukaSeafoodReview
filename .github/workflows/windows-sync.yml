@@ -1,0 +1,38 @@
+name: Windows training sync
+
+on:
+  push:
+    paths:
+      - "local_sync/**"
+      - ".github/workflows/windows-sync.yml"
+  pull_request:
+    paths:
+      - "local_sync/**"
+      - ".github/workflows/windows-sync.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-sync:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: local_sync/requirements-build.lock
+      - name: Test and package
+        shell: pwsh
+        run: ./local_sync/scripts/build_windows.ps1
+      - name: Upload verified Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: SukaSeafoodTrainingSync-windows-x64
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            local_sync/dist/SukaSeafoodTrainingSync
+            local_sync/dist/SHA256SUMS.txt
