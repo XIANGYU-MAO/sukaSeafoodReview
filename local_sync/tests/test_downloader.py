@@ -16,6 +16,7 @@ import pytest
 import requests
 import responses
 
+import sukaseafood_sync.downloader as downloader_module
 from sukaseafood_sync.downloader import (
     DownloadCancelled,
     DownloadError,
@@ -283,6 +284,41 @@ def test_redirect_success_is_manual_and_preserves_safe_request_headers(
     assert all(TOKEN not in repr(dict(call.request.headers)) for call in http.calls)
 
 
+def test_cross_host_redirect_does_not_forward_session_origin_credentials(
+    http, valid_jpeg, tmp_path
+):
+    observed_headers: list[dict[str, str]] = []
+
+    def redirect_callback(request):
+        observed_headers.append(dict(request.headers))
+        return 302, {"Location": REDIRECT_URL}, b""
+
+    def image_callback(request):
+        observed_headers.append(dict(request.headers))
+        return 200, {}, valid_jpeg
+
+    http.add_callback(responses.GET, IMAGE_URL, callback=redirect_callback)
+    http.add_callback(responses.GET, REDIRECT_URL, callback=image_callback)
+    client = session()
+    client.auth = ("session-user", "session-password")
+    client.headers["Authorization"] = "Bearer session-header-secret"
+    client.headers["Cookie"] = "header-cookie=session-header-secret"
+    client.cookies.set(
+        "session-cookie", "session-cookie-secret", domain=".example.test"
+    )
+
+    result = download_image(
+        client, add_row(), tmp_path / "fish.jpg", policy(), noop, never_cancel
+    )
+
+    assert result.byte_count == len(valid_jpeg)
+    assert len(observed_headers) == 2
+    for headers in observed_headers:
+        assert "Authorization" not in headers
+        assert "Cookie" not in headers
+        assert headers["Accept-Encoding"] == "identity"
+
+
 @pytest.mark.parametrize(
     "location",
     [
@@ -506,6 +542,34 @@ def test_stale_regular_part_is_replaced_and_progress_is_monotonic(
         downloaded for downloaded, _ in progress
     )
     assert progress[-1] == (len(valid_jpeg), len(valid_jpeg))
+
+
+def test_post_validation_inspection_failure_cleans_owned_staging(
+    http, valid_jpeg, tmp_path, monkeypatch
+):
+    destination = tmp_path / "fish.jpg"
+    actual_lstat = downloader_module._lstat
+    inspection_count = 0
+
+    def fail_first_post_validation_inspection(path: Path):
+        nonlocal inspection_count
+        inspection_count += 1
+        if inspection_count == 3:
+            raise DownloadError("download path cannot be inspected")
+        return actual_lstat(path)
+
+    monkeypatch.setattr(
+        downloader_module, "_lstat", fail_first_post_validation_inspection
+    )
+    http.add(responses.GET, IMAGE_URL, body=valid_jpeg, status=200)
+
+    with pytest.raises(DownloadError, match="cannot be inspected"):
+        download_image(
+            session(), add_row(), destination, policy(), noop, never_cancel
+        )
+
+    assert not destination.exists()
+    assert not part_for(destination).exists()
 
 
 def test_existing_destination_is_untouched_and_blocks_download(http, tmp_path):

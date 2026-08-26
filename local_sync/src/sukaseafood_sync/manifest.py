@@ -75,12 +75,12 @@ class ManifestRow:
     species_code: str
     target_relative_path: PurePosixPath
     previous_relative_path: PurePosixPath | None
-    preview_url: str
-    original_url: str
-    source_url: str
+    preview_url: str = field(repr=False)
+    original_url: str = field(repr=False)
+    source_url: str = field(repr=False)
     creator: str | None
     license: str
-    license_url: str | None
+    license_url: str | None = field(repr=False)
     attribution: str
 
 

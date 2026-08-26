@@ -167,12 +167,23 @@ def _request(
         response: requests.Response | None = None
         request_failed = False
         try:
-            response = session.get(
+            prepared = requests.Request(
+                "GET",
                 current,
-                stream=True,
-                allow_redirects=False,
                 headers={"Accept-Encoding": "identity"},
+            ).prepare()
+            environment = session.merge_environment_settings(
+                current,
+                proxies={},
+                stream=True,
+                verify=None,
+                cert=None,
+            )
+            response = session.send(
+                prepared,
+                allow_redirects=False,
                 timeout=policy.timeout,
+                **environment,
             )
         except requests.RequestException:
             request_failed = True
@@ -385,27 +396,31 @@ def download_image(
                     width,
                     height,
                 ) = _stream_response(response, staging, policy, progress, cancel)
-                if _lstat(target) is not None:
+                try:
+                    if _lstat(target) is not None:
+                        raise DownloadError("destination appeared during download")
+                    current = _lstat(staging)
+                    if (
+                        current is None
+                        or not _regular_non_reparse(current)
+                        or not _same_file(current, owned)
+                    ):
+                        raise DownloadError(
+                            "verified staging file changed unexpectedly"
+                        )
+                    return DownloadResult(
+                        staging_path=staging,
+                        sha256=sha256,
+                        phash=phash,
+                        byte_count=byte_count,
+                        format=decoded_format,
+                        suffix=_FORMAT_SUFFIXES[decoded_format],
+                        width=width,
+                        height=height,
+                    )
+                except BaseException:
                     _remove_owned_staging(staging, owned)
-                    raise DownloadError("destination appeared during download")
-                current = _lstat(staging)
-                if (
-                    current is None
-                    or not _regular_non_reparse(current)
-                    or not _same_file(current, owned)
-                ):
-                    _remove_owned_staging(staging, owned)
-                    raise DownloadError("verified staging file changed unexpectedly")
-                return DownloadResult(
-                    staging_path=staging,
-                    sha256=sha256,
-                    phash=phash,
-                    byte_count=byte_count,
-                    format=decoded_format,
-                    suffix=_FORMAT_SUFFIXES[decoded_format],
-                    width=width,
-                    height=height,
-                )
+                    raise
         except _TransportFailure:
             transport_failed = True
         finally:

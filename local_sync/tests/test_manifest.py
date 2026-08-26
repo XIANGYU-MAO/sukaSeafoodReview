@@ -124,6 +124,26 @@ def test_manifest_and_rows_are_immutable_and_secret_free_in_repr(tmp_path: Path)
         manifest.rows[0] = manifest.rows[0]  # type: ignore[index]
 
 
+def test_manifest_row_url_fields_remain_accessible_but_are_hidden_from_repr(
+    tmp_path: Path,
+) -> None:
+    secret = "UNMISTAKABLE_SIGNED_QUERY_SECRET_DO_NOT_LEAK"
+    urls = {
+        "preview_url": f"https://images.example.test/preview.jpg?signature={secret}",
+        "original_url": f"https://images.example.test/original.jpg?signature={secret}",
+        "source_url": f"https://catalog.example.test/record?signature={secret}",
+        "license_url": f"https://license.example.test/terms?signature={secret}",
+    }
+
+    row = load_manifest(
+        write_manifest(tmp_path, rows=[valid_row(**urls)])
+    ).rows[0]
+
+    assert secret not in repr(row)
+    for field_name, expected in urls.items():
+        assert getattr(row, field_name) == expected
+
+
 @pytest.mark.parametrize(
     "headers",
     [
