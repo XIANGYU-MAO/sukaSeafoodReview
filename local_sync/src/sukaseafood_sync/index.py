@@ -23,6 +23,7 @@ MAX_SAFE_INTEGER = 2**63 - 1
 _HEX_64 = re.compile(r"[0-9a-fA-F]{64}\Z", re.ASCII)
 _HEX_BOUNDED = re.compile(r"[0-9a-fA-F]{1,256}\Z", re.ASCII)
 _ACTIONS = frozenset({"ADD", "MOVE", "REMOVE"})
+_SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 _COLUMNS = (
     "candidate_id",
     "review_id",
@@ -68,7 +69,40 @@ CREATE TABLE synced_items (
 
 
 def _normalized_sql(value: str) -> str:
-    return re.sub(r"\s+", " ", value.strip()).casefold()
+    normalized: list[str] = []
+    quote_end: str | None = None
+    pending_space = False
+    position = 0
+    while position < len(value):
+        character = value[position]
+        if quote_end is not None:
+            normalized.append(character)
+            if character == quote_end:
+                if (
+                    quote_end != "]"
+                    and position + 1 < len(value)
+                    and value[position + 1] == quote_end
+                ):
+                    normalized.append(value[position + 1])
+                    position += 1
+                else:
+                    quote_end = None
+            position += 1
+            continue
+        if character.isspace():
+            pending_space = True
+            position += 1
+            continue
+        if pending_space and normalized:
+            normalized.append(" ")
+        pending_space = False
+        normalized.append(character)
+        if character in {"'", '"', "`"}:
+            quote_end = character
+        elif character == "[":
+            quote_end = "]"
+        position += 1
+    return "".join(normalized).strip()
 
 
 _SCHEMA_FINGERPRINT = hashlib.sha256(
@@ -182,7 +216,15 @@ def _parse_timestamp(value: str | None, field_name: str) -> datetime | None:
 
 
 class SyncIndex:
-    """Durable per-training-root completion index using owned per-call connections."""
+    """Durable per-root index using owned, sidecar-checked connections.
+
+    The main file and SQLite's predictable single-database sidecars are checked
+    immediately before and after connection opens and around WAL activation.
+    Python's sqlite3 API does not expose SQLITE_OPEN_NOFOLLOW, so a same-user
+    process able to swap directory entries inside the remaining check/use
+    window is outside this boundary and must be excluded by root permissions.
+    This class never issues ATTACH, so SQLite super-journals are not used.
+    """
 
     def __init__(self, root: Path) -> None:
         selected = Path(root)
@@ -194,35 +236,48 @@ class SyncIndex:
             raise SyncIndexError("training root must be a directory")
         self.root = selected.resolve()
         self.path = self.root / INDEX_FILENAME
-        self._validate_index_path()
+        self._sidecar_paths = tuple(
+            Path(f"{self.path}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES
+        )
+        self._validate_sqlite_paths()
         self._initialize()
 
-    def _validate_index_path(self) -> None:
-        if self.path.parent != self.root:
-            raise SyncIndexError("index path must remain inside the selected root")
+    def _validate_sqlite_path(self, candidate: Path, *, sidecar: bool) -> None:
+        label = "SQLite sidecar" if sidecar else "index"
+        if candidate.parent != self.root:
+            raise SyncIndexError(f"{label} path must remain inside the selected root")
         try:
-            metadata = os.lstat(self.path)
+            metadata = os.lstat(candidate)
         except FileNotFoundError:
-            if self.path.resolve(strict=False).parent != self.root:
-                raise SyncIndexError("index path must remain inside the selected root")
+            if candidate.resolve(strict=False).parent != self.root:
+                raise SyncIndexError(
+                    f"{label} path must remain inside the selected root"
+                )
             return
         except OSError as exc:
-            raise SyncIndexError("index path cannot be inspected safely") from exc
+            raise SyncIndexError(f"{label} path cannot be inspected safely") from exc
         attributes = getattr(metadata, "st_file_attributes", 0)
         if stat.S_ISLNK(metadata.st_mode):
-            raise SyncIndexError("index path must not be a symlink or reparse point")
+            raise SyncIndexError(f"{label} path must not be a symlink or reparse point")
         if attributes & _REPARSE_POINT:
-            raise SyncIndexError("index path must not be a reparse point")
+            raise SyncIndexError(f"{label} path must not be a reparse point")
         if not stat.S_ISREG(metadata.st_mode):
-            raise SyncIndexError("index path must be a regular file")
+            raise SyncIndexError(f"{label} path must be a regular file")
         try:
-            resolved = self.path.resolve(strict=True)
+            resolved = candidate.resolve(strict=True)
             resolved.relative_to(self.root)
         except (OSError, ValueError) as exc:
-            raise SyncIndexError("index path must remain inside the selected root") from exc
+            raise SyncIndexError(
+                f"{label} path must remain inside the selected root"
+            ) from exc
+
+    def _validate_sqlite_paths(self) -> None:
+        self._validate_sqlite_path(self.path, sidecar=False)
+        for sidecar in self._sidecar_paths:
+            self._validate_sqlite_path(sidecar, sidecar=True)
 
     def _open_connection(self) -> sqlite3.Connection:
-        self._validate_index_path()
+        self._validate_sqlite_paths()
         try:
             connection = sqlite3.connect(
                 self.path,
@@ -233,7 +288,7 @@ class SyncIndex:
             raise SyncIndexError("index database cannot be opened") from exc
         connection.row_factory = sqlite3.Row
         try:
-            self._validate_index_path()
+            self._validate_sqlite_paths()
             connection.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA synchronous = FULL")
@@ -258,14 +313,15 @@ class SyncIndex:
         ):
             raise SyncIndexError("required SQLite durability settings are unavailable")
 
-    @staticmethod
-    def _enable_wal(connection: sqlite3.Connection) -> None:
+    def _enable_wal(self, connection: sqlite3.Connection) -> None:
         deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1_000
         while True:
             try:
+                self._validate_sqlite_paths()
                 mode = str(
                     connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
                 )
+                self._validate_sqlite_paths()
                 if mode.casefold() == "wal":
                     return
             except sqlite3.OperationalError as exc:
@@ -288,6 +344,7 @@ class SyncIndex:
     def _initialize(self) -> None:
         connection = self._open_connection()
         try:
+            self._validate_sqlite_paths()
             connection.execute("BEGIN IMMEDIATE")
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             objects = list(

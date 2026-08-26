@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 from typing import Literal
+import unicodedata
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -94,16 +95,16 @@ def _bounded_text(
     field_name: str,
     *,
     required: bool,
-    allow_newlines: bool = True,
+    allow_newlines: bool = False,
 ) -> str | None:
     if len(value) > MAX_FIELD_CHARS:
         raise _error(field_name, f"must not exceed {MAX_FIELD_CHARS} characters")
     forbidden = any(
-        ord(character) < 0x20
+        unicodedata.category(character) == "Cc"
         and (not allow_newlines or character not in {"\r", "\n"})
         for character in value
     )
-    if forbidden or "\x7f" in value:
+    if forbidden:
         raise _error(field_name, "contains a control character")
     if not value.strip():
         if required:
@@ -174,7 +175,7 @@ def _validate_windows_component(component: str, field_name: str) -> None:
         raise _error(field_name, "contains a Windows-unsafe trailing dot or space")
     if any(character in _WINDOWS_INVALID for character in component):
         raise _error(field_name, "contains a Windows-invalid path character")
-    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in component):
+    if any(unicodedata.category(character) == "Cc" for character in component):
         raise _error(field_name, "contains a control character")
     device_stem = component.split(".", 1)[0].upper()
     if device_stem in _WINDOWS_RESERVED:
@@ -303,11 +304,19 @@ def _parse_row(raw: dict[str, str], row_number: int) -> tuple[ManifestRow, str]:
         preview_url=_https_url(raw["preview_url"], "preview_url") or "",
         original_url=_https_url(raw["original_url"], "original_url") or "",
         source_url=_https_url(raw["source_url"], "source_url") or "",
-        creator=_bounded_text(raw["creator"], "creator", required=False),
-        license=_bounded_text(raw["license"], "license", required=True) or "",
+        creator=_bounded_text(
+            raw["creator"], "creator", required=False, allow_newlines=True
+        ),
+        license=_bounded_text(
+            raw["license"], "license", required=True, allow_newlines=True
+        )
+        or "",
         license_url=_https_url(raw["license_url"], "license_url", required=False),
         attribution=_bounded_text(
-            raw["attribution"], "attribution", required=True
+            raw["attribution"],
+            "attribution",
+            required=True,
+            allow_newlines=True,
         )
         or "",
     )
