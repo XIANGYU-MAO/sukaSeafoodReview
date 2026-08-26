@@ -377,7 +377,7 @@ describe("import, export and one-time password workflows", () => {
         creations += 1;
         return creations === 1
           ? jsonResponse({ code: "NO_WORK", created: false, batch: null })
-          : jsonResponse({ ...exportBatch, created: creations === 3 }, creations === 3 ? 201 : 200);
+          : jsonResponse({ ...exportBatch, species_code: null, created: creations === 3 }, creations === 3 ? 201 : 200);
       }
       if (url.endsWith(`/admin/exports/${IDS.batch}/receipt-file`) && init?.method === "POST") {
         return jsonResponse({ batch_id: IDS.batch, status: "completed", accepted_candidate_ids: [IDS.candidate], pending_candidate_ids: [] });

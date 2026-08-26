@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { IDS, candidateFixture, currentFixture, speciesFixture } from "../test/task12Fixtures";
-import { parseCandidateReceipt, parseReceiptResponse, parseReviewReceipt, parseSpeciesReceipt } from "./types";
+import { IDS, candidateFixture, currentFixture, exportBatch, speciesFixture } from "../test/task12Fixtures";
+import { parseCandidateReceipt, parseExportCreate, parseReceiptResponse, parseReviewReceipt, parseSpeciesReceipt } from "./types";
 
 describe("Task 12 review runtime mutation contracts", () => {
   it("accepts pending batch IDs outside a partial upload but only accepts submitted successes", () => {
@@ -36,6 +36,44 @@ describe("Task 12 review runtime mutation contracts", () => {
     }, IDS.batch, new Map([[IDS.candidate, "SUCCEEDED"]]) as never)).toThrow();
   });
 
+  it("requires an exact classification for every submitted receipt item", () => {
+    const second = "30000000-0000-4000-8000-000000000002";
+    const unsent = "30000000-0000-4000-8000-000000000003";
+    const response = (accepted: string[], pending: string[]) => ({
+      batch_id: IDS.batch,
+      status: "pending",
+      accepted_candidate_ids: accepted,
+      pending_candidate_ids: pending,
+    });
+
+    expect(() => parseReceiptResponse(
+      response([IDS.candidate], [second]),
+      IDS.batch,
+      new Map([[IDS.candidate, "SUCCEEDED"], [second, "SUCCEEDED"]]) as never,
+    )).toThrow();
+    expect(() => parseReceiptResponse(
+      response([], [IDS.candidate]),
+      IDS.batch,
+      new Map([[IDS.candidate, "SUCCEEDED"]]) as never,
+    )).toThrow();
+    expect(() => parseReceiptResponse(
+      response([IDS.candidate], [unsent]),
+      IDS.batch,
+      new Map([[IDS.candidate, "FAILED"]]) as never,
+    )).toThrow();
+    expect(() => parseReceiptResponse(
+      response([], [unsent]),
+      IDS.batch,
+      new Map([[IDS.candidate, "FAILED"]]) as never,
+    )).toThrow();
+
+    expect(parseReceiptResponse(
+      response([IDS.candidate], [second, unsent]),
+      IDS.batch,
+      new Map([[IDS.candidate, "SUCCEEDED"], [second, "FAILED"]]) as never,
+    )).toEqual({ accepted: 1, pending: 2 });
+  });
+
   it("rejects species create and edit receipts that disagree with submitted fields", () => {
     expect(() => parseSpeciesReceipt(
       { ...speciesFixture.items[0], id: IDS.batch, code: "SF003", candidate_count: 0 },
@@ -45,6 +83,27 @@ describe("Task 12 review runtime mutation contracts", () => {
       { ...speciesFixture.items[0], name_en: "unchanged" },
       { id: IDS.species1, submitted: { name_en: "Corrected fish" } } as never,
     )).toThrow();
+  });
+
+  it("rejects an otherwise valid species edit receipt whose immutable code changed", () => {
+    expect(() => parseSpeciesReceipt(
+      { ...speciesFixture.items[0], code: "SF999", name_en: "Corrected fish" },
+      { id: IDS.species1, code: "SF001", submitted: { name_en: "Corrected fish" } } as never,
+    )).toThrow();
+  });
+
+  it.each([
+    ["SF001", { ...exportBatch, species_code: "SF002" }],
+    [null, { ...exportBatch, species_code: "SF001" }],
+  ])("rejects an export batch outside requested scope %s", (scope, response) => {
+    expect(() => parseExportCreate(response, scope as never)).toThrow();
+  });
+
+  it("keeps NO_WORK explicitly bound to the requested export scope", () => {
+    expect(parseExportCreate({ code: "NO_WORK", created: false, batch: null }, "SF001" as never)).toEqual({
+      kind: "no-work",
+      scope: "SF001",
+    });
   });
 
   it.each([

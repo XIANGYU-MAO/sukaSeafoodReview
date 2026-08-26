@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 
@@ -11,6 +11,7 @@ import {
   exportBatch,
   importPreviewFixture,
   jsonResponse,
+  speciesFixture,
   speciesItems,
 } from "../test/task12Fixtures";
 
@@ -60,6 +61,32 @@ it("uses the complete validated source directory instead of only the visible can
 
   expect(await screen.findByRole("option", { name: "GBIF" })).toBeInTheDocument();
   expect(screen.getByRole("option", { name: "维基共享资源" })).toBeInTheDocument();
+});
+
+it("retains the species edit draft and does not refetch when a valid-looking receipt changes its immutable code", async () => {
+  let catalogGets = 0;
+  const fetchMock = mockAdmin((url, init) => {
+    if (url.includes("/admin/species?") && !init?.method) { catalogGets += 1; return undefined; }
+    if (url.endsWith(`/admin/species/${IDS.species1}`) && init?.method === "PATCH") {
+      return jsonResponse({ ...speciesFixture.items[0], code: "SF999", name_en: "Corrected fish" });
+    }
+  });
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("鱼种管理");
+  await user.click(await screen.findByRole("button", { name: "编辑 SF001" }));
+  const name = screen.getByLabelText("英文名");
+  await user.clear(name);
+  await user.type(name, "Corrected fish");
+  await user.type(screen.getByLabelText("鱼种修改原因"), "修正名称");
+  const beforeSave = catalogGets;
+  await user.click(screen.getByRole("button", { name: "保存鱼种" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("服务返回无效结果");
+  expect(screen.getByLabelText("英文名")).toHaveValue("Corrected fish");
+  expect(screen.queryByText("鱼种修改已保存")).not.toBeInTheDocument();
+  expect(catalogGets).toBe(beforeSave);
+  expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith(`/admin/species/${IDS.species1}`))).toHaveLength(1);
 });
 
 it("marks old rows unavailable during refresh and keeps them disabled after refresh failure until retry", async () => {
@@ -162,6 +189,68 @@ it("aborts preview A when B is selected and only commits B's in-memory token", a
   expect(JSON.parse(String(commit?.[1]?.body))).toEqual({ preview_token: tokenB });
 });
 
+it("locks file ownership while commit A is pending and applies its completion exactly once", async () => {
+  const committed = deferred<Response>();
+  let previews = 0;
+  let commits = 0;
+  mockAdmin((url) => {
+    if (url.endsWith("/admin/imports/preview")) { previews += 1; return jsonResponse(importPreviewFixture); }
+    if (url.endsWith("/admin/imports/commit")) { commits += 1; return committed.promise; }
+  });
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("导入");
+  const input = screen.getByLabelText("候选 CSV 文件");
+  await user.upload(input, new File(["A"], "a.csv", { type: "text/csv" }));
+  await user.click(screen.getByRole("button", { name: "预检查" }));
+  await user.click(await screen.findByRole("button", { name: "提交导入" }));
+  await user.click(screen.getByRole("button", { name: "确认提交导入" }));
+  await waitFor(() => expect(commits).toBe(1));
+
+  expect(input).toBeDisabled();
+  fireEvent.change(input, { target: { files: [new File(["B"], "b.csv", { type: "text/csv" })] } });
+  expect(input).toBeDisabled();
+  const previewButton = screen.getByRole("button", { name: "处理中…" });
+  const commitButton = screen.getByRole("button", { name: "确认提交导入" });
+  const cancelButton = screen.getByRole("button", { name: "取消" });
+  expect(previewButton).toBeDisabled();
+  expect(commitButton).toBeDisabled();
+  expect(cancelButton).toBeDisabled();
+  fireEvent.click(previewButton);
+  fireEvent.click(commitButton);
+  fireEvent.click(cancelButton);
+  expect(commits).toBe(1);
+  expect(previews).toBe(1);
+
+  await act(async () => committed.resolve(jsonResponse({ total: 4, inserted: 2, skipped_exact: 1, possible_url_duplicates: 1, file_sha256: "a".repeat(64) })));
+  expect(await screen.findByRole("status")).toHaveTextContent("导入完成：新增 2");
+  expect(commits).toBe(1);
+  expect(previews).toBe(1);
+  expect(screen.queryByRole("button", { name: "提交导入" })).not.toBeInTheDocument();
+});
+
+it("ignores a pending import commit completion after unmount", async () => {
+  const committed = deferred<Response>();
+  let commits = 0;
+  mockAdmin((url) => {
+    if (url.endsWith("/admin/imports/preview")) return jsonResponse(importPreviewFixture);
+    if (url.endsWith("/admin/imports/commit")) { commits += 1; return committed.promise; }
+  });
+  const user = userEvent.setup();
+  const rendered = renderWithAuth(<App />, "/admin");
+  await openTab("导入");
+  await user.upload(screen.getByLabelText("候选 CSV 文件"), new File(["A"], "a.csv", { type: "text/csv" }));
+  await user.click(screen.getByRole("button", { name: "预检查" }));
+  await user.click(await screen.findByRole("button", { name: "提交导入" }));
+  await user.click(screen.getByRole("button", { name: "确认提交导入" }));
+  await waitFor(() => expect(commits).toBe(1));
+  rendered.unmount();
+
+  await act(async () => committed.resolve(jsonResponse({ total: 4, inserted: 2, skipped_exact: 1, possible_url_duplicates: 1, file_sha256: "a".repeat(64) })));
+  expect(commits).toBe(1);
+  expect(document.body).not.toHaveTextContent("导入完成");
+});
+
 it("clears commit eligibility after a terminal preview-token conflict", async () => {
   mockAdmin((url) => {
     if (url.endsWith("/admin/imports/preview")) return jsonResponse(importPreviewFixture);
@@ -215,6 +304,56 @@ it("paginates export history and accepts a partial success with another batch it
   await user.click(screen.getByRole("button", { name: "下一页" }));
   expect(await screen.findByText(page2.id)).toBeInTheDocument();
   expect(fetchMock.mock.calls.some(([input]) => new URL(String(input), "https://local.test").searchParams.get("offset") === "20")).toBe(true);
+});
+
+it("accepts a two-item export in two exact partial receipt uploads", async () => {
+  const secondCandidate = "30000000-0000-4000-8000-000000000002";
+  let receipts = 0;
+  const fetchMock = mockAdmin((url, init) => {
+    if (url.endsWith(`/admin/exports/${IDS.batch}/receipt-file`) && init?.method === "POST") {
+      receipts += 1;
+      return receipts === 1
+        ? jsonResponse({ batch_id: IDS.batch, status: "pending", accepted_candidate_ids: [IDS.candidate], pending_candidate_ids: [secondCandidate] })
+        : jsonResponse({ batch_id: IDS.batch, status: "completed", accepted_candidate_ids: [secondCandidate], pending_candidate_ids: [] });
+    }
+  });
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("训练集同步");
+  const input = await screen.findByLabelText(`上传 ${IDS.batch} 回执`);
+  const receipt = (candidateId: string) => new File([JSON.stringify({
+    batch_id: IDS.batch,
+    items: [{ candidate_id: candidateId, review_id: IDS.review, review_version: 1, status: "SUCCEEDED", sha256: "b".repeat(64), relative_path: `SF001/${candidateId}.jpg`, error: null }],
+  })], "receipt.json", { type: "application/json" });
+
+  await user.upload(input, receipt(IDS.candidate));
+  expect(await screen.findByRole("status")).toHaveTextContent("接受 1，待处理 1");
+  await user.upload(screen.getByLabelText(`上传 ${IDS.batch} 回执`), receipt(secondCandidate));
+  expect(await screen.findByRole("status")).toHaveTextContent("接受 1，待处理 0");
+  expect(fetchMock.mock.calls.filter(([requestUrl]) => String(requestUrl).endsWith(`/admin/exports/${IDS.batch}/receipt-file`))).toHaveLength(2);
+});
+
+it.each([
+  ["SF001", "SF002"],
+  [null, "SF001"],
+])("rejects an export creation receipt outside requested scope %s", async (requestedScope, returnedScope) => {
+  let historyGets = 0;
+  mockAdmin((url, init) => {
+    if (url.includes("/admin/exports?") && !init?.method) { historyGets += 1; return undefined; }
+    if (url.endsWith("/admin/exports") && init?.method === "POST") {
+      return jsonResponse({ ...exportBatch, species_code: returnedScope, created: true }, 201);
+    }
+  });
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("训练集同步");
+  if (requestedScope) await user.selectOptions(await screen.findByLabelText("范围"), requestedScope);
+  const beforeCreate = historyGets;
+  await user.click(await screen.findByRole("button", { name: "创建同步批次" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("服务返回无效结果");
+  expect(screen.queryByText("已创建新的同步批次")).not.toBeInTheDocument();
+  expect(historyGets).toBe(beforeCreate);
 });
 
 it("shows only a safe known export overlap code and count", async () => {
