@@ -232,6 +232,7 @@ def test_records_and_checks_exact_four_part_completion_key(sync_root: Path) -> N
     index = SyncIndex(sync_root)
     stored = index.record_success(result())
 
+    assert result().status == "SUCCEEDED"
     assert stored.candidate_id == CANDIDATE_ID
     assert stored.review_id == REVIEW_ID
     assert stored.review_version == 1
@@ -241,6 +242,23 @@ def test_records_and_checks_exact_four_part_completion_key(sync_root: Path) -> N
     assert index.is_completed(str(CANDIDATE_ID), REVIEW_ID, 1, "ADD")
     assert not index.is_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD")
     assert not index.is_completed(CANDIDATE_ID, REVIEW_ID, 1, "MOVE")
+
+
+def test_exact_key_lookup_returns_record_or_none(sync_root: Path) -> None:
+    index = SyncIndex(sync_root)
+    stored = index.record_success(result())
+
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 1, "ADD") == stored
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
+
+
+def test_record_success_rejects_non_success_invocation_status(sync_root: Path) -> None:
+    index = SyncIndex(sync_root)
+
+    with pytest.raises(SyncIndexError, match="status"):
+        index.record_success(result(status="SKIPPED_ALREADY_COMPLETED"))
+
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 1, "ADD") is None
 
 
 def test_same_result_is_idempotent_but_same_key_conflict_is_rejected(

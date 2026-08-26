@@ -138,6 +138,7 @@ class SyncResult:
     sha256: str
     perceptual_hash: str
     completed_at: datetime | None = None
+    status: Literal["SUCCEEDED", "SKIPPED_ALREADY_COMPLETED"] = "SUCCEEDED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,6 +434,8 @@ class SyncIndex:
     def _validated_result(self, result: SyncResult) -> SyncRecord:
         if not isinstance(result, SyncResult):
             raise SyncIndexError("result must be a SyncResult")
+        if result.status != "SUCCEEDED":
+            raise SyncIndexError("result status must be exactly SUCCEEDED")
         return SyncRecord(
             candidate_id=_uuid(result.candidate_id, "candidate_id"),
             review_id=_uuid(result.review_id, "review_id"),
@@ -501,6 +504,19 @@ class SyncIndex:
         review_version: int,
         action: str,
     ) -> bool:
+        return self.get_completed(
+            candidate_id, review_id, review_version, action
+        ) is not None
+
+    def get_completed(
+        self,
+        candidate_id: UUID | str,
+        review_id: UUID | str,
+        review_version: int,
+        action: str,
+    ) -> SyncRecord | None:
+        """Return the successful record for an exact operation key, if present."""
+
         key = (
             str(_uuid(candidate_id, "candidate_id")),
             str(_uuid(review_id, "review_id")),
@@ -508,15 +524,13 @@ class SyncIndex:
             _action(action),
         )
         with self.connect() as connection:
-            return (
-                connection.execute(
-                    "SELECT 1 FROM synced_items "
-                    "WHERE candidate_id = ? AND review_id = ? "
-                    "AND review_version = ? AND action = ?",
-                    key,
-                ).fetchone()
-                is not None
-            )
+            row = connection.execute(
+                "SELECT * FROM synced_items "
+                "WHERE candidate_id = ? AND review_id = ? "
+                "AND review_version = ? AND action = ?",
+                key,
+            ).fetchone()
+        return self._from_row(row) if row is not None else None
 
     def record_success(self, result: SyncResult) -> SyncRecord:
         desired = self._validated_result(result)
