@@ -240,12 +240,28 @@ interface ExpectedReview {
 export function parseReviewResponse(value: unknown, expected: ExpectedReview): ReviewResponse {
   try {
     const response = parseReviewWire(value);
+    requireMatchingReviewPayload(response, expected);
+    return response;
+  } catch {
+    throw new Error("Invalid review response");
+  }
+}
+
+export function parseHistoryEditResponse(
+  value: unknown,
+  expected: ExpectedReview & {
+    reviewId: string;
+    payload: DecisionPayload & { version: number };
+  },
+): ReviewResponse {
+  try {
+    const response = parseReviewWire(value);
+    requireMatchingReviewPayload(response, expected);
+    const previousVersion = positiveInteger(expected.payload.version);
     if (
-      response.candidate_id !== expected.candidateId ||
-      response.reviewer_id !== expected.reviewerId ||
-      response.decision !== expected.payload.decision ||
-      response.rejection_reason !== expected.payload.rejection_reason ||
-      response.notes !== expected.payload.notes
+      response.id !== expected.reviewId ||
+      previousVersion === Number.MAX_SAFE_INTEGER ||
+      response.version !== previousVersion + 1
     ) {
       throw new Error();
     }
@@ -417,6 +433,18 @@ function parseReviewWire(value: unknown): ReviewResponse {
     is_current: value.is_current === true ? true : (() => { throw new Error(); })(),
     version: positiveInteger(value.version),
   };
+}
+
+function requireMatchingReviewPayload(response: ReviewResponse, expected: ExpectedReview): void {
+  if (
+    response.candidate_id !== expected.candidateId ||
+    response.reviewer_id !== expected.reviewerId ||
+    response.decision !== expected.payload.decision ||
+    response.rejection_reason !== expected.payload.rejection_reason ||
+    response.notes !== expected.payload.notes
+  ) {
+    throw new Error();
+  }
 }
 
 function parseSpeciesSummary(value: unknown): SpeciesSummary {

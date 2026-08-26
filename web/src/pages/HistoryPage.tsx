@@ -3,9 +3,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, request } from "../api/client";
 import {
   DECISION_CODES,
+  parseHistoryEditResponse,
   parseHistoryResponse,
   parseLatestReviewResponse,
-  parseReviewResponse,
   type DecisionCode,
   type DecisionPayload,
   type HistoryItem,
@@ -213,7 +213,12 @@ export function HistoryPage({ csrfToken, reviewerId, retryBootstrap }: HistoryPa
         signal: controller.signal,
       });
       if (controller.signal.aborted || generation !== editGeneration.current) return;
-      parseReviewResponse(raw, { candidateId: item.candidate_id, reviewerId, payload });
+      parseHistoryEditResponse(raw, {
+        reviewId: item.id,
+        candidateId: item.candidate_id,
+        reviewerId,
+        payload,
+      });
       setEditingId(null);
       setEditDraft(null);
       setFailedPayload(null);
