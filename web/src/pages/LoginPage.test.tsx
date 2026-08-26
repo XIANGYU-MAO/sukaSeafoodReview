@@ -106,7 +106,7 @@ describe("login page", () => {
     );
     expect(new Headers(loginCalls[0][1]?.headers).has("X-CSRF-Token")).toBe(false);
     resolveLogin(jsonResponse({ ...authState, name: "Mao", role: "admin" }));
-    expect(await screen.findByText("审核工作区即将上线")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "修改密码 / Change password" })).toBeInTheDocument();
   });
 
   it.each([
@@ -179,7 +179,7 @@ describe("login page", () => {
     await user.click(await screen.findByRole("radio", { name: "Hassan" }));
     await user.type(screen.getByLabelText("密码"), "storage-secret-password");
     await user.click(screen.getByRole("button", { name: "登录" }));
-    await screen.findByText("审核工作区即将上线");
+    await screen.findByRole("button", { name: "修改密码 / Change password" });
 
     expect(localSpy).not.toHaveBeenCalled();
     expect(localStorage).toHaveLength(0);
@@ -206,7 +206,7 @@ describe("login page", () => {
     await user.click(screen.getByRole("button", { name: "登录" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("服务暂时不可用，请重试。");
-    expect(screen.queryByText("审核工作区即将上线")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "修改密码 / Change password" })).not.toBeInTheDocument();
   });
 
   it("aborts replayed and unmounted names loads without showing a stale error", async () => {

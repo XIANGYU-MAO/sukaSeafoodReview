@@ -26,7 +26,7 @@ describe("authentication bootstrap", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent("正在恢复会话");
     resolveMe(jsonResponse(authState));
-    expect(await screen.findByText("审核工作区即将上线")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "修改密码 / Change password" })).toBeInTheDocument();
     expect(screen.getByText("Hassan")).toBeInTheDocument();
   });
 
@@ -57,7 +57,7 @@ describe("authentication bootstrap", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("无法连接审核服务");
     expect(screen.queryByRole("heading", { name: "登录审核平台" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重试连接" }));
-    expect(await screen.findByText("审核工作区即将上线")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "修改密码 / Change password" })).toBeInTheDocument();
   });
 
   it.each([
@@ -73,7 +73,7 @@ describe("authentication bootstrap", () => {
     renderWithAuth(<App />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("无法连接审核服务");
-    expect(screen.queryByText("审核工作区即将上线")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "修改密码 / Change password" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "登录审核平台" })).not.toBeInTheDocument();
   });
 
@@ -102,13 +102,13 @@ describe("authentication bootstrap", () => {
     await user.click(await screen.findByRole("radio", { name: "Hassan" }));
     await user.type(screen.getByLabelText("密码"), "temporary-password");
     await user.click(screen.getByRole("button", { name: "登录" }));
-    expect(await screen.findByText("审核工作区即将上线")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "修改密码 / Change password" })).toBeInTheDocument();
 
     await act(async () => staleBootstrap.resolve(jsonResponse({}, 401)));
 
     expect(bootstrapSignals[0]).toBeInstanceOf(AbortSignal);
     expect(bootstrapSignals[0].aborted).toBe(true);
-    expect(screen.getByText("审核工作区即将上线")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "修改密码 / Change password" })).toBeInTheDocument();
   });
 });
 
