@@ -336,3 +336,57 @@ def test_real_incremental_sync_retries_only_failure_and_preserves_server_paths(
         API_BASE,
     ):
         assert secret not in log_text
+
+
+def test_real_adds_preserve_server_jpeg_and_uppercase_webp_paths_in_canonical(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "training"
+    manifest_dir = tmp_path / "manifest"
+    manifest_dir.mkdir()
+    jpeg_id, webp_id = _uuid(31), _uuid(32)
+    jpeg_url = "https://suffix.e2e.test/photo.jpeg"
+    webp_url = "https://suffix.e2e.test/photo.WEBP"
+    jpeg_target = f"images/SF006/{jpeg_id}.jpeg"
+    webp_target = f"images/FUTURE_42/{webp_id}.WEBP"
+    rows = [
+        valid_row(
+            candidate_id=jpeg_id,
+            review_id=_uuid(231),
+            target_relative_path=jpeg_target,
+            original_url=jpeg_url,
+        ),
+        valid_row(
+            candidate_id=webp_id,
+            review_id=_uuid(232),
+            species_code="FUTURE_42",
+            target_relative_path=webp_target,
+            original_url=webp_url,
+        ),
+    ]
+    manifest_path = write_manifest(manifest_dir, rows=rows)
+
+    with responses.RequestsMock() as http:
+        http.add(responses.GET, jpeg_url, body=_image_bytes("JPEG", (12, 34, 56)))
+        http.add(responses.GET, webp_url, body=_image_bytes("WEBP", (65, 43, 21)))
+        http.add(
+            responses.POST,
+            RECEIPT_URL,
+            json={
+                "batch_id": str(BATCH_ID),
+                "status": "completed",
+                "accepted_candidate_ids": [jpeg_id, webp_id],
+                "pending_candidate_ids": [],
+            },
+        )
+        outcome = run_sync(SyncRequest(manifest_path, root, api_base=API_BASE), Event())
+
+    assert outcome.exit_code == 0
+    with (root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        canonical = {row["candidate_id"]: row for row in csv.DictReader(stream)}
+    assert canonical[jpeg_id]["relative_path"] == jpeg_target
+    assert canonical[webp_id]["relative_path"] == webp_target
+    assert root.joinpath(*jpeg_target.split("/")).is_file()
+    assert root.joinpath(*webp_target.split("/")).is_file()

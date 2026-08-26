@@ -875,6 +875,90 @@ def test_add_intent_survives_crash_before_promotion_without_false_receipt_or_del
     assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
 
 
+def test_stale_add_intent_filesystem_change_during_clear_fails_closed(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    manifest_row = row()
+    content, phash = encoded_image("JPEG")
+    expected = index.record_add_intent(
+        SyncResult(
+            candidate_id=manifest_row.candidate_id,
+            review_id=manifest_row.review_id,
+            review_version=manifest_row.review_version,
+            action="ADD",
+            batch_id=manifest_row.batch_id,
+            relative_path=manifest_row.target_relative_path,
+            sha256=hashlib.sha256(content).hexdigest(),
+            perceptual_hash=phash,
+        ),
+        manifest_row.target_relative_path,
+    )
+    original_clear = SyncIndex.clear_add_intent_if_matches
+    target = local_path(sync_root, manifest_row.target_relative_path)
+
+    def clear_then_create(self: SyncIndex, intent):
+        cleared = original_clear(self, intent)
+        target.write_bytes(content)
+        return cleared
+
+    monkeypatch.setattr(SyncIndex, "clear_add_intent_if_matches", clear_then_create)
+
+    with pytest.raises(OperationError, match="ADD_RECOVERY_STATE_CHANGED"):
+        recover_add(sync_root, manifest_row, index)
+
+    assert target.read_bytes() == content
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
+    assert expected.sha256 == hashlib.sha256(target.read_bytes()).hexdigest()
+
+
+def test_stale_add_intent_changed_during_cas_is_not_deleted(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    manifest_row = row()
+    expected = index.record_add_intent(
+        SyncResult(
+            candidate_id=manifest_row.candidate_id,
+            review_id=manifest_row.review_id,
+            review_version=manifest_row.review_version,
+            action="ADD",
+            batch_id=manifest_row.batch_id,
+            relative_path=manifest_row.target_relative_path,
+            sha256="a" * 64,
+            perceptual_hash=PHASH,
+        ),
+        manifest_row.target_relative_path,
+    )
+    changed_sha = "b" * 64
+    original_clear = SyncIndex.clear_add_intent_if_matches
+
+    def replace_then_compare(self: SyncIndex, intent):
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE pending_adds SET sha256 = ? WHERE candidate_id = ? "
+                "AND review_id = ? AND review_version = ? AND action = ?",
+                (
+                    changed_sha,
+                    str(expected.candidate_id),
+                    str(expected.review_id),
+                    expected.review_version,
+                    expected.action,
+                ),
+            )
+            connection.commit()
+        return original_clear(self, intent)
+
+    monkeypatch.setattr(SyncIndex, "clear_add_intent_if_matches", replace_then_compare)
+
+    with pytest.raises(OperationError, match="ADD_RECOVERY_INTENT_CONFLICT"):
+        recover_add(sync_root, manifest_row, index)
+
+    current = index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 2, "ADD")
+    assert current is not None
+    assert current.sha256 == changed_sha
+
+
 def test_recover_add_exact_completed_record_returns_canonical_skip(
     sync_root: Path,
 ) -> None:
@@ -923,7 +1007,7 @@ def test_recover_add_does_not_infer_decoder_target_without_durable_intent(
     assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
 
 
-def test_recover_add_canonicalizes_uppercase_server_suffix_to_decoder_suffix(
+def test_recover_add_preserves_compatible_uppercase_server_suffix(
     sync_root: Path,
 ) -> None:
     index = SyncIndex(sync_root)
@@ -937,8 +1021,8 @@ def test_recover_add_canonicalizes_uppercase_server_suffix_to_decoder_suffix(
     result = recover_add(sync_root, manifest_row, index)
 
     assert result is not None
-    assert result.relative_path.as_posix() == actual_relative.as_posix()
-    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD").relative_path == actual_relative  # type: ignore[union-attr]
+    assert result.relative_path == manifest_row.target_relative_path
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD").relative_path == manifest_row.target_relative_path  # type: ignore[union-attr]
 
 
 def test_recover_add_converges_target_and_staging_crash_state(

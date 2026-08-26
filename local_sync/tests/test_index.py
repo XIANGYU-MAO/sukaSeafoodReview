@@ -8,6 +8,8 @@ import os
 from pathlib import Path, PurePosixPath
 import sqlite3
 import stat
+import subprocess
+import sys
 from threading import Barrier
 import traceback
 from uuid import UUID, uuid4
@@ -625,6 +627,94 @@ def test_exact_key_lookup_returns_record_or_none(sync_root: Path) -> None:
 
     assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 1, "ADD") == stored
     assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
+
+
+def test_pending_add_compare_and_delete_requires_every_expected_value(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    expected = index.record_add_intent(
+        result(), PurePosixPath(f"images/SF006/{CANDIDATE_ID}.image")
+    )
+    changed = replace(expected, sha256="b" * 64)
+
+    with index.connect() as connection:
+        connection.execute(
+            "UPDATE pending_adds SET sha256 = ? WHERE candidate_id = ?",
+            (changed.sha256, str(CANDIDATE_ID)),
+        )
+        connection.commit()
+
+    assert not index.clear_add_intent_if_matches(expected)
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 1, "ADD") == changed
+    assert index.clear_add_intent_if_matches(changed)
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 1, "ADD") is None
+
+
+def test_two_real_processes_clear_at_most_one_exact_pending_add_intent(
+    sync_root: Path, tmp_path: Path
+) -> None:
+    index = SyncIndex(sync_root)
+    expected = index.record_add_intent(
+        result(), PurePosixPath(f"images/SF006/{CANDIDATE_ID}.image")
+    )
+    gate = tmp_path / "clear-start"
+    worker = r"""
+import sys
+import time
+from pathlib import Path, PurePosixPath
+from uuid import UUID
+from sukaseafood_sync.index import AddIntent, SyncIndex
+
+root = Path(sys.argv[1])
+gate = Path(sys.argv[2])
+index = SyncIndex(root)
+while not gate.exists():
+    time.sleep(0.01)
+expected = AddIntent(
+    candidate_id=UUID(sys.argv[3]), review_id=UUID(sys.argv[4]),
+    review_version=int(sys.argv[5]), action='ADD', batch_id=UUID(sys.argv[6]),
+    target_relative_path=PurePosixPath(sys.argv[7]),
+    actual_relative_path=PurePosixPath(sys.argv[8]), sha256=sys.argv[9],
+    perceptual_hash=sys.argv[10],
+)
+print('CLEARED' if index.clear_add_intent_if_matches(expected) else 'UNCHANGED')
+"""
+    arguments = [
+        str(sync_root),
+        str(gate),
+        str(expected.candidate_id),
+        str(expected.review_id),
+        str(expected.review_version),
+        str(expected.batch_id),
+        expected.target_relative_path.as_posix(),
+        expected.actual_relative_path.as_posix(),
+        expected.sha256,
+        expected.perceptual_hash,
+    ]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", worker, *arguments],
+            cwd=Path(__file__).parents[1],
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for _ in range(2)
+    ]
+    gate.write_text("go", encoding="ascii")
+    outputs = [process.communicate(timeout=30) for process in processes]
+
+    assert sorted(stdout.strip() for stdout, _stderr in outputs) == [
+        "CLEARED",
+        "UNCHANGED",
+    ]
+    assert all(process.returncode == 0 for process in processes)
+    assert all(stderr == "" for _stdout, stderr in outputs)
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 1, "ADD") is None
 
 
 def test_record_success_rejects_non_success_invocation_status(sync_root: Path) -> None:

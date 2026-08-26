@@ -23,7 +23,7 @@ MAX_SAFE_INTEGER = 2**63 - 1
 _HEX_64 = re.compile(r"[0-9a-fA-F]{64}\Z", re.ASCII)
 _HEX_BOUNDED = re.compile(r"[0-9a-fA-F]{1,256}\Z", re.ASCII)
 _ACTIONS = frozenset({"ADD", "MOVE", "REMOVE"})
-_ADD_DECODED_SUFFIXES = frozenset({".jpg", ".png", ".webp"})
+_ADD_DECODED_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 _SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 _SQLITE_PATH_VALIDATION_ATTEMPTS = 2
 _COLUMNS = (
@@ -657,7 +657,7 @@ class SyncIndex:
         if (
             target.parent != actual.parent
             or target.stem != actual.stem
-            or actual.suffix not in _ADD_DECODED_SUFFIXES
+            or actual.suffix.casefold() not in _ADD_DECODED_SUFFIXES
         ):
             raise SyncIndexError("pending ADD paths are incompatible")
         return AddIntent(
@@ -810,6 +810,54 @@ class SyncIndex:
                 )
                 connection.commit()
                 return desired
+            except Exception:
+                connection.rollback()
+                raise
+
+    def clear_add_intent_if_matches(self, expected: AddIntent) -> bool:
+        """Delete only the complete, unchanged durable ADD intent value."""
+
+        if not isinstance(expected, AddIntent):
+            raise SyncIndexError("expected pending ADD intent is invalid")
+        desired = self._validated_add_intent(
+            SyncResult(
+                candidate_id=expected.candidate_id,
+                review_id=expected.review_id,
+                review_version=expected.review_version,
+                action=expected.action,
+                batch_id=expected.batch_id,
+                relative_path=expected.actual_relative_path,
+                sha256=expected.sha256,
+                perceptual_hash=expected.perceptual_hash,
+            ),
+            expected.target_relative_path,
+        )
+        if desired != expected:
+            raise SyncIndexError("expected pending ADD intent is invalid")
+        values = (
+            str(desired.candidate_id),
+            str(desired.review_id),
+            desired.review_version,
+            desired.action,
+            str(desired.batch_id),
+            desired.target_relative_path.as_posix(),
+            desired.actual_relative_path.as_posix(),
+            desired.sha256,
+            desired.perceptual_hash,
+        )
+        with self.connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                deleted = connection.execute(
+                    "DELETE FROM pending_adds WHERE candidate_id = ? "
+                    "AND review_id = ? AND review_version = ? AND action = ? "
+                    "AND batch_id = ? AND target_relative_path = ? "
+                    "AND actual_relative_path = ? AND sha256 = ? "
+                    "AND perceptual_hash = ?",
+                    values,
+                ).rowcount
+                connection.commit()
+                return deleted == 1
             except Exception:
                 connection.rollback()
                 raise

@@ -83,13 +83,14 @@ def _encoded(columns: tuple[str, ...], rows: list[dict[str, str]]) -> bytes:
         ("uppercase sha", {"sha256": "A" * 64}, None, False),
         ("short sha", {"sha256": "a" * 63}, None, False),
         (
-            "undecoded suffix",
-            {"relative_path": f"images/FUTURE_42/{CANDIDATE_ID}.image"},
+            "unsupported suffix",
+            {"relative_path": f"images/FUTURE_42/{CANDIDATE_ID}.exe"},
             None,
             False,
         ),
         ("unsafe species", {"species_code": "CON"}, None, False),
         ("bad version", {"review_version": "0"}, None, False),
+        ("non-ASCII version", {"review_version": "１"}, None, False),
         ("extra status", {}, "status", False),
         ("extra format", {}, "format", False),
         ("extra phash", {}, "perceptual_hash", False),
@@ -121,6 +122,24 @@ def test_corrupt_existing_canonical_row_aborts_without_changing_original_bytes(
 
     with pytest.raises(CanonicalManifestError):
         write_canonical_manifest(root, empty, ())
+
+    assert target.read_bytes() == original
+
+
+@pytest.mark.parametrize("suffix", (".WEBP", ".jpeg"))
+def test_existing_canonical_row_preserves_server_suffix_spelling(
+    tmp_path: Path, suffix: str
+) -> None:
+    root = tmp_path / suffix.removeprefix(".")
+    root.mkdir()
+    row = _valid_row()
+    row["relative_path"] = f"images/FUTURE_42/{CANDIDATE_ID}{suffix}"
+    original = _encoded(COLUMNS, [row])
+    target = root / "canonical_manifest.csv"
+    target.write_bytes(original)
+    empty = ExportManifest(rows=(), batch_id=BATCH_ID, receipt_token=RECEIPT_TOKEN)
+
+    write_canonical_manifest(root, empty, ())
 
     assert target.read_bytes() == original
 

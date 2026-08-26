@@ -17,10 +17,11 @@ from uuid import UUID
 from .engine import ReceiptItem
 from .manifest import (
     ExportManifest,
-    MAX_SAFE_INTEGER,
     ManifestError,
+    SUPPORTED_SUFFIXES,
     _bounded_text,
     _https_url,
+    _positive_integer,
     _species_code,
     validate_relative_path,
 )
@@ -42,7 +43,6 @@ CANONICAL_COLUMNS = (
 )
 _MAX_CANONICAL_BYTES = 20 * 1024 * 1024
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-_DECODED_SUFFIXES = frozenset({".jpg", ".png", ".webp"})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _LOCK_FILENAME = ".sukaseafood-canonical.lock"
 _LOCK_TIMEOUT_SECONDS = 5.0
@@ -174,15 +174,11 @@ def _validate_canonical_row(raw: dict[str, str]) -> dict[str, str]:
     review_id = str(UUID(raw["review_id"]))
     if candidate_id != raw["candidate_id"] or review_id != raw["review_id"]:
         raise ValueError("non-canonical identifier")
-    if not raw["review_version"].isdigit():
-        raise ValueError("invalid review version")
-    review_version = int(raw["review_version"])
-    if not 1 <= review_version <= MAX_SAFE_INTEGER:
-        raise ValueError("invalid review version")
+    _positive_integer(raw["review_version"], "review_version")
     species_code = _species_code(raw["species_code"])
     relative = validate_relative_path(raw["relative_path"], "relative_path")
-    if relative.suffix not in _DECODED_SUFFIXES:
-        raise ValueError("invalid decoded suffix")
+    if relative.suffix.casefold() not in SUPPORTED_SUFFIXES:
+        raise ValueError("invalid supported suffix")
     expected = PurePosixPath("images") / species_code / f"{candidate_id}{relative.suffix}"
     if relative != expected or raw["relative_path"] != expected.as_posix():
         raise ValueError("canonical path mapping mismatch")

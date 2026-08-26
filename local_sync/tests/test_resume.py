@@ -197,6 +197,46 @@ def test_cancellation_after_download_preserves_staging_for_network_free_resume(
     assert not staging.exists()
 
 
+def test_cancelled_add_with_cleaned_staging_redownloads_and_succeeds(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_root.mkdir()
+    item = row(126)
+    cancel_event = threading.Event()
+
+    def download_then_cancel(session, manifest_row, destination, policy, progress, cancel):
+        staging = Path(destination).with_name(Path(destination).name + ".part")
+        staging.write_bytes(JPEG)
+        cancel_event.set()
+        return DownloadResult(
+            staging, SHA256, PHASH, len(JPEG), "JPEG", ".jpg", 11, 7
+        )
+
+    monkeypatch.setattr("sukaseafood_sync.engine.download_image", download_then_cancel)
+    first = SyncEngine(session=Session()).run(
+        manifest(item), sync_root, SyncCallbacks(), cancel_event
+    )
+    staging = local(sync_root, item.target_relative_path).with_name(
+        item.target_relative_path.name + ".part"
+    )
+    assert first.cancelled
+    staging.unlink()
+
+    retry_calls: list[UUID] = []
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image", fake_download(sync_root, retry_calls)
+    )
+    second = SyncEngine(session=Session()).run(
+        manifest(item), sync_root, SyncCallbacks(), threading.Event()
+    )
+
+    assert second.counts == {"succeeded": 1, "failed": 0, "skipped": 0}
+    assert retry_calls == [item.candidate_id]
+    assert SyncIndex(sync_root).get_add_intent(
+        item.candidate_id, item.review_id, item.review_version, "ADD"
+    ) is None
+
+
 def test_add_recovery_happens_before_wait_or_network(
     sync_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

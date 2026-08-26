@@ -31,6 +31,11 @@ _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _HEX_64 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _HEX_16 = re.compile(r"[0-9a-f]{16}\Z", re.ASCII)
 _FORMAT_SUFFIXES = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
+_FORMAT_COMPATIBLE_SUFFIXES = {
+    "JPEG": frozenset({".jpg", ".jpeg"}),
+    "PNG": frozenset({".png"}),
+    "WEBP": frozenset({".webp"}),
+}
 _MAX_RECOVERY_IMAGE_BYTES = 100 * 1024 * 1024
 _LOG_FIELDS = (
     "candidate_id",
@@ -307,7 +312,10 @@ def _read_recovery_image(
     if decoded_format is None or decode_failed:
         raise OperationError("ADD_RECOVERY_INVALID")
     suffix = _FORMAT_SUFFIXES[decoded_format]
-    if relative is not None and relative.suffix.casefold() != suffix:
+    if (
+        relative is not None
+        and relative.suffix.casefold() not in _FORMAT_COMPATIBLE_SUFFIXES[decoded_format]
+    ):
         raise OperationError("ADD_RECOVERY_INVALID")
     digest = hashlib.sha256(content).hexdigest()
     return digest, perceptual_hash, len(content), width, height, suffix, before
@@ -468,6 +476,13 @@ def _record_add_intent(
         raise OperationError("INDEX_WRITE_FAILED") from None
 
 
+def _clear_add_intent(index: SyncIndex, expected: AddIntent) -> bool:
+    try:
+        return index.clear_add_intent_if_matches(expected)
+    except Exception:
+        raise OperationError("INDEX_WRITE_FAILED") from None
+
+
 def _stored_path_allowed(row: ManifestRow, stored: PurePosixPath) -> bool:
     if row.action != "ADD":
         return stored == row.target_relative_path
@@ -475,8 +490,21 @@ def _stored_path_allowed(row: ManifestRow, stored: PurePosixPath) -> bool:
     return (
         stored.parent == target.parent
         and stored.stem == target.stem
-        and stored.suffix in _FORMAT_SUFFIXES.values()
+        and stored.suffix.casefold()
+        in frozenset().union(*_FORMAT_COMPATIBLE_SUFFIXES.values())
     )
+
+
+def _decoded_relative(
+    target_relative: PurePosixPath, decoded_suffix: str
+) -> PurePosixPath:
+    target_suffix = target_relative.suffix
+    compatible = (
+        {".jpg", ".jpeg"} if decoded_suffix == ".jpg" else {decoded_suffix}
+    )
+    if target_suffix.casefold() in compatible:
+        return target_relative
+    return target_relative.with_suffix(decoded_suffix)
 
 
 def _completed_skip(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult | None:
@@ -743,7 +771,7 @@ def _validated_download(
     )
     if digest != result.sha256 or size != result.byte_count:
         raise OperationError("STAGING_CONTENT_MISMATCH")
-    actual_relative = target_relative.with_suffix(result.suffix)
+    actual_relative = _decoded_relative(target_relative, result.suffix)
     return actual_relative, expected_staging, result.sha256, result.phash, staging_metadata
 
 
@@ -827,7 +855,7 @@ def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult |
     if exact_metadata is not None:
         target = _resolved_path(root, target_relative)
         target_image = _read_recovery_image(target, target_relative)
-        actual_relative = target_relative.with_suffix(target_image[5])
+        actual_relative = _decoded_relative(target_relative, target_image[5])
         if staging_image is not None and staging_image[0] != target_image[0]:
             raise OperationError("ADD_RECOVERY_CONFLICT")
     elif stored is not None:
@@ -851,11 +879,32 @@ def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult |
             target_image = _read_recovery_image(target, actual_relative)
         else:
             if staging is None or staging_image is None:
-                raise OperationError("ADD_RECOVERY_INTENT_STALE")
+                cleared = _clear_add_intent(index, intent)
+                current_intent = _add_intent(index, row)
+                current_stored = _index_exact(index, row)
+                current_target = _lstat(target, "TARGET_UNSAFE")
+                current_exact = _lstat(
+                    root.joinpath(*target_relative.parts), "TARGET_UNSAFE"
+                )
+                current_staging = _lstat(
+                    staging_lexical, "STAGING_FILE_UNSAFE"
+                )
+                if current_intent is not None:
+                    raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+                if (
+                    current_stored is not None
+                    or current_target is not None
+                    or current_exact is not None
+                    or current_staging is not None
+                ):
+                    raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+                if cleared or current_intent is None:
+                    return None
+                raise OperationError("ADD_RECOVERY_STATE_CHANGED")
             if (
                 staging_image[0] != intent.sha256
                 or staging_image[1] != intent.perceptual_hash
-                or target_relative.with_suffix(staging_image[5]) != actual_relative
+                or _decoded_relative(target_relative, staging_image[5]) != actual_relative
             ):
                 raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
             _link_no_clobber(staging, staging_image[6], target, staging_image[0])
