@@ -102,6 +102,28 @@ describe("API client", () => {
     expect((failure as ApiError).detail).not.toContain("proxy secret");
     expect((failure as ApiError).detail).not.toContain("html");
   });
+
+  it("retains a same-origin structured JSON conflict body without exposing it as detail text", async () => {
+    const body = {
+      detail: {
+        code: "STALE_REVIEW_VERSION",
+        latest: { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", secret: "opaque" },
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(body, 409)));
+
+    let failure: unknown;
+    try {
+      await request("/history/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).body).toEqual(body);
+    expect((failure as ApiError).detail).not.toContain("opaque");
+    expect((failure as ApiError).message).not.toContain("STALE_REVIEW_VERSION");
+  });
 });
 
 function jsonResponse(body: unknown, status = 200): Response {

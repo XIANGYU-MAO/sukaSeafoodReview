@@ -4,15 +4,17 @@ import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { authState, jsonResponse, renderWithAuth } from "./test/helpers";
+import { historyFixture, progressFixture } from "./test/task11Fixtures";
 
 describe("authenticated review integration", () => {
   it("wires the root to the bilingual review page while retaining shell actions", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn()
-        .mockResolvedValueOnce(jsonResponse(authState))
-        .mockResolvedValueOnce(new Response(null, { status: 204 })),
-    );
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
+      if (url.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+      if (url.endsWith("/progress")) return Promise.resolve(jsonResponse(progressFixture));
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    }));
     const user = userEvent.setup();
     renderWithAuth(<App />);
 
@@ -25,19 +27,27 @@ describe("authenticated review integration", () => {
     expect(screen.getByRole("button", { name: "Change password" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Log out" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "中文" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Review" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "History" })).toHaveAttribute("href", "/history");
   });
 
-  it("localizes the reviewer history placeholder without fabricating records", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(authState)));
+  it("routes /history to the real private page with localized active navigation", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
+      if (url.includes("/history?")) return Promise.resolve(jsonResponse(historyFixture));
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    }));
     const user = userEvent.setup();
     renderWithAuth(<App />, "/history");
 
-    expect(await screen.findByRole("heading", { name: "历史记录尚未接入" })).toBeInTheDocument();
-    expect(screen.queryByRole("table")).not.toBeInTheDocument();
-    expect(screen.queryByText(/示例数据/)).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "我的审核历史" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "历史记录" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "审核" })).not.toHaveAttribute("aria-current");
     await user.click(screen.getByRole("button", { name: "English" }));
-    expect(screen.getByRole("heading", { name: "History is not connected yet" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "My review history" })).toBeInTheDocument();
     expect(screen.getByText("Collaborative review")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "History" })).toHaveAttribute("aria-current", "page");
   });
 
   it("localizes logout failure controls across the reviewer shell", async () => {

@@ -138,6 +138,58 @@ def test_history_filters_and_paginates_with_filtered_total_contract(
     assert [item["decision"] for item in response.json()["items"]] == expected_decisions
 
 
+def test_history_facets_are_owned_unique_deterministic_and_ignore_active_filters_and_page(settings):
+    data = asyncio.run(seed_history_database(settings))
+    seed = data["seed"]
+
+    with TestClient(create_app(settings)) as client:
+        hassan = client.get(
+            "/v1/history",
+            params={"decision": "APPROVED", "limit": 1, "offset": 0},
+            headers=review_headers(seed.hassan_token),
+        )
+        mao = client.get(
+            "/v1/history",
+            params={"decision": "APPROVED", "limit": 1, "offset": 0},
+            headers=review_headers(seed.mao_token),
+        )
+
+    assert hassan.status_code == mao.status_code == 200
+    assert hassan.json()["total"] == 1
+    assert hassan.json()["filters"] == {
+        "species": [
+            {
+                "code": "SF001",
+                "name_zh": "测试鱼",
+                "name_en": "Test fish",
+                "scientific_name": "Piscis probatio",
+            },
+            {
+                "code": "SF002",
+                "name_zh": "其他鱼",
+                "name_en": "Other fish",
+                "scientific_name": "Piscis alter",
+            },
+        ],
+        "sources": ["Wikimedia", "iNaturalist"],
+    }
+    # Three owned rows collapse to catalog-cardinality facets, while Mao's
+    # private activity cannot add a source/species to Hassan or vice versa.
+    assert len(hassan.json()["filters"]["species"]) == 2
+    assert len(hassan.json()["filters"]["sources"]) == 2
+    assert mao.json()["filters"] == {
+        "species": [
+            {
+                "code": "SF001",
+                "name_zh": "测试鱼",
+                "name_en": "Test fish",
+                "scientific_name": "Piscis probatio",
+            }
+        ],
+        "sources": ["iNaturalist"],
+    }
+
+
 @pytest.mark.parametrize(
     "params",
     [
