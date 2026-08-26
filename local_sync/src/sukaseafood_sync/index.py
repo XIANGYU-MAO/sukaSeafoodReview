@@ -310,8 +310,14 @@ class SyncIndex:
                         f"{label} path must remain inside the selected root"
                     )
                 self._validate_sqlite_parent(candidate, label=label)
-                if self._inspect_sqlite_path(candidate, label=label) is None:
+                current = self._inspect_sqlite_path(candidate, label=label)
+                if current is None:
                     return
+                self._validate_sqlite_metadata(current, label=label)
+                if os.path.samestat(metadata, current):
+                    raise SyncIndexError(
+                        f"{label} path must remain inside the selected root"
+                    )
             else:
                 current = self._inspect_sqlite_path(candidate, label=label)
                 if current is None:
@@ -320,12 +326,12 @@ class SyncIndex:
                             f"{label} path must remain inside the selected root"
                         )
                     self._validate_sqlite_parent(candidate, label=label)
-                    if self._inspect_sqlite_path(candidate, label=label) is None:
+                    current = self._inspect_sqlite_path(candidate, label=label)
+                    if current is None:
                         return
-                else:
-                    self._validate_sqlite_metadata(current, label=label)
-                    if os.path.samestat(metadata, current):
-                        return
+                self._validate_sqlite_metadata(current, label=label)
+                if os.path.samestat(metadata, current):
+                    return
 
             if attempt + 1 == attempts:
                 raise SyncIndexError(f"{label} path changed during validation")

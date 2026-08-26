@@ -325,6 +325,156 @@ def test_main_database_removed_after_lstat_is_not_treated_as_transient(
     assert removed_after_lstat
 
 
+@pytest.mark.parametrize("replacement", ["dangling_symlink", "directory"])
+def test_resolution_missing_reinspection_rejects_unsafe_sidecar_before_retry(
+    sync_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    index = SyncIndex(sync_root)
+    journal = Path(f"{index.path}-journal")
+    journal.write_bytes(b"regular before strict resolution")
+    dangling_target = tmp_path / RECEIPT_TOKEN / "missing-target.bin"
+    outside = tmp_path / "outside-marker.bin"
+    original = b"outside bytes must stay unchanged"
+    outside.write_bytes(original)
+    original_resolve = Path.resolve
+    original_lstat = os.lstat
+    replacement_created = False
+    replacement_reinspected = False
+    reinspected_metadata: os.stat_result | None = None
+
+    def replace_during_strict_resolution(
+        candidate: Path, strict: bool = False
+    ) -> Path:
+        nonlocal replacement_created
+        if candidate != journal or not strict or replacement_created:
+            return original_resolve(candidate, strict=strict)
+        journal.unlink()
+        replacement_created = True
+        if replacement == "dangling_symlink":
+            try:
+                journal.symlink_to(dangling_target)
+            except OSError as exc:
+                pytest.skip(f"dangling sidecar symlink creation unavailable: {exc}")
+            return original_resolve(candidate, strict=strict)
+        try:
+            return original_resolve(candidate, strict=strict)
+        except FileNotFoundError:
+            journal.mkdir()
+            raise
+
+    def remove_unsafe_entry_after_reinspection(
+        candidate: os.PathLike[str] | str,
+    ) -> os.stat_result:
+        nonlocal replacement_reinspected, reinspected_metadata
+        metadata = original_lstat(candidate)
+        if Path(candidate) == journal and replacement_created:
+            replacement_reinspected = True
+            reinspected_metadata = metadata
+            if stat.S_ISLNK(metadata.st_mode):
+                journal.unlink()
+            else:
+                journal.rmdir()
+        return metadata
+
+    monkeypatch.setattr(Path, "resolve", replace_during_strict_resolution)
+    monkeypatch.setattr(os, "lstat", remove_unsafe_entry_after_reinspection)
+
+    with pytest.raises(
+        SyncIndexError, match="symlink|reparse|regular"
+    ) as caught:
+        index._validate_sqlite_path(journal, sidecar=True)
+
+    assert replacement_reinspected
+    assert reinspected_metadata is not None
+    if replacement == "dangling_symlink" and os.name == "nt":
+        attributes = getattr(reinspected_metadata, "st_file_attributes", 0)
+        assert attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    assert outside.read_bytes() == original
+    assert_secret_free_exception_graph(caught.value)
+
+
+@pytest.mark.parametrize("replacement", ["dangling_symlink", "directory"])
+def test_post_resolve_absence_reinspection_rejects_unsafe_sidecar_before_retry(
+    sync_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    index = SyncIndex(sync_root)
+    journal = Path(f"{index.path}-journal")
+    journal.write_bytes(b"regular through strict resolution")
+    dangling_target = tmp_path / RECEIPT_TOKEN / "missing-target.bin"
+    outside = tmp_path / "outside-marker.bin"
+    original = b"outside bytes must stay unchanged"
+    outside.write_bytes(original)
+    original_resolve = Path.resolve
+    original_lstat = os.lstat
+    removed_after_resolution = False
+    replacement_created = False
+    replacement_reinspected = False
+    reinspected_metadata: os.stat_result | None = None
+
+    def remove_after_successful_strict_resolution(
+        candidate: Path, strict: bool = False
+    ) -> Path:
+        nonlocal removed_after_resolution
+        resolved = original_resolve(candidate, strict=strict)
+        if candidate == journal and strict and not removed_after_resolution:
+            removed_after_resolution = True
+            journal.unlink()
+        return resolved
+
+    def inject_unsafe_entry_for_absence_reinspection(
+        candidate: os.PathLike[str] | str,
+    ) -> os.stat_result:
+        nonlocal replacement_created, replacement_reinspected, reinspected_metadata
+        try:
+            metadata = original_lstat(candidate)
+        except FileNotFoundError:
+            if (
+                Path(candidate) != journal
+                or not removed_after_resolution
+                or replacement_created
+            ):
+                raise
+            replacement_created = True
+            if replacement == "dangling_symlink":
+                try:
+                    journal.symlink_to(dangling_target)
+                except OSError as exc:
+                    pytest.skip(f"dangling sidecar symlink creation unavailable: {exc}")
+            else:
+                journal.mkdir()
+            raise
+        if Path(candidate) == journal and replacement_created:
+            replacement_reinspected = True
+            reinspected_metadata = metadata
+            if stat.S_ISLNK(metadata.st_mode):
+                journal.unlink()
+            else:
+                journal.rmdir()
+        return metadata
+
+    monkeypatch.setattr(Path, "resolve", remove_after_successful_strict_resolution)
+    monkeypatch.setattr(os, "lstat", inject_unsafe_entry_for_absence_reinspection)
+
+    with pytest.raises(
+        SyncIndexError, match="symlink|reparse|regular"
+    ) as caught:
+        index._validate_sqlite_path(journal, sidecar=True)
+
+    assert replacement_reinspected
+    assert reinspected_metadata is not None
+    if replacement == "dangling_symlink" and os.name == "nt":
+        attributes = getattr(reinspected_metadata, "st_file_attributes", 0)
+        assert attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    assert outside.read_bytes() == original
+    assert_secret_free_exception_graph(caught.value)
+
+
 @pytest.mark.parametrize("suffix", ["-wal", "-shm"])
 def test_canonical_database_rejects_linked_wal_sidecars_without_touching_them(
     sync_root: Path, tmp_path: Path, suffix: str
