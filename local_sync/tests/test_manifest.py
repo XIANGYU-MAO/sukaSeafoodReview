@@ -515,6 +515,15 @@ def test_shared_path_validator_rejects_unicode_c1_control_character() -> None:
         "nul.jpg",
         "com1.png",
         "lpt9.image",
+        "CON .txt",
+        "COM1 .jpg",
+        "LPT¹ .image",
+        "CONIN$ .bin",
+        "con   ...txt",
+        "COM1  ..jpg",
+        "LPT¹   ...image",
+        "CONOUT$  ..bin",
+        "CLOCK$ . .data",
     ],
 )
 @pytest.mark.parametrize(
@@ -541,7 +550,20 @@ def test_rejects_complete_windows_device_aliases_in_manifest_paths(
 
 @pytest.mark.parametrize(
     "component",
-    ["COM10", "LPT0", "CONIN", "CONOUT", "CLOCK", "COM⁴", "XCOM1", "CONSOLE"],
+    [
+        "COM10",
+        "LPT0",
+        "CONIN",
+        "CONOUT",
+        "CLOCK",
+        "COM⁴",
+        "XCOM1",
+        "CONSOLE",
+        "CON x.txt",
+        "COM1x.jpg",
+        "LPT¹x.image",
+        "CONIN$x.bin",
+    ],
 )
 def test_allows_names_similar_to_windows_device_aliases(component: str) -> None:
     raw = f"images/{component}/fish.jpg"
@@ -604,6 +626,25 @@ def test_resolve_escape_has_no_raw_or_secret_bearing_exception_chain(
 
     with pytest.raises(ManifestError, match="root") as caught:
         resolve_inside(root, "images/fish.jpg")
+
+    assert_secret_free_exception_chain(caught.value)
+
+
+def test_resolve_symlink_loop_has_no_raw_or_secret_bearing_exception_chain(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    secret_link = root / RECEIPT_TOKEN
+    peer_link = root / "loop-peer"
+    try:
+        secret_link.symlink_to(peer_link, target_is_directory=True)
+        peer_link.symlink_to(secret_link, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink loop creation unavailable: {exc}")
+
+    with pytest.raises(ManifestError, match="root") as caught:
+        resolve_inside(root, f"{RECEIPT_TOKEN}/fish.jpg")
 
     assert_secret_free_exception_chain(caught.value)
 

@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 import sqlite3
 import stat
 from threading import Barrier
+import traceback
 from uuid import UUID, uuid4
 
 import pytest
@@ -37,6 +38,34 @@ def result(**overrides: object) -> SyncResult:
     }
     values.update(overrides)
     return SyncResult(**values)  # type: ignore[arg-type]
+
+
+def assert_secret_free_exception_graph(error: BaseException) -> None:
+    pending = [error]
+    seen: set[int] = set()
+    chain: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        chain.append(current)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+    assert not any(isinstance(item, RuntimeError) for item in chain)
+    surfaces = [
+        *(str(item) for item in chain),
+        *(repr(item) for item in chain),
+        "".join(
+            traceback.format_exception(
+                type(error), error, error.__traceback__, chain=True
+            )
+        ),
+    ]
+    assert all(RECEIPT_TOKEN not in surface for surface in surfaces)
 
 
 def test_constructing_index_creates_exact_root_database_and_durable_schema(
@@ -403,6 +432,50 @@ def test_rejects_stored_path_that_now_resolves_through_symlink(
 
     with pytest.raises(SyncIndexError, match="root"):
         index.latest_for_candidate(CANDIDATE_ID)
+
+
+@pytest.mark.parametrize(
+    "component",
+    [
+        "CON .txt",
+        "COM1 .jpg",
+        "LPT¹ .image",
+        "CONIN$ .bin",
+        "CONOUT$  ..data",
+        "CLOCK$ . .asset",
+    ],
+)
+def test_index_rejects_windows_normalized_device_aliases(
+    sync_root: Path, component: str
+) -> None:
+    index = SyncIndex(sync_root)
+
+    with pytest.raises(SyncIndexError, match="reserved"):
+        index.record_success(
+            result(relative_path=PurePosixPath(f"images/{component}/fish.jpg"))
+        )
+
+
+def test_index_symlink_loop_has_no_raw_or_secret_bearing_exception_chain(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    secret_link = sync_root / RECEIPT_TOKEN
+    peer_link = sync_root / "loop-peer"
+    try:
+        secret_link.symlink_to(peer_link, target_is_directory=True)
+        peer_link.symlink_to(secret_link, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink loop creation unavailable: {exc}")
+
+    with pytest.raises(SyncIndexError, match="root") as caught:
+        index.record_success(
+            result(
+                relative_path=PurePosixPath(f"{RECEIPT_TOKEN}/fish.jpg")
+            )
+        )
+
+    assert_secret_free_exception_graph(caught.value)
 
 
 def test_rejects_future_or_incompatible_existing_schema(sync_root: Path) -> None:
