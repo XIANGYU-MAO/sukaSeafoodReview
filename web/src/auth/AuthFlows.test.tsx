@@ -1,0 +1,140 @@
+import { screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+
+import { App } from "../App";
+import { authState, jsonResponse, renderWithAuth } from "../test/helpers";
+
+describe("authenticated password and logout flows", () => {
+  it("gates protected UI until a forced password change succeeds with CSRF", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) return jsonResponse({ ...authState, must_change_password: true });
+      if (url.endsWith("/auth/change-password")) return new Response(null, { status: 204 });
+      if (url.endsWith("/auth/names")) return jsonResponse(fixedNames());
+      throw new Error(`Unexpected request: ${url} ${init?.method}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    renderWithAuth(<App />);
+
+    expect(await screen.findByRole("heading", { name: "首次登录，请修改密码" })).toBeInTheDocument();
+    expect(screen.queryByText("审核工作区即将上线")).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("当前密码"), "current-password");
+    await user.type(screen.getByLabelText("新密码"), "a-long-new-password");
+    await user.type(screen.getByLabelText("确认新密码"), "a-long-new-password");
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
+
+    const changeCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/auth/change-password"));
+    expect(changeCall?.[1]).toEqual(
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({
+          current_password: "current-password",
+          new_password: "a-long-new-password",
+        }),
+      }),
+    );
+    expect(new Headers(changeCall?.[1]?.headers).get("X-CSRF-Token")).toBe("test-csrf-token");
+    expect(await screen.findByText("密码已修改，请重新登录。" )).toBeInTheDocument();
+  });
+
+  it("validates password confirmation and a client-side minimum before calling the server", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ...authState, must_change_password: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    renderWithAuth(<App />);
+    await screen.findByRole("heading", { name: "首次登录，请修改密码" });
+
+    await user.type(screen.getByLabelText("当前密码"), "current");
+    await user.type(screen.getByLabelText("新密码"), "short");
+    await user.type(screen.getByLabelText("确认新密码"), "different");
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("新密码至少需要 12 个字符");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await user.clear(screen.getByLabelText("新密码"));
+    await user.type(screen.getByLabelText("新密码"), "long-enough-password");
+    await user.clear(screen.getByLabelText("确认新密码"));
+    await user.type(screen.getByLabelText("确认新密码"), "does-not-match");
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("两次输入的新密码不一致");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers the same password flow voluntarily from the protected shell", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(authState)));
+    const user = userEvent.setup();
+    renderWithAuth(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "修改密码 / Change password" }));
+    expect(screen.getByRole("heading", { name: "修改密码" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "返回审核工作区" })).toBeInTheDocument();
+  });
+
+  it("logs out with CSRF and clears auth only after success", async () => {
+    let resolveLogout!: (response: Response) => void;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(authState))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveLogout = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(jsonResponse(fixedNames()));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    renderWithAuth(<App />);
+    await user.click(await screen.findByRole("button", { name: "退出登录" }));
+
+    expect(screen.getByText("审核工作区即将上线")).toBeInTheDocument();
+    const logoutCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/auth/logout"));
+    expect(logoutCall?.[1]).toEqual(expect.objectContaining({ method: "POST", credentials: "include" }));
+    expect(new Headers(logoutCall?.[1]?.headers).get("X-CSRF-Token")).toBe("test-csrf-token");
+
+    resolveLogout(new Response(null, { status: 204 }));
+    expect(await screen.findByRole("heading", { name: "登录审核平台" })).toBeInTheDocument();
+  });
+
+  it("also clears auth on logout 401", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse(authState))
+        .mockResolvedValueOnce(jsonResponse({}, 401))
+        .mockResolvedValueOnce(jsonResponse(fixedNames())),
+    );
+    const user = userEvent.setup();
+    renderWithAuth(<App />);
+    await user.click(await screen.findByRole("button", { name: "退出登录" }));
+
+    expect(await screen.findByRole("heading", { name: "登录审核平台" })).toBeInTheDocument();
+  });
+
+  it("stays authenticated after transient logout failure and allows retry", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse(authState))
+        .mockResolvedValueOnce(jsonResponse({}, 503))
+        .mockResolvedValueOnce(new Response(null, { status: 204 }))
+        .mockResolvedValueOnce(jsonResponse(fixedNames())),
+    );
+    const user = userEvent.setup();
+    renderWithAuth(<App />);
+    await user.click(await screen.findByRole("button", { name: "退出登录" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("退出失败，请重试");
+    expect(screen.getByText("审核工作区即将上线")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重试退出" }));
+    expect(await screen.findByRole("heading", { name: "登录审核平台" })).toBeInTheDocument();
+  });
+});
+
+function fixedNames() {
+  return ["Hassan", "Mao", "Xinhui", "Wahid", "Sharmaa", "Yiming"].map((name) => ({ name }));
+}
