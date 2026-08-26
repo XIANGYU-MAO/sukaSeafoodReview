@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { useAuth } from "./auth/AuthProvider";
@@ -10,6 +10,10 @@ export const APP_PATHS = ["/", "/history", "/admin"] as const;
 export function App() {
   const auth = useAuth();
   const [changingPassword, setChangingPassword] = useState(false);
+
+  useEffect(() => {
+    setChangingPassword(false);
+  }, [auth.status, auth.user?.id, auth.user?.csrf_token]);
 
   if (auth.status === "booting") {
     return (

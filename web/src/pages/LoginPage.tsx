@@ -1,20 +1,15 @@
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, request } from "../api/client";
-import type { LoginName } from "../api/types";
+import {
+  type FixedName,
+  FIXED_NAMES,
+  parseLoginNames,
+} from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { PillChoiceGroup } from "../components/PillChoiceGroup";
 
-export const FIXED_NAMES = [
-  "Hassan",
-  "Mao",
-  "Xinhui",
-  "Wahid",
-  "Sharmaa",
-  "Yiming",
-] as const;
-
-type FixedName = (typeof FIXED_NAMES)[number];
+export { FIXED_NAMES } from "../api/types";
 
 export function LoginPage() {
   const { login, successMessage } = useAuth();
@@ -24,28 +19,34 @@ export function LoginPage() {
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const namesGeneration = useRef(0);
+  const namesController = useRef<AbortController | null>(null);
 
   const loadNames = useCallback(async () => {
+    namesGeneration.current += 1;
+    const generation = namesGeneration.current;
+    namesController.current?.abort();
+    const controller = new AbortController();
+    namesController.current = controller;
     setNamesError(false);
     setAvailableNames(null);
     try {
-      const response = await request<LoginName[]>("/auth/names");
-      const returned = new Set(
-        response
-          .filter((entry): entry is LoginName => Boolean(entry) && typeof entry.name === "string")
-          .map((entry) => entry.name),
-      );
-      if (!FIXED_NAMES.every((name) => returned.has(name))) {
-        throw new Error("Incomplete fixed-name response");
-      }
-      setAvailableNames(FIXED_NAMES);
+      const response = await request<unknown>("/auth/names", { signal: controller.signal });
+      const verifiedNames = parseLoginNames(response);
+      if (generation !== namesGeneration.current) return;
+      setAvailableNames(verifiedNames);
     } catch {
+      if (controller.signal.aborted || generation !== namesGeneration.current) return;
       setNamesError(true);
     }
   }, []);
 
   useEffect(() => {
     void loadNames();
+    return () => {
+      namesGeneration.current += 1;
+      namesController.current?.abort();
+    };
   }, [loadNames]);
 
   async function handleSubmit(event: FormEvent) {
