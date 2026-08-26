@@ -10,76 +10,7 @@ $scriptFile = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
 $localSyncRoot = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $scriptFile) ".."))
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $localSyncRoot ".."))
 
-function Assert-TaskLocalPath {
-    param(
-        [Parameter(Mandatory = $true)][string]$Candidate,
-        [Parameter(Mandatory = $true)][string]$RequiredParent
-    )
-    $fullCandidate = [IO.Path]::GetFullPath($Candidate)
-    $fullParent = [IO.Path]::GetFullPath($RequiredParent).TrimEnd(
-        [IO.Path]::DirectorySeparatorChar,
-        [IO.Path]::AltDirectorySeparatorChar
-    )
-    $prefix = $fullParent + [IO.Path]::DirectorySeparatorChar
-    if (
-        $fullCandidate.Equals($fullParent, [StringComparison]::OrdinalIgnoreCase) -or
-        -not $fullCandidate.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
-    ) {
-        throw "Refusing a path outside the task-local build root."
-    }
-    return $fullCandidate
-}
-
-function Assert-NoReparseAncestry {
-    param(
-        [Parameter(Mandatory = $true)][string]$Candidate,
-        [Parameter(Mandatory = $true)][string]$RequiredParent
-    )
-    $safePath = Assert-TaskLocalPath -Candidate $Candidate -RequiredParent $RequiredParent
-    $boundary = [IO.Path]::GetFullPath($RequiredParent).TrimEnd(
-        [IO.Path]::DirectorySeparatorChar,
-        [IO.Path]::AltDirectorySeparatorChar
-    )
-    $current = Get-Item -LiteralPath $safePath -Force
-    while ($true) {
-        if (($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Refusing a path with a reparse point in its task-local ancestry."
-        }
-        $currentPath = [IO.Path]::GetFullPath($current.FullName).TrimEnd(
-            [IO.Path]::DirectorySeparatorChar,
-            [IO.Path]::AltDirectorySeparatorChar
-        )
-        if ($currentPath.Equals($boundary, [StringComparison]::OrdinalIgnoreCase)) {
-            return
-        }
-        $parentPath = Split-Path -Parent $currentPath
-        if ([string]::IsNullOrWhiteSpace($parentPath)) {
-            throw "Task-local path ancestry ended before the required parent."
-        }
-        $current = Get-Item -LiteralPath $parentPath -Force
-    }
-}
-
-function Remove-VerifiedTree {
-    param(
-        [Parameter(Mandatory = $true)][string]$Candidate,
-        [Parameter(Mandatory = $true)][string]$RequiredParent
-    )
-    $safePath = Assert-TaskLocalPath -Candidate $Candidate -RequiredParent $RequiredParent
-    if (-not (Test-Path -LiteralPath $safePath)) {
-        return
-    }
-    Assert-NoReparseAncestry -Candidate $safePath -RequiredParent $RequiredParent
-    $item = Get-Item -LiteralPath $safePath -Force
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Refusing to recursively remove a reparse point."
-    }
-    $resolved = [IO.Path]::GetFullPath($item.FullName)
-    if (-not $resolved.Equals($safePath, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to recursively remove a path that changed during validation."
-    }
-    Remove-Item -LiteralPath $safePath -Recurse -Force
-}
+. (Join-Path (Split-Path -Parent $scriptFile) "build_helpers.ps1")
 
 function Invoke-Checked {
     param(
@@ -190,6 +121,21 @@ if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
 $versionOutput = & $exePath --version
 if ($LASTEXITCODE -ne 0 -or $versionOutput.Trim() -ne "0.1.0") {
     throw "The frozen --version smoke test failed."
+}
+$selfTestOutput = & $exePath self-test
+if ($LASTEXITCODE -ne 0 -or $selfTestOutput.Trim() -ne "SELF-TEST OK") {
+    throw "The frozen functional self-test failed."
+}
+
+$archiveListing = & $venvPython -m PyInstaller.utils.cliutils.archive_viewer -r -b $exePath
+if ($LASTEXITCODE -ne 0) {
+    throw "The frozen module boundary inspection failed."
+}
+$forbiddenFrozenModule = '(^|\.)(tests?|fixtures)(\.|$)|(^|\.)(_pytesttester|_testutils)$|(^|\.)(pytest|unittest)(\.|$)'
+foreach ($archiveLine in $archiveListing) {
+    if ($archiveLine.Trim() -match $forbiddenFrozenModule) {
+        throw "Packaged content boundary rejected a forbidden frozen module."
+    }
 }
 
 Assert-PackageBoundary -BundleRoot $bundlePath

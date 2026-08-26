@@ -31,6 +31,7 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="suka-seafood-sync", add_help=True)
     subcommands = parser.add_subparsers(dest="command", required=True)
+    subcommands.add_parser("self-test")
     inspect = subcommands.add_parser("inspect")
     inspect.add_argument("batch_csv", type=Path)
     sync = subcommands.add_parser("sync")
@@ -73,6 +74,19 @@ def main(
     except _ArgumentError:
         print("参数错误", file=errors)
         return 2
+    if arguments.command == "self-test":
+        try:
+            from .selftest import SelfTestError, run_self_test
+
+            run_self_test()
+        except SelfTestError as error:
+            print(f"SELF-TEST FAILED {error.code}", file=errors)
+            return 2
+        except Exception:
+            print("SELF-TEST FAILED", file=errors)
+            return 2
+        print("SELF-TEST OK", file=output)
+        return 0
     if arguments.command == "inspect":
         try:
             manifest = load_manifest(arguments.batch_csv)

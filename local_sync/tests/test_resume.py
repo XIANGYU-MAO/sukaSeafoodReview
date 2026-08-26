@@ -176,9 +176,13 @@ def test_cancellation_after_download_preserves_staging_for_network_free_resume(
     assert first.counts == {"succeeded": 0, "failed": 0, "skipped": 0}
     assert first.receipt_items == ()
     assert staging.read_bytes() == JPEG
-    assert SyncIndex(sync_root).get_completed(
+    cancelled_index = SyncIndex(sync_root)
+    assert cancelled_index.get_completed(
         item.candidate_id, item.review_id, item.review_version, "ADD"
     ) is None
+    assert cancelled_index.get_add_intent(
+        item.candidate_id, item.review_id, item.review_version, "ADD"
+    ) is not None
 
     def no_network(*args, **kwargs):
         raise AssertionError("recovery must happen before network")

@@ -1,15 +1,81 @@
 from __future__ import annotations
 
 import ast
+from io import StringIO
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 
+import pytest
+
+from sukaseafood_sync.cli import main as cli_main
+import sukaseafood_sync.selftest as selftest
+
 
 LOCAL_SYNC_ROOT = Path(__file__).parents[1]
 REPOSITORY_ROOT = LOCAL_SYNC_ROOT.parent
+
+
+def _powershell_literal(path: Path) -> str:
+    return str(path).replace("'", "''")
+
+
+def test_cleanup_refuses_nested_junction_before_deleting_any_content(
+    tmp_path: Path,
+) -> None:
+    """A nested junction must not escape cleanup or cause partial in-tree deletion."""
+
+    if os.name != "nt":
+        pytest.skip("Windows junction behavior is Windows-specific")
+    local_root = tmp_path / "local_sync"
+    candidate = local_root / "build"
+    outside = tmp_path / "outside"
+    candidate.mkdir(parents=True)
+    outside.mkdir()
+    in_tree = candidate / "must-remain.txt"
+    sentinel = outside / "outside-sentinel.txt"
+    in_tree.write_text("inside", encoding="utf-8")
+    sentinel.write_text("outside", encoding="utf-8")
+    junction = candidate / "nested-junction"
+    created = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if created.returncode != 0:
+        pytest.skip(f"junction creation unavailable: {created.stderr or created.stdout}")
+
+    helper = LOCAL_SYNC_ROOT / "scripts" / "build_helpers.ps1"
+    command = (
+        f". '{_powershell_literal(helper)}'; "
+        f"Remove-VerifiedTree -Candidate '{_powershell_literal(candidate)}' "
+        f"-RequiredParent '{_powershell_literal(local_root)}'"
+    )
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "reparse" in (result.stdout + result.stderr).casefold()
+        assert sentinel.read_text("utf-8") == "outside"
+        assert in_tree.read_text("utf-8") == "inside"
+    finally:
+        if junction.exists():
+            junction.rmdir()
 
 
 def test_build_lock_is_exact_and_covers_clean_windows_runtime_and_tests() -> None:
@@ -60,9 +126,46 @@ def test_spec_defines_one_console_capable_onedir_with_explicit_collections() -> 
     assert "sukaseafood-sync" in constants
     assert "tkinter" in constants
     assert "_tkinter" in constants
+    assert "scipy.fftpack" in constants
+    assert "scipy.special._cdflib" in constants
+    assert "scipy._lib._testutils" in constants
+    assert "numpy.testing" in constants
+    assert "numpy._pytesttester" in constants
+    assert "pywt._pytesttester" in constants
     assert "tests" in constants
+    runtime_hook = (
+        LOCAL_SYNC_ROOT / "packaging" / "pyi_rth_scipy_runtime.py"
+    ).read_text("utf-8")
+    assert 'sys.modules["scipy._lib._testutils"]' in runtime_hook
+    assert 'sys.modules["numpy.testing"]' in runtime_hook
+    assert 'sys.modules["numpy._pytesttester"]' in runtime_hook
+    assert 'sys.modules["pywt._pytesttester"]' in runtime_hook
+    assert "numpy.testing =" in runtime_hook
+    assert "PytestTester" in runtime_hook
     assert re.search(r"exclude_binaries\s*=\s*True", source)
     assert re.search(r"console\s*=\s*True", source)
+
+
+def test_scipy_runtime_hook_keeps_phash_working_without_test_modules() -> None:
+    hook = LOCAL_SYNC_ROOT / "packaging" / "pyi_rth_scipy_runtime.py"
+    code = (
+        "import runpy; "
+        f"runpy.run_path({str(hook)!r}); "
+        "import imagehash; "
+        "from PIL import Image; "
+        "value = str(imagehash.phash(Image.new('RGB', (32, 24)))); "
+        "print('PHASH OK' if len(value) == 16 else 'PHASH BAD')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "PHASH OK\n"
 
 
 def test_build_script_is_fail_fast_task_local_and_checks_artifact_boundary() -> None:
@@ -83,9 +186,12 @@ def test_build_script_is_fail_fast_task_local_and_checks_artifact_boundary() -> 
         "--noconfirm",
         "SukaSeafoodTrainingSync.exe",
         "--version",
+        "self-test",
         "SHA256SUMS.txt",
         "Get-FileHash",
         "Assert-PackageBoundary",
+        "PyInstaller.utils.cliutils.archive_viewer",
+        "forbidden frozen module",
         "direct_url",
         "ReparsePoint",
         "-LiteralPath",
@@ -94,6 +200,16 @@ def test_build_script_is_fail_fast_task_local_and_checks_artifact_boundary() -> 
     assert "Invoke-Expression" not in script
     assert "Remove-Item -Recurse" not in script
     assert not re.search(r"Remove-Item[^\r\n]*(?:\$HOME|~|[\"']/[\"'])", script)
+
+
+def test_cleanup_rechecks_each_entry_ancestry_before_bottom_up_removal() -> None:
+    helper = (LOCAL_SYNC_ROOT / "scripts" / "build_helpers.ps1").read_text("utf-8")
+
+    assert re.search(
+        r"function Assert-SafeTreeEntry[\s\S]*?"
+        r"Assert-NoReparseAncestry\s+-Candidate\s+\$safeEntry",
+        helper,
+    )
 
 
 def test_task_local_build_outputs_are_ignored() -> None:
@@ -188,6 +304,122 @@ def test_module_version_is_headless_and_matches_package_version() -> None:
     assert result.returncode == 0
     assert result.stdout.strip() == "0.1.0"
     assert result.stderr == ""
+
+
+def test_module_self_test_exercises_local_frozen_dependencies_without_network() -> None:
+    """The functional diagnostic must cover ADD dependencies with stable safe output."""
+
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(LOCAL_SYNC_ROOT / "src")
+    environment["HTTP_PROXY"] = "http://127.0.0.1:1"
+    environment["HTTPS_PROXY"] = "http://127.0.0.1:1"
+    result = subprocess.run(
+        [sys.executable, "-m", "sukaseafood_sync", "self-test"],
+        cwd=LOCAL_SYNC_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stdout == "SELF-TEST OK\n"
+    assert result.stderr == ""
+
+
+def test_self_test_failure_reports_only_stable_phase_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Frozen diagnostic failures must identify a phase without leaking details."""
+
+    def fail() -> None:
+        raise selftest.SelfTestError("IMAGE_PIPELINE")
+
+    monkeypatch.setattr(selftest, "run_self_test", fail)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    exit_code = cli_main(["self-test"], stdout=stdout, stderr=stderr)
+
+    assert exit_code == 2
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == "SELF-TEST FAILED IMAGE_PIPELINE\n"
+
+
+def test_self_test_identifies_packaged_phash_dependency_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing frozen ImageHash/SciPy path must have a safe, useful phase code."""
+
+    def fail_phash(_image):
+        raise ImportError("private installation path must not be printed")
+
+    monkeypatch.setattr(selftest.imagehash, "phash", fail_phash)
+
+    with pytest.raises(selftest.SelfTestError) as caught:
+        selftest.run_self_test()
+
+    assert caught.value.code == "IMAGE_PHASH_BINARY"
+    assert str(caught.value) == "IMAGE_PHASH_BINARY"
+
+
+def test_self_test_classifies_known_missing_cdflib_without_leaking_module_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_phash(_image):
+        raise ModuleNotFoundError(
+            "untrusted exception details", name="scipy.special._cdflib"
+        )
+
+    monkeypatch.setattr(selftest.imagehash, "phash", fail_phash)
+
+    with pytest.raises(selftest.SelfTestError) as caught:
+        selftest.run_self_test()
+
+    assert caught.value.code == "IMAGE_PHASH_MODULE_CDFLIB"
+    assert "untrusted" not in str(caught.value)
+
+
+def test_self_test_classifies_missing_stdlib_test_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_phash(_image):
+        raise ModuleNotFoundError("details must not be printed", name="unittest")
+
+    monkeypatch.setattr(selftest.imagehash, "phash", fail_phash)
+
+    with pytest.raises(selftest.SelfTestError) as caught:
+        selftest.run_self_test()
+
+    assert caught.value.code == "IMAGE_PHASH_MODULE_TEST_SUPPORT"
+
+
+def test_self_test_classifies_phash_attribute_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_phash(_image):
+        raise AttributeError("dependency internals must not be printed")
+
+    monkeypatch.setattr(selftest.imagehash, "phash", fail_phash)
+
+    with pytest.raises(selftest.SelfTestError) as caught:
+        selftest.run_self_test()
+
+    assert caught.value.code == "IMAGE_PHASH_ATTRIBUTE"
+
+
+def test_self_test_classifies_phash_runtime_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_phash(_image):
+        raise RuntimeError("dependency internals must not be printed")
+
+    monkeypatch.setattr(selftest.imagehash, "phash", fail_phash)
+
+    with pytest.raises(selftest.SelfTestError) as caught:
+        selftest.run_self_test()
+
+    assert caught.value.code == "IMAGE_PHASH_RUNTIME_ERROR"
 
 
 def test_frozen_entry_script_version_uses_absolute_package_imports() -> None:

@@ -16,13 +16,14 @@ from uuid import UUID
 from .manifest import ManifestError, resolve_inside, validate_relative_path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 INDEX_FILENAME = ".sukaseafood-sync.sqlite3"
 BUSY_TIMEOUT_MS = 5_000
 MAX_SAFE_INTEGER = 2**63 - 1
 _HEX_64 = re.compile(r"[0-9a-fA-F]{64}\Z", re.ASCII)
 _HEX_BOUNDED = re.compile(r"[0-9a-fA-F]{1,256}\Z", re.ASCII)
 _ACTIONS = frozenset({"ADD", "MOVE", "REMOVE"})
+_ADD_DECODED_SUFFIXES = frozenset({".jpg", ".png", ".webp"})
 _SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 _SQLITE_PATH_VALIDATION_ATTEMPTS = 2
 _COLUMNS = (
@@ -50,7 +51,7 @@ _COLUMN_SHAPE = (
     ("receipt_submitted_at", "TEXT", 0, 0),
 )
 
-_CREATE_SCHEMA = """
+_CREATE_SYNCED_ITEMS = """
 CREATE TABLE synced_items (
     candidate_id TEXT NOT NULL,
     review_id TEXT NOT NULL,
@@ -64,6 +65,23 @@ CREATE TABLE synced_items (
     perceptual_hash TEXT NOT NULL,
     completed_at TEXT NOT NULL,
     receipt_submitted_at TEXT,
+    PRIMARY KEY (candidate_id, review_id, review_version, action)
+)
+"""
+
+_CREATE_PENDING_ADDS = """
+CREATE TABLE pending_adds (
+    candidate_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    review_version INTEGER NOT NULL CHECK (
+        review_version >= 1 AND review_version <= 9223372036854775807
+    ),
+    action TEXT NOT NULL CHECK (action = 'ADD'),
+    batch_id TEXT NOT NULL,
+    target_relative_path TEXT NOT NULL,
+    actual_relative_path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    perceptual_hash TEXT NOT NULL,
     PRIMARY KEY (candidate_id, review_id, review_version, action)
 )
 """
@@ -107,12 +125,41 @@ def _normalized_sql(value: str) -> str:
 
 
 _SCHEMA_FINGERPRINT = hashlib.sha256(
-    _normalized_sql(_CREATE_SCHEMA).encode("utf-8")
+    _normalized_sql(_CREATE_SYNCED_ITEMS).encode("utf-8")
 ).hexdigest()
-_EXPECTED_OBJECTS = {
+_PENDING_SCHEMA_FINGERPRINT = hashlib.sha256(
+    _normalized_sql(_CREATE_PENDING_ADDS).encode("utf-8")
+).hexdigest()
+_V1_EXPECTED_OBJECTS = {
     ("index", "sqlite_autoindex_synced_items_1", "synced_items"),
     ("table", "synced_items", "synced_items"),
 }
+_EXPECTED_OBJECTS = _V1_EXPECTED_OBJECTS | {
+    ("index", "sqlite_autoindex_pending_adds_1", "pending_adds"),
+    ("table", "pending_adds", "pending_adds"),
+}
+_PENDING_COLUMNS = (
+    "candidate_id",
+    "review_id",
+    "review_version",
+    "action",
+    "batch_id",
+    "target_relative_path",
+    "actual_relative_path",
+    "sha256",
+    "perceptual_hash",
+)
+_PENDING_COLUMN_SHAPE = (
+    ("candidate_id", "TEXT", 1, 1),
+    ("review_id", "TEXT", 1, 2),
+    ("review_version", "INTEGER", 1, 3),
+    ("action", "TEXT", 1, 4),
+    ("batch_id", "TEXT", 1, 0),
+    ("target_relative_path", "TEXT", 1, 0),
+    ("actual_relative_path", "TEXT", 1, 0),
+    ("sha256", "TEXT", 1, 0),
+    ("perceptual_hash", "TEXT", 1, 0),
+)
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
@@ -158,6 +205,19 @@ class SyncRecord:
     @property
     def present(self) -> bool:
         return self.action in {"ADD", "MOVE"}
+
+
+@dataclass(frozen=True, slots=True)
+class AddIntent:
+    candidate_id: UUID
+    review_id: UUID
+    review_version: int
+    action: Literal["ADD"]
+    batch_id: UUID
+    target_relative_path: PurePosixPath
+    actual_relative_path: PurePosixPath
+    sha256: str
+    perceptual_hash: str
 
 
 def _uuid(value: UUID | str, field_name: str) -> UUID:
@@ -425,11 +485,16 @@ class SyncIndex:
             if version == 0:
                 if objects:
                     raise SyncIndexError("refusing to rewrite an unversioned existing database")
-                connection.execute(_CREATE_SCHEMA)
+                connection.execute(_CREATE_SYNCED_ITEMS)
+                connection.execute(_CREATE_PENDING_ADDS)
+                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            elif version == 1:
+                self._verify_schema(connection, version=1)
+                connection.execute(_CREATE_PENDING_ADDS)
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise SyncIndexError(f"unsupported schema version {version}")
-            self._verify_schema(connection)
+            self._verify_schema(connection, version=SCHEMA_VERSION)
             self._verify_connection_pragmas(connection, require_wal=False)
             connection.commit()
         except Exception:
@@ -445,7 +510,7 @@ class SyncIndex:
             wal_connection.close()
 
     @staticmethod
-    def _verify_schema(connection: sqlite3.Connection) -> None:
+    def _verify_schema(connection: sqlite3.Connection, *, version: int) -> None:
         objects = list(
             connection.execute(
                 "SELECT type, name, tbl_name, sql FROM sqlite_master "
@@ -453,36 +518,69 @@ class SyncIndex:
             )
         )
         object_keys = {(row[0], row[1], row[2]) for row in objects}
-        table_sql = next(
+        synced_sql = next(
             (row[3] for row in objects if row[0] == "table" and row[1] == "synced_items"),
             None,
         )
-        table_fingerprint = (
-            hashlib.sha256(_normalized_sql(table_sql).encode("utf-8")).hexdigest()
-            if isinstance(table_sql, str)
+        synced_fingerprint = (
+            hashlib.sha256(_normalized_sql(synced_sql).encode("utf-8")).hexdigest()
+            if isinstance(synced_sql, str)
             else None
         )
-        table_info = list(connection.execute("PRAGMA table_info(synced_items)"))
-        columns = tuple(row[1] for row in table_info)
-        column_shape = tuple(
-            (row[1], str(row[2]).upper(), row[3], row[5]) for row in table_info
+        synced_info = list(connection.execute("PRAGMA table_info(synced_items)"))
+        synced_columns = tuple(row[1] for row in synced_info)
+        synced_shape = tuple(
+            (row[1], str(row[2]).upper(), row[3], row[5]) for row in synced_info
         )
-        primary_key = tuple(
+        synced_primary_key = tuple(
             row[1]
             for row in sorted(
-                table_info,
+                synced_info,
+                key=lambda item: item[5] if item[5] else 99,
+            )
+            if row[5]
+        )
+        pending_sql = next(
+            (row[3] for row in objects if row[0] == "table" and row[1] == "pending_adds"),
+            None,
+        )
+        pending_fingerprint = (
+            hashlib.sha256(_normalized_sql(pending_sql).encode("utf-8")).hexdigest()
+            if isinstance(pending_sql, str)
+            else None
+        )
+        pending_info = list(connection.execute("PRAGMA table_info(pending_adds)"))
+        pending_columns = tuple(row[1] for row in pending_info)
+        pending_shape = tuple(
+            (row[1], str(row[2]).upper(), row[3], row[5]) for row in pending_info
+        )
+        pending_primary_key = tuple(
+            row[1]
+            for row in sorted(
+                pending_info,
                 key=lambda item: item[5] if item[5] else 99,
             )
             if row[5]
         )
         integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
+        expected_objects = _V1_EXPECTED_OBJECTS if version == 1 else _EXPECTED_OBJECTS
         if (
-            object_keys != _EXPECTED_OBJECTS
-            or table_fingerprint != _SCHEMA_FINGERPRINT
-            or columns != _COLUMNS
-            or column_shape != _COLUMN_SHAPE
-            or primary_key
+            object_keys != expected_objects
+            or synced_fingerprint != _SCHEMA_FINGERPRINT
+            or synced_columns != _COLUMNS
+            or synced_shape != _COLUMN_SHAPE
+            or synced_primary_key
             != ("candidate_id", "review_id", "review_version", "action")
+            or (
+                version == SCHEMA_VERSION
+                and (
+                    pending_fingerprint != _PENDING_SCHEMA_FINGERPRINT
+                    or pending_columns != _PENDING_COLUMNS
+                    or pending_shape != _PENDING_COLUMN_SHAPE
+                    or pending_primary_key
+                    != ("candidate_id", "review_id", "review_version", "action")
+                )
+            )
             or integrity != "ok"
         ):
             raise SyncIndexError("existing index schema is incompatible")
@@ -548,6 +646,53 @@ class SyncIndex:
                 raise
             raise SyncIndexError("stored index row is invalid") from exc
 
+    def _validated_add_intent(
+        self, result: SyncResult, target_relative_path: PurePosixPath | str
+    ) -> AddIntent:
+        desired = self._validated_result(result)
+        if desired.action != "ADD":
+            raise SyncIndexError("pending intent action must be exactly ADD")
+        target = self._safe_path(target_relative_path)
+        actual = desired.relative_path
+        if (
+            target.parent != actual.parent
+            or target.stem != actual.stem
+            or actual.suffix not in _ADD_DECODED_SUFFIXES
+        ):
+            raise SyncIndexError("pending ADD paths are incompatible")
+        return AddIntent(
+            candidate_id=desired.candidate_id,
+            review_id=desired.review_id,
+            review_version=desired.review_version,
+            action="ADD",
+            batch_id=desired.batch_id,
+            target_relative_path=target,
+            actual_relative_path=actual,
+            sha256=desired.sha256,
+            perceptual_hash=desired.perceptual_hash,
+        )
+
+    def _from_intent_row(self, row: sqlite3.Row) -> AddIntent:
+        try:
+            action = _action(row["action"])
+            if action != "ADD":
+                raise SyncIndexError("stored pending intent action is invalid")
+            result = SyncResult(
+                candidate_id=row["candidate_id"],
+                review_id=row["review_id"],
+                review_version=row["review_version"],
+                action=action,
+                batch_id=row["batch_id"],
+                relative_path=row["actual_relative_path"],
+                sha256=row["sha256"],
+                perceptual_hash=row["perceptual_hash"],
+            )
+            return self._validated_add_intent(result, row["target_relative_path"])
+        except (KeyError, TypeError, ValueError) as exc:
+            if isinstance(exc, SyncIndexError):
+                raise
+            raise SyncIndexError("stored pending ADD intent is invalid") from exc
+
     @staticmethod
     def _same_result(existing: SyncRecord, desired: SyncRecord) -> bool:
         return (
@@ -596,6 +741,79 @@ class SyncIndex:
             ).fetchone()
         return self._from_row(row) if row is not None else None
 
+    def get_add_intent(
+        self,
+        candidate_id: UUID | str,
+        review_id: UUID | str,
+        review_version: int,
+        action: str,
+    ) -> AddIntent | None:
+        """Return durable promotion evidence for an exact ADD operation key."""
+
+        key = (
+            str(_uuid(candidate_id, "candidate_id")),
+            str(_uuid(review_id, "review_id")),
+            _version(review_version),
+            _action(action),
+        )
+        if key[3] != "ADD":
+            raise SyncIndexError("pending intent action must be exactly ADD")
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM pending_adds "
+                "WHERE candidate_id = ? AND review_id = ? "
+                "AND review_version = ? AND action = ?",
+                key,
+            ).fetchone()
+        return self._from_intent_row(row) if row is not None else None
+
+    def record_add_intent(
+        self, result: SyncResult, target_relative_path: PurePosixPath | str
+    ) -> AddIntent:
+        """Durably bind an alternate decoded target to one exact ADD operation."""
+
+        desired = self._validated_add_intent(result, target_relative_path)
+        key = (
+            str(desired.candidate_id),
+            str(desired.review_id),
+            desired.review_version,
+            desired.action,
+        )
+        with self.connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM pending_adds "
+                    "WHERE candidate_id = ? AND review_id = ? "
+                    "AND review_version = ? AND action = ?",
+                    key,
+                ).fetchone()
+                if row is not None:
+                    existing = self._from_intent_row(row)
+                    if existing != desired:
+                        raise IndexConflict("pending ADD intent conflict")
+                    connection.commit()
+                    return existing
+                connection.execute(
+                    "INSERT INTO pending_adds ("
+                    "candidate_id, review_id, review_version, action, batch_id, "
+                    "target_relative_path, actual_relative_path, sha256, perceptual_hash"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        *key,
+                        str(desired.batch_id),
+                        desired.target_relative_path.as_posix(),
+                        desired.actual_relative_path.as_posix(),
+                        desired.sha256,
+                        desired.perceptual_hash,
+                    ),
+                )
+                connection.commit()
+                return desired
+            except Exception:
+                connection.rollback()
+                raise
+
     def record_success(self, result: SyncResult) -> SyncRecord:
         desired = self._validated_result(result)
         key = self._key(desired)
@@ -612,6 +830,12 @@ class SyncIndex:
                     existing = self._from_row(row)
                     if not self._same_result(existing, desired):
                         raise IndexConflict("completed operation result conflict")
+                    if desired.action == "ADD":
+                        connection.execute(
+                            "DELETE FROM pending_adds WHERE candidate_id = ? "
+                            "AND review_id = ? AND review_version = ? AND action = ?",
+                            key,
+                        )
                     connection.commit()
                     return existing
                 connection.execute(
@@ -628,6 +852,12 @@ class SyncIndex:
                         _serialize_timestamp(desired.completed_at),
                     ),
                 )
+                if desired.action == "ADD":
+                    connection.execute(
+                        "DELETE FROM pending_adds WHERE candidate_id = ? "
+                        "AND review_id = ? AND review_version = ? AND action = ?",
+                        key,
+                    )
                 connection.commit()
                 return desired
             except Exception:

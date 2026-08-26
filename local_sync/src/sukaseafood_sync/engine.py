@@ -27,6 +27,7 @@ from .operations import (
     apply_add,
     apply_move,
     apply_remove,
+    prepare_add_intent,
     recover_add,
 )
 
@@ -483,6 +484,7 @@ class SyncEngine:
                                 )
                             finally:
                                 last_activity[bucket] = self._monotonic()
+                            prepare_add_intent(safe_root, row, downloaded, index)
                             if cancel_event.is_set():
                                 cancelled = True
                                 self._emit(

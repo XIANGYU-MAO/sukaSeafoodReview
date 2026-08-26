@@ -17,7 +17,7 @@ import imagehash
 from PIL import Image, ImageOps
 
 from .downloader import DownloadResult
-from .index import SyncIndex, SyncRecord, SyncResult
+from .index import AddIntent, SyncIndex, SyncRecord, SyncResult
 from .manifest import (
     ManifestError,
     ManifestRow,
@@ -108,6 +108,14 @@ def _safe_relative(value: PurePosixPath | str, field: str) -> PurePosixPath:
     if failed:
         raise OperationError("PATH_UNSAFE")
     return relative
+
+
+def _windows_path_identity(relative: PurePosixPath) -> str:
+    return relative.as_posix().casefold()
+
+
+def _same_windows_path(left: PurePosixPath, right: PurePosixPath) -> bool:
+    return _windows_path_identity(left) == _windows_path_identity(right)
 
 
 def _resolved_path(root: Path, relative: PurePosixPath) -> Path:
@@ -299,7 +307,7 @@ def _read_recovery_image(
     if decoded_format is None or decode_failed:
         raise OperationError("ADD_RECOVERY_INVALID")
     suffix = _FORMAT_SUFFIXES[decoded_format]
-    if relative is not None and relative.suffix != suffix:
+    if relative is not None and relative.suffix.casefold() != suffix:
         raise OperationError("ADD_RECOVERY_INVALID")
     digest = hashlib.sha256(content).hexdigest()
     return digest, perceptual_hash, len(content), width, height, suffix, before
@@ -438,6 +446,26 @@ def _record(index: SyncIndex, result: SyncResult) -> None:
         failed = True
     if failed:
         raise OperationError("INDEX_WRITE_FAILED")
+
+
+def _add_intent(index: SyncIndex, row: ManifestRow) -> AddIntent | None:
+    try:
+        return index.get_add_intent(
+            row.candidate_id, row.review_id, row.review_version, row.action
+        )
+    except Exception:
+        raise OperationError("INDEX_READ_FAILED") from None
+
+
+def _record_add_intent(
+    index: SyncIndex,
+    result: SyncResult,
+    target_relative: PurePosixPath,
+) -> AddIntent:
+    try:
+        return index.record_add_intent(result, target_relative)
+    except Exception:
+        raise OperationError("INDEX_WRITE_FAILED") from None
 
 
 def _stored_path_allowed(row: ManifestRow, stored: PurePosixPath) -> bool:
@@ -663,7 +691,9 @@ def _cleanup_composite_previous(
     actual_relative: PurePosixPath,
     index: SyncIndex,
 ) -> None:
-    if row.previous_relative_path is None or row.previous_relative_path == actual_relative:
+    if row.previous_relative_path is None or _same_windows_path(
+        row.previous_relative_path, actual_relative
+    ):
         return
     prior = _latest(index, row)
     if (
@@ -731,8 +761,18 @@ def _apply_add(
         phash,
         staging_metadata,
     ) = _validated_download(root, row, target_relative, download_result)
+    if row.previous_relative_path is not None and _same_windows_path(
+        row.previous_relative_path, actual_relative
+    ):
+        raise OperationError("ADD_TARGET_COLLIDES_PREVIOUS")
+    result = _desired_result(row, actual_relative, sha256, phash)
     target = _ensure_parents(root, actual_relative)
     target_metadata = _lstat(target, "TARGET_UNSAFE")
+    if target_metadata is not None and (
+        not _regular(target_metadata) or stat.S_ISLNK(target_metadata.st_mode)
+    ):
+        raise OperationError("TARGET_UNSAFE")
+    _record_add_intent(index, result, target_relative)
     if target_metadata is not None:
         target_sha, _size, _target_owned = _hash_regular(target, "TARGET_UNSAFE")
         if target_sha != sha256:
@@ -759,7 +799,6 @@ def _apply_add(
             _link_no_clobber(dedupe_source[0], dedupe_source[1], target, sha256)
         else:
             _link_no_clobber(staging, staging_metadata, target, sha256)
-    result = _desired_result(row, actual_relative, sha256, phash)
     _cleanup_composite_previous(root, row, actual_relative, index)
     _record(index, result)
     try:
@@ -769,74 +808,75 @@ def _apply_add(
     return result
 
 
-def _recovery_target_candidates(
-    root: Path, target_relative: PurePosixPath
-) -> list[tuple[PurePosixPath, Path]]:
-    relative_candidates = [
-        *(target_relative.with_suffix(suffix) for suffix in _FORMAT_SUFFIXES.values()),
-        target_relative,
-    ]
-    unique: list[PurePosixPath] = []
-    seen: set[str] = set()
-    for relative in relative_candidates:
-        folded = relative.as_posix().casefold()
-        if folded not in seen:
-            seen.add(folded)
-            unique.append(relative)
-
-    present: list[tuple[PurePosixPath, Path]] = []
-    for relative in unique:
-        lexical = root.joinpath(*relative.parts)
-        if _lstat(lexical, "TARGET_UNSAFE") is None:
-            continue
-        present.append((relative, _resolved_path(root, relative)))
-    return present
-
-
 def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult | None:
     target_relative, _previous = _validated_row_path(row, "ADD")
     stored = _index_exact(index, row)
-    candidates = _recovery_target_candidates(root, target_relative)
-    if row.previous_relative_path is not None:
-        candidates = [
-            candidate
-            for candidate in candidates
-            if candidate[0] != row.previous_relative_path
-        ]
-    if len(candidates) > 1:
-        raise OperationError("ADD_RECOVERY_AMBIGUOUS")
+    intent = _add_intent(index, row)
 
     staging_relative = target_relative.with_name(target_relative.name + ".part")
     staging_lexical = root.joinpath(*staging_relative.parts)
     staging_metadata = _lstat(staging_lexical, "STAGING_FILE_UNSAFE")
+    exact_metadata = _lstat(root.joinpath(*target_relative.parts), "TARGET_UNSAFE")
     staging: Path | None = None
     staging_image: tuple[str, str, int, int, int, str, os.stat_result] | None = None
-    if staging_metadata is not None:
+    if staging_metadata is not None and (intent is not None or exact_metadata is not None):
         staging = _resolved_path(root, staging_relative)
         staging_image = _read_recovery_image(staging, None)
 
-    if not candidates and staging is None:
-        if stored is not None:
-            raise OperationError("COMPLETED_STATE_STALE")
-        return None
-
-    if candidates:
-        actual_relative, target = candidates[0]
-        target_image = _read_recovery_image(target, actual_relative)
+    target_image: tuple[str, str, int, int, int, str, os.stat_result]
+    if exact_metadata is not None:
+        target = _resolved_path(root, target_relative)
+        target_image = _read_recovery_image(target, target_relative)
+        actual_relative = target_relative.with_suffix(target_image[5])
         if staging_image is not None and staging_image[0] != target_image[0]:
             raise OperationError("ADD_RECOVERY_CONFLICT")
-    else:
-        assert staging is not None
-        assert staging_image is not None
-        actual_relative = target_relative.with_suffix(staging_image[5])
+    elif stored is not None:
+        if not _stored_path_allowed(row, stored.relative_path):
+            raise OperationError("COMPLETED_STATE_STALE")
+        actual_relative = stored.relative_path
+        target = _resolved_path(root, actual_relative)
+        if _lstat(target, "COMPLETED_STATE_STALE") is None:
+            raise OperationError("COMPLETED_STATE_STALE")
+        target_image = _read_recovery_image(target, actual_relative)
+    elif intent is not None:
+        if (
+            intent.batch_id != row.batch_id
+            or intent.target_relative_path != target_relative
+        ):
+            raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+        actual_relative = intent.actual_relative_path
         target = _ensure_parents(root, actual_relative)
         target_metadata = _lstat(target, "TARGET_UNSAFE")
         if target_metadata is not None:
-            raise OperationError("ADD_RECOVERY_AMBIGUOUS")
-        _link_no_clobber(staging, staging_image[6], target, staging_image[0])
-        target_image = _read_recovery_image(target, actual_relative)
+            target_image = _read_recovery_image(target, actual_relative)
+        else:
+            if staging is None or staging_image is None:
+                raise OperationError("ADD_RECOVERY_INTENT_STALE")
+            if (
+                staging_image[0] != intent.sha256
+                or staging_image[1] != intent.perceptual_hash
+                or target_relative.with_suffix(staging_image[5]) != actual_relative
+            ):
+                raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+            _link_no_clobber(staging, staging_image[6], target, staging_image[0])
+            target_image = _read_recovery_image(target, actual_relative)
+    else:
+        return None
+
+    if row.previous_relative_path is not None and _same_windows_path(
+        row.previous_relative_path, actual_relative
+    ):
+        if stored is None and intent is None:
+            return None
+        raise OperationError("ADD_TARGET_COLLIDES_PREVIOUS")
 
     sha256, phash, _byte_count, _width, _height, _suffix, _owned = target_image
+    if intent is not None and (
+        intent.actual_relative_path != actual_relative
+        or intent.sha256 != sha256
+        or intent.perceptual_hash != phash
+    ):
+        raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
     if stored is not None and (
         stored.relative_path != actual_relative
         or stored.sha256 != sha256
@@ -984,6 +1024,34 @@ def apply_add(
         expected_action="ADD",
         logger=logger,
     )
+
+
+def prepare_add_intent(
+    root: Path,
+    row: ManifestRow,
+    download_result: DownloadResult,
+    index: SyncIndex,
+) -> None:
+    """Persist exact recovery evidence after download but before cancellation."""
+
+    _validated_row_path(row, "ADD")
+    safe_root = _validated_root(root, index)
+    target_relative = row.target_relative_path
+    actual_relative, _staging, sha256, phash, _owned = _validated_download(
+        safe_root, row, target_relative, download_result
+    )
+    if row.previous_relative_path is not None and _same_windows_path(
+        row.previous_relative_path, actual_relative
+    ):
+        raise OperationError("ADD_TARGET_COLLIDES_PREVIOUS")
+    target = _ensure_parents(safe_root, actual_relative)
+    target_metadata = _lstat(target, "TARGET_UNSAFE")
+    if target_metadata is not None and (
+        not _regular(target_metadata) or stat.S_ISLNK(target_metadata.st_mode)
+    ):
+        raise OperationError("TARGET_UNSAFE")
+    result = _desired_result(row, actual_relative, sha256, phash)
+    _record_add_intent(index, result, target_relative)
 
 
 def recover_add(

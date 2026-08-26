@@ -15,6 +15,7 @@ import imagehash
 from PIL import Image
 
 from conftest import BATCH_ID, CANDIDATE_ID, RECEIPT_TOKEN, REVIEW_ID
+import sukaseafood_sync.operations as operations
 from sukaseafood_sync.downloader import DownloadResult
 from sukaseafood_sync.index import SyncIndex, SyncResult
 from sukaseafood_sync.manifest import ManifestRow
@@ -721,6 +722,159 @@ def test_recover_add_returns_none_only_when_no_target_candidate_exists(
     assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
 
 
+def test_recover_add_treats_case_variant_composite_previous_as_same_windows_path(
+    sync_root: Path,
+) -> None:
+    """Case-only suffix differences must not turn the previous file into success."""
+
+    index = SyncIndex(sync_root)
+    previous = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.JPG")
+    manifest_row = row(
+        target_relative_path=PurePosixPath(f"images/SF006/{CANDIDATE_ID}.image"),
+        previous_relative_path=previous,
+    )
+    content, phash = encoded_image("JPEG")
+    old = write_file(sync_root, previous, content)
+    index.record_success(
+        SyncResult(
+            candidate_id=CANDIDATE_ID,
+            review_id=OLD_REVIEW_ID,
+            review_version=1,
+            action="ADD",
+            batch_id=BATCH_ID,
+            relative_path=previous,
+            sha256=hashlib.sha256(content).hexdigest(),
+            perceptual_hash=phash,
+        )
+    )
+
+    result = recover_add(sync_root, manifest_row, index)
+
+    assert result is None
+    assert old.read_bytes() == content
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
+
+
+def test_recover_add_ignores_stray_alternate_suffix_without_operation_intent(
+    sync_root: Path,
+) -> None:
+    """An arbitrary valid same-stem image is not evidence that this ADD succeeded."""
+
+    index = SyncIndex(sync_root)
+    manifest_row = row(
+        target_relative_path=PurePosixPath(f"images/SF006/{CANDIDATE_ID}.image")
+    )
+    content, _phash = encoded_image("PNG")
+    stray_relative = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.png")
+    stray = write_file(sync_root, stray_relative, content)
+
+    result = recover_add(sync_root, manifest_row, index)
+
+    assert result is None
+    assert stray.read_bytes() == content
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
+
+
+def test_alternate_suffix_recovery_requires_durable_exact_intent_after_index_crash(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A promoted decoder suffix is recoverable only for its exact failed index write."""
+
+    index = SyncIndex(sync_root)
+    manifest_row = row(
+        target_relative_path=PurePosixPath(f"images/SF006/{CANDIDATE_ID}.image")
+    )
+    content, phash = encoded_image("PNG", (17, 11))
+    verified = download(
+        sync_root,
+        manifest_row,
+        content=content,
+        format="PNG",
+        suffix=".png",
+        phash=phash,
+        width=17,
+        height=11,
+    )
+    original_record = SyncIndex.record_success
+    failed = False
+
+    def fail_once(self: SyncIndex, result: SyncResult):
+        nonlocal failed
+        if result.action == "ADD" and not failed:
+            failed = True
+            raise RuntimeError("simulated index crash")
+        return original_record(self, result)
+
+    monkeypatch.setattr(SyncIndex, "record_success", fail_once)
+    with pytest.raises(OperationError, match="INDEX_WRITE_FAILED"):
+        apply_add(sync_root, manifest_row, verified, index)
+
+    intent = index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 2, "ADD")
+    assert intent is not None
+    assert intent.actual_relative_path == PurePosixPath(
+        f"images/SF006/{CANDIDATE_ID}.png"
+    )
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
+
+    result = recover_add(sync_root, manifest_row, index)
+
+    assert result is not None
+    assert result.status == "SUCCEEDED"
+    assert result.relative_path == intent.actual_relative_path
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
+
+
+def test_add_intent_survives_crash_before_promotion_without_false_receipt_or_delete(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-promotion crash keeps staging and intent but never removes previous."""
+
+    index = SyncIndex(sync_root)
+    previous = PurePosixPath(f"images/OLD/{CANDIDATE_ID}.jpg")
+    manifest_row = row(
+        target_relative_path=PurePosixPath(f"images/SF006/{CANDIDATE_ID}.image"),
+        previous_relative_path=previous,
+    )
+    old = seed_prior(sync_root, index, manifest_row)
+    content, phash = encoded_image("PNG", (19, 13))
+    verified = download(
+        sync_root,
+        manifest_row,
+        content=content,
+        format="PNG",
+        suffix=".png",
+        phash=phash,
+        width=19,
+        height=13,
+    )
+    original_link = operations._link_no_clobber
+    failed = False
+
+    def crash_once(*args: object, **kwargs: object) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OperationError("FILESYSTEM_OPERATION_FAILED")
+        original_link(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(operations, "_link_no_clobber", crash_once)
+    with pytest.raises(OperationError, match="FILESYSTEM_OPERATION_FAILED"):
+        apply_add(sync_root, manifest_row, verified, index)
+
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is not None
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
+    assert old.read_bytes() == JPEG_BYTES
+    assert verified.staging_path.read_bytes() == content
+
+    result = recover_add(sync_root, manifest_row, index)
+
+    assert result is not None
+    assert result.status == "SUCCEEDED"
+    assert not old.exists()
+    assert not verified.staging_path.exists()
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
+
+
 def test_recover_add_exact_completed_record_returns_canonical_skip(
     sync_root: Path,
 ) -> None:
@@ -751,7 +905,7 @@ def test_recover_add_exact_completed_record_returns_canonical_skip(
     assert result.completed_at == stored.completed_at
 
 
-def test_recover_add_verifies_decoder_target_and_persists_derived_metadata(
+def test_recover_add_does_not_infer_decoder_target_without_durable_intent(
     sync_root: Path,
 ) -> None:
     index = SyncIndex(sync_root)
@@ -764,16 +918,9 @@ def test_recover_add_verifies_decoder_target_and_persists_derived_metadata(
 
     result = recover_add(sync_root, manifest_row, index)
 
-    assert result is not None
-    assert result.status == "SUCCEEDED"
-    assert result.relative_path == actual_relative
-    assert result.sha256 == hashlib.sha256(content).hexdigest()
-    assert result.perceptual_hash == expected_phash
-    stored = index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD")
-    assert stored is not None
-    assert stored.relative_path == actual_relative
-    assert stored.sha256 == hashlib.sha256(content).hexdigest()
-    assert stored.perceptual_hash == expected_phash
+    assert result is None
+    assert local_path(sync_root, actual_relative).read_bytes() == content
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
 
 
 def test_recover_add_canonicalizes_uppercase_server_suffix_to_decoder_suffix(
@@ -813,7 +960,7 @@ def test_recover_add_converges_target_and_staging_crash_state(
     assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is not None
 
 
-def test_recover_add_promotes_verified_staging_only_without_network(
+def test_recover_add_does_not_promote_staging_without_durable_intent(
     sync_root: Path,
 ) -> None:
     index = SyncIndex(sync_root)
@@ -829,15 +976,13 @@ def test_recover_add_promotes_verified_staging_only_without_network(
     result = recover_add(sync_root, manifest_row, index)
 
     actual_relative = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.png")
-    assert result is not None
-    assert result.relative_path == actual_relative
-    assert result.perceptual_hash == expected_phash
-    assert local_path(sync_root, actual_relative).read_bytes() == content
-    assert not staging.exists()
-    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is not None
+    assert result is None
+    assert not local_path(sync_root, actual_relative).exists()
+    assert staging.read_bytes() == content
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
 
 
-def test_recover_add_rejects_ambiguous_or_invalid_target_candidates(
+def test_recover_add_ignores_multiple_stray_alternate_candidates(
     sync_root: Path,
 ) -> None:
     index = SyncIndex(sync_root)
@@ -851,13 +996,20 @@ def test_recover_add_rejects_ambiguous_or_invalid_target_candidates(
     write_file(sync_root, png_relative, png)
     write_file(sync_root, jpeg_relative, jpeg)
 
-    with pytest.raises(OperationError, match="ADD_RECOVERY_AMBIGUOUS"):
-        recover_add(sync_root, manifest_row, index)
+    assert recover_add(sync_root, manifest_row, index) is None
+    assert local_path(sync_root, png_relative).read_bytes() == png
+    assert local_path(sync_root, jpeg_relative).read_bytes() == jpeg
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
 
-    local_path(sync_root, jpeg_relative).unlink()
-    local_path(sync_root, png_relative).write_bytes(b"not-an-image")
+
+def test_recover_add_rejects_invalid_exact_server_target(sync_root: Path) -> None:
+    index = SyncIndex(sync_root)
+    manifest_row = row()
+    write_file(sync_root, manifest_row.target_relative_path, b"not-an-image")
+
     with pytest.raises(OperationError, match="ADD_RECOVERY_INVALID"):
         recover_add(sync_root, manifest_row, index)
+
     assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
 
 

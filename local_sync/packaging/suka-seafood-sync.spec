@@ -36,7 +36,7 @@ hiddenimports += collect_submodules("PIL")
 # Importing _tkinter activates PyInstaller's supported Tcl/Tk hook, which
 # collects the matching Tcl and Tk resource trees for this Python build.
 hiddenimports += collect_submodules("tkinter")
-hiddenimports += ["_tkinter"]
+hiddenimports += ["_tkinter", "scipy.fftpack"]
 
 a = Analysis(
     [str(entrypoint)],
@@ -46,8 +46,22 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
-    excludes=["test", "tests", "pytest", "responses", "unittest"],
+    runtime_hooks=[str(project_root / "packaging" / "pyi_rth_scipy_runtime.py")],
+    excludes=[
+        "test",
+        "tests",
+        "pytest",
+        "responses",
+        "unittest",
+        "scipy._lib._testutils",
+        "numpy.testing",
+        "numpy._pytesttester",
+        "pywt._pytesttester",
+        # ImageHash pHash uses scipy.fftpack and the frozen self-test exercises
+        # that exact path. This optional SciPy statistics extension is absent
+        # from the pinned wheel and is not imported by the local tool.
+        "scipy.special._cdflib",
+    ],
     noarchive=False,
     optimize=1,
 )

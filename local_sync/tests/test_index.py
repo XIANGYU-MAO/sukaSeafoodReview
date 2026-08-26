@@ -81,8 +81,11 @@ def test_constructing_index_creates_exact_root_database_and_durable_schema(
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] >= 5_000
         assert connection.execute("PRAGMA synchronous").fetchone()[0] >= 2
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
         columns = [row[1] for row in connection.execute("PRAGMA table_info(synced_items)")]
+        pending_columns = [
+            row[1] for row in connection.execute("PRAGMA table_info(pending_adds)")
+        ]
     assert columns == [
         "candidate_id",
         "review_id",
@@ -95,7 +98,21 @@ def test_constructing_index_creates_exact_root_database_and_durable_schema(
         "completed_at",
         "receipt_submitted_at",
     ]
-    assert not any("token" in column or "url" in column for column in columns)
+    assert pending_columns == [
+        "candidate_id",
+        "review_id",
+        "review_version",
+        "action",
+        "batch_id",
+        "target_relative_path",
+        "actual_relative_path",
+        "sha256",
+        "perceptual_hash",
+    ]
+    assert not any(
+        "token" in column or "url" in column
+        for column in [*columns, *pending_columns]
+    )
 
 
 def test_connection_context_closes_owned_connection(sync_root: Path) -> None:
@@ -105,6 +122,60 @@ def test_connection_context_closes_owned_connection(sync_root: Path) -> None:
 
     with pytest.raises(sqlite3.ProgrammingError):
         connection.execute("SELECT 1")
+
+
+def test_existing_v1_index_migrates_pending_intents_without_losing_success(
+    sync_root: Path,
+) -> None:
+    """Installing intent support must preserve an existing durable completion row."""
+
+    sync_root.mkdir(parents=True, exist_ok=True)
+    path = sync_root / ".sukaseafood-sync.sqlite3"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE synced_items (
+                candidate_id TEXT NOT NULL,
+                review_id TEXT NOT NULL,
+                review_version INTEGER NOT NULL CHECK (
+                    review_version >= 1 AND review_version <= 9223372036854775807
+                ),
+                action TEXT NOT NULL CHECK (action IN ('ADD', 'MOVE', 'REMOVE')),
+                batch_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                perceptual_hash TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                receipt_submitted_at TEXT,
+                PRIMARY KEY (candidate_id, review_id, review_version, action)
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO synced_items VALUES (?, ?, 1, 'ADD', ?, ?, ?, ?, ?, NULL)",
+            (
+                str(CANDIDATE_ID),
+                str(REVIEW_ID),
+                str(BATCH_ID),
+                f"images/SF006/{CANDIDATE_ID}.jpg",
+                "a" * 64,
+                "abcdef0123456789",
+                "2026-08-27T00:00:00.000000+00:00",
+            ),
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+
+    index = SyncIndex(sync_root)
+
+    stored = index.get_completed(CANDIDATE_ID, REVIEW_ID, 1, "ADD")
+    assert stored is not None
+    assert stored.sha256 == "a" * 64
+    with index.connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT count(*) FROM pending_adds"
+        ).fetchone()[0] == 0
 
 
 def test_rejects_index_symlink_outside_root_without_touching_target(
@@ -519,13 +590,15 @@ def test_concurrent_first_initialization_is_serialized_and_idempotent(
     expected = root.resolve() / ".sukaseafood-sync.sqlite3"
     assert paths == [expected] * worker_count
     with closing(sqlite3.connect(expected)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         objects = connection.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
         ).fetchall()
     assert [(kind, name, table) for kind, name, table, _sql in objects] == [
+        ("index", "sqlite_autoindex_pending_adds_1", "pending_adds"),
         ("index", "sqlite_autoindex_synced_items_1", "synced_items"),
+        ("table", "pending_adds", "pending_adds"),
         ("table", "synced_items", "synced_items"),
     ]
 
