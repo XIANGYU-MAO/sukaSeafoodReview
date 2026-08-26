@@ -3,6 +3,25 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiError, request } from "./client";
 
 describe("API client", () => {
+  it("sends FormData unchanged and lets the browser create its multipart boundary", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const form = new FormData();
+    form.append("file", new File(["a,b"], "candidates.csv", { type: "text/csv" }));
+
+    await request("/admin/imports/preview", {
+      method: "POST",
+      body: form,
+      csrfToken: "csrf-value",
+    });
+
+    const init = fetchMock.mock.calls[0][1];
+    expect(init?.body).toBe(form);
+    const headers = new Headers(init?.headers);
+    expect(headers.has("Content-Type")).toBe(false);
+    expect(headers.get("X-CSRF-Token")).toBe("csrf-value");
+  });
+
   it("sends JSON mutations to the same-origin API with cookies and CSRF", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
     vi.stubGlobal("fetch", fetchMock);
