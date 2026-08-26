@@ -8,8 +8,9 @@ import { PillChoiceGroup } from "./PillChoiceGroup";
 interface DecisionPanelProps {
   onSubmit: (payload: DecisionPayload) => void;
   pending: boolean;
-  onPayloadChange?: (payload: DecisionPayload | null) => void;
+  onPayloadChange?: (payload: DecisionPayload) => void;
   resetSignal?: number;
+  selectedPayload?: DecisionPayload | null;
 }
 
 export function DecisionPanel({
@@ -17,12 +18,14 @@ export function DecisionPanel({
   pending,
   onPayloadChange,
   resetSignal = 0,
+  selectedPayload = null,
 }: DecisionPanelProps) {
   const { locale, t } = useI18n();
   const [rejectOpen, setRejectOpen] = useState(false);
   const [reason, setReason] = useState<RejectionReasonCode | null>(null);
   const [notes, setNotes] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [rejectFocusRequest, setRejectFocusRequest] = useState(0);
   const rejectGroup = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -33,10 +36,26 @@ export function DecisionPanel({
   }, [resetSignal]);
 
   useEffect(() => {
-    if (rejectOpen) {
-      rejectGroup.current?.querySelector<HTMLButtonElement>('[role="radio"]')?.focus();
-    }
-  }, [rejectOpen]);
+    if (selectedPayload?.decision !== "REJECTED") return;
+    setRejectOpen(true);
+    setReason(selectedPayload.rejection_reason);
+    setNotes(selectedPayload.notes ?? "");
+    setValidationError(null);
+  }, [selectedPayload?.decision, selectedPayload?.notes, selectedPayload?.rejection_reason]);
+
+  useEffect(() => {
+    if (!rejectOpen) return;
+    const selected = rejectGroup.current?.querySelector<HTMLButtonElement>(
+      '[role="radio"][aria-checked="true"]',
+    );
+    (selected ?? rejectGroup.current?.querySelector<HTMLButtonElement>('[role="radio"]'))?.focus();
+  }, [rejectFocusRequest, rejectOpen]);
+
+  function openReject() {
+    setRejectOpen(true);
+    setValidationError(null);
+    setRejectFocusRequest((request) => request + 1);
+  }
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
@@ -59,8 +78,7 @@ export function DecisionPanel({
           onSubmit(simplePayload("UNSURE"));
           break;
         case "r":
-          setRejectOpen(true);
-          setValidationError(null);
+          openReject();
           break;
       }
     }
@@ -75,7 +93,7 @@ export function DecisionPanel({
     onPayloadChange?.({
       decision: "REJECTED",
       rejection_reason: nextReason,
-      notes: null,
+      notes: nextReason === "OTHER" ? notes.trim() || null : null,
     });
   }
 
@@ -107,37 +125,47 @@ export function DecisionPanel({
     });
   }
 
+  const rejectSelected = selectedPayload?.decision === "REJECTED" || reason !== null;
+
   return (
     <section className="decision-panel" aria-label={t("reviewTitle")}>
       <div className="decision-actions">
         <button
-          className="decision-button decision-button--keep"
+          className={`decision-button decision-button--keep${
+            selectedPayload?.decision === "APPROVED" ? " decision-button--selected" : ""
+          }`}
           type="button"
           disabled={pending}
+          aria-pressed={selectedPayload?.decision === "APPROVED"}
           onClick={() => onSubmit(simplePayload("APPROVED"))}
         >
-          {pending ? t("saving") : t("keep")}
+          {selectedPayload?.decision === "APPROVED" ? <span aria-hidden="true">✓ </span> : null}
+          {t("keep")}
         </button>
         <button
-          className="decision-button decision-button--reject"
+          className={`decision-button decision-button--reject${rejectSelected ? " decision-button--selected" : ""}`}
           type="button"
           disabled={pending}
-          onClick={() => {
-            setRejectOpen(true);
-            setValidationError(null);
-          }}
+          aria-pressed={rejectSelected}
+          onClick={openReject}
         >
+          {rejectSelected ? <span aria-hidden="true">✓ </span> : null}
           {t("reject")}
         </button>
         <button
-          className="decision-button decision-button--unsure"
+          className={`decision-button decision-button--unsure${
+            selectedPayload?.decision === "UNSURE" ? " decision-button--selected" : ""
+          }`}
           type="button"
           disabled={pending}
+          aria-pressed={selectedPayload?.decision === "UNSURE"}
           onClick={() => onSubmit(simplePayload("UNSURE"))}
         >
+          {selectedPayload?.decision === "UNSURE" ? <span aria-hidden="true">✓ </span> : null}
           {t("unsure")}
         </button>
       </div>
+      {pending ? <p className="decision-saving" role="status">{t("saving")}</p> : null}
       {rejectOpen ? (
         <div className="rejection-panel" ref={rejectGroup}>
           <PillChoiceGroup
@@ -173,7 +201,6 @@ export function DecisionPanel({
               onClick={() => {
                 setRejectOpen(false);
                 setValidationError(null);
-                onPayloadChange?.(null);
               }}
             >
               {t("cancelReject")}
@@ -196,18 +223,30 @@ const INTERACTIVE_ROLES = new Set([
   "link",
   "listbox",
   "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
   "option",
   "radio",
+  "searchbox",
   "slider",
   "spinbutton",
   "switch",
   "tab",
   "textbox",
+  "treeitem",
+  "gridcell",
 ]);
 
 function isInteractiveTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
-  if (target.closest("input, textarea, select, button, a, [contenteditable='true']")) return true;
-  const roleElement = target.closest("[role]");
-  return roleElement ? INTERACTIVE_ROLES.has(roleElement.getAttribute("role") ?? "") : false;
+  for (let element: Element | null = target; element; element = element.parentElement) {
+    if (element.matches("input, textarea, select, button, a, area, summary")) return true;
+    const contentEditable = element.getAttribute("contenteditable");
+    if (contentEditable !== null && contentEditable.toLowerCase() !== "false") return true;
+    const tabIndex = element.getAttribute("tabindex");
+    if (tabIndex !== null && Number(tabIndex) >= 0) return true;
+    const roles = (element.getAttribute("role") ?? "").toLowerCase().split(/\s+/);
+    if (roles.some((role) => INTERACTIVE_ROLES.has(role))) return true;
+  }
+  return false;
 }

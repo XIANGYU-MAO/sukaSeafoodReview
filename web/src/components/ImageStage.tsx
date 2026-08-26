@@ -9,6 +9,7 @@ interface ImageStageProps {
   alt: string;
   onImageUnavailable: () => void;
   pending?: boolean;
+  imageUnavailableSelected?: boolean;
 }
 
 type ImageState = "loading" | "loaded" | "error";
@@ -20,6 +21,7 @@ export function ImageStage({
   alt,
   onImageUnavailable,
   pending = false,
+  imageUnavailableSelected = false,
 }: ImageStageProps) {
   const { t } = useI18n();
   const [attempt, setAttempt] = useState(0);
@@ -78,29 +80,35 @@ export function ImageStage({
               <button className="secondary-button" type="button" disabled={pending} onClick={retry}>
                 {t("retryImage")}
               </button>
-              {uniqueLinks.map((link) => (
-                <a
-                  className="secondary-button external-link"
-                  href={link.href}
-                  key={link.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {link.label}
-                </a>
-              ))}
               <button
-                className="danger-button"
+                className={`danger-button${imageUnavailableSelected ? " image-unavailable--selected" : ""}`}
                 type="button"
                 disabled={pending}
+                aria-pressed={imageUnavailableSelected}
                 onClick={onImageUnavailable}
               >
+                {imageUnavailableSelected ? <span aria-hidden="true">✓ </span> : null}
                 {t("imageUnavailable")}
               </button>
             </div>
           </div>
         ) : null}
       </div>
+      {uniqueLinks.length ? (
+        <nav className="image-stage__links" aria-label={t("imageReferences")}>
+          {uniqueLinks.map((link) => (
+            <a
+              className="secondary-button external-link"
+              href={link.href}
+              key={link.href}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {link.label}
+            </a>
+          ))}
+        </nav>
+      ) : null}
     </section>
   );
 }

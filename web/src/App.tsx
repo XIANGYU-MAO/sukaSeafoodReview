@@ -5,6 +5,7 @@ import { useAuth } from "./auth/AuthProvider";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ReviewPage } from "./pages/ReviewPage";
+import type { MessageKey } from "./i18n/catalog";
 import { I18nProvider, useI18n } from "./i18n/I18nProvider";
 
 export const APP_PATHS = ["/", "/history", "/admin"] as const;
@@ -73,7 +74,10 @@ export function App() {
               onChangePassword={() => setChangingPassword(true)}
               onLogout={auth.logout}
             >
-              <DeferredPage title="历史记录尚未接入" description="历史筛选和修改将在下一任务接入真实接口。" />
+              <LocalizedDeferredPage
+                titleKey="historyDeferredTitle"
+                descriptionKey="historyDeferredDescription"
+              />
             </AuthenticatedShell>
           }
         />
@@ -85,7 +89,11 @@ export function App() {
               onChangePassword={() => setChangingPassword(true)}
               onLogout={auth.logout}
             >
-              <DeferredPage title="管理后台尚未接入" description="Mao 中文后台将在后续任务接入真实管理接口。" />
+              <DeferredPage
+                eyebrow="即将推出"
+                title="管理后台尚未接入"
+                description="Mao 中文后台将在后续任务接入真实管理接口。"
+              />
             </AuthenticatedShell>
           }
         />
@@ -103,7 +111,7 @@ interface AuthenticatedShellProps {
 }
 
 function AuthenticatedShell({ name, onChangePassword, onLogout, children }: AuthenticatedShellProps) {
-  const { locale, toggleLocale } = useI18n();
+  const { locale, t, toggleLocale } = useI18n();
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState(false);
 
@@ -125,7 +133,7 @@ function AuthenticatedShell({ name, onChangePassword, onLogout, children }: Auth
       <header className="shell-header">
         <div>
           <p className="eyebrow">SukaSeafood</p>
-          <strong>协作审核</strong>
+          <strong>{t("shellTitle")}</strong>
         </div>
         <div className="user-actions">
           <span className="user-badge">{name}</span>
@@ -133,18 +141,18 @@ function AuthenticatedShell({ name, onChangePassword, onLogout, children }: Auth
             {locale === "zh" ? "English" : "中文"}
           </button>
           <button className="secondary-button" type="button" onClick={onChangePassword}>
-            修改密码 / Change password
+            {t("changePassword")}
           </button>
           <button className="secondary-button" type="button" disabled={logoutPending} onClick={() => void handleLogout()}>
-            {logoutPending ? "正在退出…" : "退出登录"}
+            {logoutPending ? t("loggingOut") : t("logout")}
           </button>
         </div>
       </header>
       {logoutError ? (
         <div className="notice notice--error shell-notice" role="alert">
-          <span>退出失败，请重试。</span>
+          <span>{t("logoutError")}</span>
           <button className="text-button" type="button" onClick={() => void handleLogout()}>
-            重试退出
+            {t("retryLogout")}
           </button>
         </div>
       ) : null}
@@ -153,10 +161,29 @@ function AuthenticatedShell({ name, onChangePassword, onLogout, children }: Auth
   );
 }
 
-function DeferredPage({ title, description }: { title: string; description: string }) {
+function LocalizedDeferredPage({
+  titleKey,
+  descriptionKey,
+}: {
+  titleKey: MessageKey;
+  descriptionKey: MessageKey;
+}) {
+  const { t } = useI18n();
+  return <DeferredPage eyebrow={t("comingNext")} title={t(titleKey)} description={t(descriptionKey)} />;
+}
+
+function DeferredPage({
+  eyebrow,
+  title,
+  description,
+}: {
+  eyebrow: string;
+  title: string;
+  description: string;
+}) {
   return (
     <main className="placeholder-panel">
-      <p className="eyebrow">Coming next</p>
+      <p className="eyebrow">{eyebrow}</p>
       <h1>{title}</h1>
       <p>{description}</p>
     </main>

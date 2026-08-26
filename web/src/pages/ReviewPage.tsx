@@ -175,16 +175,18 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
     }
   }, [candidate, csrfToken, loadCurrent, replaceOperation, retryBootstrap, reviewerId]);
 
-  function handlePayloadChange(nextPayload: DecisionPayload | null) {
+  function handlePayloadChange(nextPayload: DecisionPayload) {
     const active = operationRef.current;
     const preserved = active?.payload ?? retryPayload;
     if (!preserved) return;
-    if (nextPayload === null || JSON.stringify(nextPayload) !== JSON.stringify(preserved)) {
+    if (JSON.stringify(nextPayload) !== JSON.stringify(preserved)) {
       replaceOperation(null);
       setRetryPayload(null);
       setDecisionError(null);
     }
   }
+
+  const selectedPayload = operation?.payload ?? retryPayload;
 
   const commonName = candidate
     ? locale === "zh"
@@ -224,8 +226,6 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
               type="button"
               disabled={pending}
               onClick={() => {
-                replaceOperation(null);
-                setRetryPayload(null);
                 setDecisionError(null);
               }}
             >
@@ -269,6 +269,10 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
               sourceUrl={candidate.source_url}
               alt={imageAlt}
               pending={pending}
+              imageUnavailableSelected={
+                selectedPayload?.decision === "REJECTED" &&
+                selectedPayload.rejection_reason === "IMAGE_URL_UNAVAILABLE"
+              }
               onImageUnavailable={() =>
                 void submitDecision({
                   decision: "REJECTED",
@@ -297,6 +301,7 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
               pending={pending}
               onPayloadChange={handlePayloadChange}
               resetSignal={panelResetSignal}
+              selectedPayload={selectedPayload}
             />
           </section>
         </article>
