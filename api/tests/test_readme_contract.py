@@ -122,3 +122,5 @@ def test_environment_example_is_safe_complete_and_development_runnable():
     }
     assert len(placeholder_secrets) == 3
     assert all(value.startswith("change-me-") for value in placeholder_secrets)
+    ignored_paths = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "api/.env" in ignored_paths

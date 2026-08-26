@@ -1,0 +1,202 @@
+# SukaSeafood 多人协作审核系统
+
+[English](README.md)
+
+## 系统成果
+
+本仓库提供一个面向 SukaSeafood 候选鱼类图片的多人协作审核核心：六个固定账号 Hassan、Mao、Xinhui、Wahid、Sharmaa、Yiming 共享同一待审核池，其中 Mao 是唯一管理员。系统不设个人配额，同一候选不会交给已经审核过它的成员；每次选择 KEEP、REJECT 或 UNSURE 后立即写入数据库，收到数据库确认后才取下一张。
+
+成员只能查看和修改自己的当前审核历史，但都能看汇总进度。Mao 使用固定中文的七标签后台管理进度、候选图片、鱼种、审核历史、CSV 导入、训练集同步批次和账号。服务器只保存结构化候选信息、外部 URL、审核结果、CSV 与小型回执，不保存、缓存、代理或下载原图字节。审核通过原图的增量下载属于后续 Windows 本地同步阶段，由 Mao 的电脑直接访问外部来源。
+
+## 仓库与当前开发上下文
+
+当前实现分支是 `codex/collaborative-review`。本次开发工作树位于 `C:\Users\86166\Desktop\sukaSeafoodReview\.worktrees\collaborative-review`；`.worktrees` 是本机 Git 隔离实现细节，不是使用前提。
+
+普通使用者应直接克隆仓库，然后从仓库根目录执行本文命令：
+
+```powershell
+git clone https://github.com/XIANGYU-MAO/sukaSeafoodReview.git
+Set-Location .\sukaSeafoodReview
+```
+
+不要复制或依赖另一台机器的 `.worktrees` 目录。本文描述当前核心代码，不表示生产发布或 Windows 下载器阶段已经完成。
+
+## 架构与数据流
+
+- `web/`：React 19、TypeScript、Vite；生产构建基址和浏览器路由基址固定为 `/sukaseafood/review/`。
+- `api/`：FastAPI、SQLAlchemy async、Alembic；应用内部路由从 `/v1` 开始。
+- 开发浏览器入口：`http://localhost:5173/sukaseafood/review/`。Vite 只把 `/sukaseafood/api` 重写到本机 FastAPI 根路径，因此网页仍使用 `/sukaseafood/api/v1`。
+- 规划中的生产入口：`https://findai.top/sukaseafood/review`；外部 API 前缀固定为 `/sukaseafood/api/v1`。
+- 浏览器从 API 取得候选元数据，再通过外部 HTTPS URL 直接加载图片。图片字节不经过中国服务器，也不写入服务器数据库或磁盘。
+- 审核提交带 CSRF 和 Idempotency-Key；API 在数据库事务确认后返回回执，网页验证回执再刷新汇总并取下一张。
+
+本系统不提供 `/project` 或 `/project/*` 页面，也没有图片上传、原图代理或原图下载 API。删除旧 `/project` 路由并保护 YGF 其他页面属于后续生产部署计划，不由本地开发步骤执行。
+
+## 环境要求
+
+- Windows PowerShell 7（Windows PowerShell 5.1 也可执行下列基础命令）。
+- Python 3.12。
+- Node.js 22.12 或更高版本，配套 npm。
+- 本地开发可使用 SQLite；SQLite 仅适合单机开发和测试。
+- 生产必须使用 PostgreSQL 16、HTTPS，并把 `SECURE_COOKIE` 设为 `true`。生产配置会拒绝 SQLite 和不安全 Cookie。
+
+如需运行真实 PostgreSQL 并发测试，请准备一个可清空的独立 PostgreSQL 16 测试数据库。绝不能把测试指向生产数据库。
+
+## Windows 本地快速启动
+
+以下命令都从仓库根目录开始。先创建 API 虚拟环境并复制安全示例：
+
+```powershell
+Set-Location .\api
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt
+Set-Location ..
+Copy-Item .\api\.env.example .\api\.env
+```
+
+`api/.env` 只供本机使用。把三个 `change-me-*` 值替换为彼此不同的本地随机值，不要提交该文件，也不要复用生产值。
+
+终端 1：加载 `.env` 到当前 PowerShell 进程，迁移、初始化六账号并启动 API：
+
+```powershell
+Get-Content .\api\.env | Where-Object { $_ -match '^[^#][^=]*=' } | ForEach-Object {
+    $envEntry = $_ -split '=', 2
+    [Environment]::SetEnvironmentVariable($envEntry[0].Trim(), $envEntry[1].Trim(), 'Process')
+}
+Set-Location .\api
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m app.commands.seed_users --print-once
+.\.venv\Scripts\python.exe -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+首次 seed 会在终端中各显示一次六个临时密码；立即安全保存并分发。相同数据库再次运行不会输出或替换密码。
+
+终端 2：安装网页依赖并启动 Vite：
+
+```powershell
+Set-Location .\web
+npm install
+npm run dev
+```
+
+浏览器打开 `http://localhost:5173/sukaseafood/review/`。开发示例明确使用 `APP_ENV=development`、SQLite 和 `SECURE_COOKIE=false`，因为普通 `http://localhost` 不会发送 Secure Cookie；此设置只能用于本机 HTTP 开发。
+
+## 账号、密码与会话
+
+公开姓名顺序固定为 Hassan、Mao、Xinhui、Wahid、Sharmaa、Yiming；除 Mao 为 `admin` 外，其余均为 `reviewer`。不支持注册、社交登录或自定义账号。首次登录必须修改临时密码，修改成功会撤销全部会话并返回登录页；管理员重置成员密码也会撤销该成员会话。
+
+会话保存在数据库，浏览器只接收 HttpOnly、SameSite=Lax、`Path=/sukaseafood` Cookie。刷新页面通过 `/sukaseafood/api/v1/auth/me` 恢复会话。生产必须在 HTTPS 下使用 `SECURE_COOKIE=true`；`SECURE_COOKIE=false` 会被生产配置拒绝。所有写操作要求同一会话派生的 CSRF 值，审核提交还要求每个具体操作独立的 Idempotency-Key。
+
+临时密码和重置密码只显示一次。不要把密码、会话 Cookie、CSRF、回执密钥、数据库 URL 或 SSH 凭据写进 Git、截图、日志或问题单。
+
+## 导入初始 1,221 行清单
+
+真实旧清单路径是 `C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector\output\candidates.csv`。先在已经加载 API 环境变量的终端执行只读 dry-run：
+
+```powershell
+Set-Location .\api
+.\.venv\Scripts\python.exe -m app.commands.import_candidates 'C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector\output\candidates.csv' --dry-run
+```
+
+2026-08-26 对该真实文件的当前验证结果是：1,221 行可作为新候选、247 条可能 URL 重复、262 条警告、0 条 blocking error。它是一次已观察到的验证证据，不是对未来文件或已有数据库状态的永久不变量；文件内容或数据库变化后应重新 dry-run。
+
+dry-run 不写候选、不生成可提交预览令牌。确认报告后，Mao 在中文后台“导入”标签选择同一 CSV，先执行预检查，再显式确认 commit。预览令牌仅保存在当前页面内存并有过期时间；新文件、终端冲突或成功提交会使旧令牌失效。
+
+## 审核成员工作流
+
+1. 选择固定姓名并登录；首次登录先改密码。
+2. 首页从共享池恢复或取得一张尚未由该成员审核的候选图。
+3. 图片加载期间显示转圈；失败会进入有限错误状态，可重试或选择“图片链接不可用”。
+4. 查看中英文鱼种名、学名、来源、来源记录、许可与安全外链。应用只把 URL 交给浏览器，不抓取图片。
+5. 选择 KEEP、REJECT 或 UNSURE。REJECT 必须选择椭圆形原因；“其他”必须输入说明。K/R/U 快捷键不会劫持输入控件。
+6. 网页立即提交并等待数据库回执；回执身份、内容和版本验证成功后才刷新进度并取下一张，没有额外保存按钮。
+7. “历史记录”只请求当前成员自己的记录，URL 不带 reviewer 查询参数。只有当前版本可编辑；旧版本只读，409 冲突不会静默覆盖。
+
+汇总进度只包含数量和六名成员的聚合，不包含备注、图片 URL、候选 ID、审核 ID或个人历史条目。成员工作量按所有已提交尝试计数；总体进度描述当前活跃数据，因此 Mao 重新打开记录后两种总计可能不同。
+
+## Mao 的七标签中文后台
+
+Mao 登录后看到固定中文后台，且普通成员直接访问 `/admin` 会在发出任何管理请求前返回审核首页。七个标签是：
+
+1. 审核进度：全组聚合和当前占用。
+2. 候选图片：筛选、修正安全元数据、释放或转交尚未提交的当前图片。
+3. 鱼种管理：新增、编辑、停用和重新启用 Windows 安全的不可变鱼种代码。
+4. 审核历史：跨成员筛选、受版本保护的修正，以及指定从未审核该候选的活跃成员重新审核。
+5. 导入：CSV 预检查与原子 commit。
+6. 训练集同步：查看待处理数、创建不可变增量批次、下载小型 CSV、上传 JSON 回执文件。
+7. 账号：查看固定目录并重置普通成员密码；不在网页重置 Mao。
+
+所有管理写操作需要 Mao 会话、CSRF、明确原因和必要的二次确认。后台不会显示原始服务器错误、失败回执自由文本、导入令牌或已关闭的一次性密码。
+
+## 增量 CSV 与本地下载边界
+
+当前核心只生成小型增量 CSV 和接收回执，不包含 Windows 下载器。CSV 按数据库当前审核状态产生 ADD、REMOVE 或 MOVE，并携带服务器决定的精确目标相对路径。下载链接是同源认证 GET；文件回执是受限大小的 `application/json` POST。
+
+后续 `docs/superpowers/plans/2026-08-26-local-training-sync.md` 将实现独立 `local_sync` 包、CLI/Tkinter 和 Windows 可执行文件。该工具计划在 Mao 的电脑上直接访问 `original_url`，验证图片、计算哈希、使用 `.part` 和原子改名、幂等续跑，并把 REMOVE 移到可恢复 `_removed` 路径。中国服务器不抓取原图，可避免服务器带宽、外部来源限流和许可边界扩大，也确保训练数据仍由本地目录所有者控制。
+
+在下载器阶段完成前，不要把导出 CSV 描述为已经同步的本地训练集，也不要手工伪造成功回执。
+
+## 验证命令
+
+SQLite 后端全量、编译和迁移检查：
+
+```powershell
+Set-Location .\api
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m compileall app tests alembic
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m alembic check
+```
+
+只在可丢弃的开发/测试数据库上验证 downgrade/re-upgrade：
+
+```powershell
+.\.venv\Scripts\python.exe -m alembic downgrade -1
+.\.venv\Scripts\python.exe -m alembic upgrade head
+```
+
+真实 PostgreSQL 测试（占位符必须替换为隔离测试数据库，不能使用生产库）：
+
+```powershell
+$env:TEST_POSTGRES_URL = 'postgresql+asyncpg://<test-user>:<test-password>@127.0.0.1:<port>/<test-db>'
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+网页全量、类型检查和生产构建：
+
+```powershell
+Set-Location ..\web
+npm test
+npm run typecheck
+npm run build
+```
+
+生产构建资产必须保持在 `/sukaseafood/review/assets/`。上述命令验证代码；公开路由、Caddy、备份、六账号浏览器验收和 YGF 回归属于后续部署计划。
+
+## 故障排查
+
+- 本机登录后仍是 401：确认 API 和 Vite 都在运行，浏览器使用 `http://localhost:5173/sukaseafood/review/`，本地 `.env` 是 `APP_ENV=development` 与 `SECURE_COOKIE=false`。重启 API 前要在同一终端重新加载 `.env`。
+- 生产配置因 Cookie 启动失败：生产只能使用 HTTPS 和 `SECURE_COOKIE=true`；不要为了绕过检查关闭安全 Cookie。
+- 401 表示没有有效会话或会话已撤销；403 通常表示角色、首次改密或 CSRF 边界不满足。刷新后重新登录，不要复制另一个会话的 CSRF。
+- 外部图片被屏蔽或损坏：检查浏览器网络、来源站、HTTPS 和内容拦截器。服务器不会代理图片；使用页面的重试或“图片链接不可用”，必要时由 Mao 修正 URL。
+- 来源采集遇到 429：Wikimedia/GBIF/iNaturalist 等原始采集与重试属于旧 `SukaSeafood_CV_Dataset_Collector`，不是审核服务器职责。登录 API 自身的 429 是认证限流，也应等待后重试。
+- PostgreSQL 集成测试显示 skipped：设置 `TEST_POSTGRES_URL` 指向独立 PostgreSQL 16 测试库；SQLite 无法证明行锁、SKIP LOCKED 或竞争语义。
+- 导入返回 409：预览可能过期、已提交、属于另一个会话或文件状态已变化；重新选择文件并预检查，不要复用旧令牌。
+- 回执返回 409/422：确认 batch、review ID、版本、状态和服务器给出的精确路径匹配；重新取得当前批次，不要把冲突当成功。
+
+## 仓库结构与后续阶段
+
+```text
+api/                         FastAPI、模型、迁移、CLI 与后端测试
+web/                         React/Vite 网页与 Web 测试
+docs/superpowers/specs/      已批准系统设计
+docs/superpowers/plans/      核心、本地同步和生产部署计划
+```
+
+- 系统设计：`docs/superpowers/specs/2026-08-26-collaborative-review-system-design.md`
+- 核心实施计划：`docs/superpowers/plans/2026-08-26-collaborative-review-core.md`
+- Windows 本地同步后续计划：`docs/superpowers/plans/2026-08-26-local-training-sync.md`（尚未实现）
+- 生产部署与 YGF 路由后续计划：`docs/superpowers/plans/2026-08-26-production-deployment.md`（尚未执行）
+
+生产阶段还需单独完成 PostgreSQL、容器、备份、Caddy、`/project` 404、公开路由和回滚验收。本文不包含真实服务器、SSH、数据库、生产密码或密钥值。

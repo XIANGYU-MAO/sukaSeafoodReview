@@ -4,6 +4,24 @@ from functools import lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_network
 
 
+TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def parse_boolean_setting(name: str, value: str | None, *, default: bool) -> bool:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in TRUE_ENV_VALUES:
+        return True
+    if normalized in FALSE_ENV_VALUES:
+        return False
+    raise ValueError(
+        f"{name} must be one of: "
+        + ", ".join(sorted(TRUE_ENV_VALUES | FALSE_ENV_VALUES))
+    )
+
+
 def normalize_trusted_proxy_network(value: str) -> IPv4Network | IPv6Network:
     network = ip_network(value, strict=False)
     if isinstance(network, IPv6Network) and network.prefixlen >= 96:
@@ -31,6 +49,8 @@ class Settings:
     def __post_init__(self) -> None:
         if self.APP_ENV.lower() == "production" and self.DATABASE_URL.startswith("sqlite"):
             raise ValueError("SQLite is not supported in production")
+        if self.APP_ENV.lower() == "production" and not self.secure_cookie:
+            raise ValueError("SECURE_COOKIE must be true in production")
         for value in self.TRUSTED_PROXY_CIDRS:
             try:
                 network = normalize_trusted_proxy_network(value)
@@ -79,6 +99,9 @@ class Settings:
                 value.strip()
                 for value in os.getenv("TRUSTED_PROXY_CIDRS", "").split(",")
                 if value.strip()
+            ),
+            secure_cookie=parse_boolean_setting(
+                "SECURE_COOKIE", os.getenv("SECURE_COOKIE"), default=True
             ),
         )
 

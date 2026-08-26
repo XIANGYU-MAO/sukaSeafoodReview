@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.models import Decision
+from app.schemas.filters import MAX_FILTER_DATE
 from app.schemas.review import DecisionRequest, SpeciesSummary
 
 
@@ -14,7 +15,7 @@ class HistoryFilters(BaseModel):
     source_dataset: str | None = Field(default=None, min_length=1, max_length=128)
     decision: Decision | None = None
     date_from: date | None = None
-    date_to: date | None = None
+    date_to: date | None = Field(default=None, le=MAX_FILTER_DATE)
     limit: int = Field(default=50, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
     reviewer: str | None = None

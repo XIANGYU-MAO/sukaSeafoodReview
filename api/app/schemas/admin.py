@@ -19,6 +19,7 @@ from pydantic import (
 )
 
 from app.models import Decision
+from app.schemas.filters import MAX_FILTER_DATE
 from app.schemas.review import DecisionRequest
 from app.species_codes import require_safe_species_code
 
@@ -341,7 +342,7 @@ class AdminReviewFilters(BaseModel):
     decision: Decision | None = None
     current: bool | None = None
     date_from: date | None = None
-    date_to: date | None = None
+    date_to: date | None = Field(default=None, le=MAX_FILTER_DATE)
     limit: int = Field(default=50, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
 

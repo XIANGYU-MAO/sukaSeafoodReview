@@ -1,9 +1,9 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { authState, jsonResponse, renderWithStrictAuth } from "./test/helpers";
+import { authState, deferred, jsonResponse, renderWithStrictAuth } from "./test/helpers";
 import { historyFixture, progressFixture, reviewerId } from "./test/task11Fixtures";
 import { defaultAdminResponse, maoAuth } from "./test/task12Fixtures";
 
@@ -32,7 +32,9 @@ function pathOf(input: RequestInfo | URL): string {
 describe("production-shell integration", () => {
   it("logs in from a fresh 401, confirms KEEP in the database, refreshes progress, then opens private history", async () => {
     let accepted = false;
+    let currentCalls = 0;
     let progressCalls = 0;
+    const decisionReceipt = deferred<Response>();
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const path = pathOf(input);
@@ -47,6 +49,7 @@ describe("production-shell integration", () => {
         return Promise.resolve(jsonResponse(authState));
       }
       if (path.endsWith("/reviews/current")) {
+        currentCalls += 1;
         expect(init?.method).toBe("POST");
         expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-csrf-token");
         return Promise.resolve(accepted ? new Response(null, { status: 204 }) : jsonResponse(candidate));
@@ -63,19 +66,7 @@ describe("production-shell integration", () => {
         expect(new Headers(init?.headers).get("Idempotency-Key")).toMatch(
           /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
         );
-        accepted = true;
-        return Promise.resolve(jsonResponse({
-          id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-          candidate_id: candidate.id,
-          reviewer_id: reviewerId,
-          decision: "APPROVED",
-          rejection_reason: null,
-          notes: null,
-          whole_fish: "YES",
-          exact_species_verified: "YES",
-          is_current: true,
-          version: 1,
-        }, 201));
+        return decisionReceipt.promise;
       }
       if (path.endsWith("/history")) {
         const query = new URL(url, "https://review.test").searchParams;
@@ -101,7 +92,24 @@ describe("production-shell integration", () => {
     expect(screen.getByRole("radio", { name: "Wrong species" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel rejection" }));
     fireEvent.load(image);
+    const currentCallsBeforeSave = currentCalls;
     await user.click(screen.getByRole("button", { name: "Keep (K)" }));
+    expect(currentCalls).toBe(currentCallsBeforeSave);
+    expect(screen.getByRole("status")).toHaveTextContent("Saving");
+
+    accepted = true;
+    await act(async () => decisionReceipt.resolve(jsonResponse({
+          id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          candidate_id: candidate.id,
+          reviewer_id: reviewerId,
+          decision: "APPROVED",
+          rejection_reason: null,
+          notes: null,
+          whole_fish: "YES",
+          exact_species_verified: "YES",
+          is_current: true,
+          version: 1,
+        }, 201)));
 
     expect(await screen.findByRole("status")).toHaveTextContent("No images are waiting right now");
     await waitFor(() => expect(progressCalls).toBeGreaterThanOrEqual(2));

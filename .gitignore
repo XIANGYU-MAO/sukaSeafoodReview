@@ -3,5 +3,6 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+api/.env
 web/node_modules/
 web/dist/
