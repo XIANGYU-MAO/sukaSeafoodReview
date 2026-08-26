@@ -16,6 +16,7 @@ def settings(tmp_path) -> Settings:
         SESSION_HOURS=12,
         SESSION_SECRET="test-session-secret",
         CSRF_SECRET="test-csrf-secret",
+        RECEIPT_SECRET="test-receipt-secret-that-is-separate-and-long-enough",
         APP_ENV="test",
     )
 
