@@ -6,6 +6,8 @@ from io import BytesIO
 import os
 from pathlib import Path, PurePosixPath
 import re
+import socket
+import threading
 import traceback
 from unittest.mock import Mock
 from uuid import UUID
@@ -113,6 +115,13 @@ def assert_no_output(destination: Path) -> None:
     assert not part_for(destination).exists()
 
 
+def assert_bounded_wait(sleeper: Mock, total: float) -> None:
+    intervals = [call.args[0] for call in sleeper.call_args_list]
+    assert intervals
+    assert max(intervals) <= 0.05
+    assert sum(intervals) == pytest.approx(total)
+
+
 def assert_secret_free(error: BaseException) -> None:
     pending = [error]
     seen: set[int] = set()
@@ -156,7 +165,7 @@ def test_429_honors_retry_after_seconds(http, fake_sleep, valid_jpeg, tmp_path):
     )
 
     assert result.sha256
-    assert fake_sleep.call_args_list == [((3.0,), {})]
+    assert_bounded_wait(fake_sleep, 3.0)
 
 
 def test_retry_after_http_date_uses_bounded_delay(
@@ -172,7 +181,7 @@ def test_retry_after_http_date_uses_bounded_delay(
 
     download_image(session(), add_row(), tmp_path / "fish.jpg", policy(), noop, never_cancel)
 
-    assert fake_sleep.call_args_list == [((300.0,), {})]
+    assert_bounded_wait(fake_sleep, 300.0)
 
 
 def test_invalid_retry_after_falls_back_10_20_40_and_stops_after_four_attempts(
@@ -190,7 +199,7 @@ def test_invalid_retry_after_falls_back_10_20_40_and_stops_after_four_attempts(
         download_image(session(), add_row(), tmp_path / "fish.jpg", policy(), noop, never_cancel)
 
     assert len(http.calls) == 4
-    assert [call.args[0] for call in fake_sleep.call_args_list] == [10.0, 20.0, 40.0]
+    assert_bounded_wait(fake_sleep, 70.0)
     assert_no_output(tmp_path / "fish.jpg")
 
 
@@ -205,7 +214,7 @@ def test_retries_transport_failures(http, fake_sleep, valid_jpeg, tmp_path, fail
 
     assert result.byte_count == len(valid_jpeg)
     assert len(http.calls) == 2
-    fake_sleep.assert_called_once_with(10.0)
+    assert_bounded_wait(fake_sleep, 10.0)
 
 
 def test_404_fails_immediately_without_retry(http, fake_sleep, tmp_path):
@@ -264,6 +273,70 @@ def test_cancel_before_retry_does_not_sleep_or_request_again(http, fake_sleep, t
 
     assert len(http.calls) == 1
     fake_sleep.assert_not_called()
+
+
+def test_cancel_during_retry_backoff_is_polled_in_bounded_intervals(
+    http, tmp_path, monkeypatch
+):
+    http.add(responses.GET, IMAGE_URL, status=503)
+    cancelled = False
+    sleeps: list[float] = []
+
+    def bounded_sleep(delay: float) -> None:
+        nonlocal cancelled
+        sleeps.append(delay)
+        cancelled = True
+
+    monkeypatch.setattr("sukaseafood_sync.downloader.time.sleep", bounded_sleep)
+    with pytest.raises(DownloadCancelled, match="cancelled"):
+        download_image(
+            session(), add_row(), tmp_path / "fish.jpg", policy(), noop,
+            lambda: cancelled,
+        )
+
+    assert len(http.calls) == 1
+    assert sleeps and max(sleeps) <= 0.1
+
+
+def test_default_connect_and_read_timeouts_bound_stalled_responses():
+    connect_timeout, read_timeout = DownloadPolicy().timeout
+
+    assert connect_timeout <= 5.0
+    assert read_timeout <= 2.0
+
+
+def test_cancel_observed_when_stalled_body_times_out_is_not_reported_as_failure(
+    tmp_path, monkeypatch
+):
+    cancelled = threading.Event()
+
+    class StalledResponse:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def iter_content(self, *, chunk_size):
+            del chunk_size
+            cancelled.set()
+            raise requests.ReadTimeout("test-only stalled response")
+            yield b""  # pragma: no cover - makes this a generator
+
+        def close(self):
+            pass
+
+    client = session()
+    monkeypatch.setattr(client, "send", lambda *_args, **_kwargs: StalledResponse())
+
+    with pytest.raises(DownloadCancelled, match="cancelled"):
+        download_image(
+            client,
+            add_row(),
+            tmp_path / "fish.jpg",
+            policy(attempts=1, backoff_delays=()),
+            noop,
+            cancelled.is_set,
+        )
+
+    assert_no_output(tmp_path / "fish.jpg")
 
 
 def test_redirect_success_is_manual_and_preserves_safe_request_headers(
@@ -336,6 +409,49 @@ def test_rejects_unsafe_redirects_without_following(http, tmp_path, location):
 
     assert len(http.calls) == 1
     assert_secret_free(caught.value)
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://127.0.0.1/fish.jpg",
+        "https://[::1]/fish.jpg",
+        "https://localhost/fish.jpg",
+        "https://private.invalid/fish.jpg",
+    ],
+    ids=["ipv4-literal", "ipv6-literal", "localhost", "unapproved-host"],
+)
+def test_rejects_redirect_to_nonpublic_or_unapproved_origin_before_following(
+    http, tmp_path, location
+):
+    http.add(responses.GET, IMAGE_URL, status=302, headers={"Location": location})
+
+    with pytest.raises(DownloadError, match="redirect"):
+        download_image(
+            session(), add_row(), tmp_path / "fish.jpg", policy(), noop, never_cancel
+        )
+
+    assert len(http.calls) == 1
+
+
+def test_configured_proxy_and_dns_cannot_expand_the_approved_host_boundary(
+    http, valid_jpeg, tmp_path, monkeypatch
+):
+    http.add(responses.GET, IMAGE_URL, status=302, headers={"Location": REDIRECT_URL})
+    http.add(responses.GET, REDIRECT_URL, status=200, body=valid_jpeg)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.test:8080")
+
+    def unexpected_direct_dns(*_args, **_kwargs):
+        raise AssertionError("origin policy must not make a separate DNS decision")
+
+    monkeypatch.setattr(socket, "getaddrinfo", unexpected_direct_dns)
+
+    result = download_image(
+        session(), add_row(), tmp_path / "fish.jpg", policy(), noop, never_cancel
+    )
+
+    assert result.byte_count == len(valid_jpeg)
+    assert [call.request.url for call in http.calls] == [IMAGE_URL, REDIRECT_URL]
 
 
 def test_rejects_redirect_location_with_whitespace(http, tmp_path):
@@ -640,7 +756,7 @@ def test_network_failure_error_chain_does_not_expose_tokenized_url(
         download_image(session(), add_row(), tmp_path / "fish.jpg", policy(), noop, never_cancel)
 
     assert_secret_free(caught.value)
-    assert [call.args[0] for call in fake_sleep.call_args_list] == [10.0, 20.0, 40.0]
+    assert_bounded_wait(fake_sleep, 70.0)
 
 
 def test_http_failure_error_chain_does_not_expose_tokenized_url(http, tmp_path):

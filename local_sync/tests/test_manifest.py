@@ -449,6 +449,26 @@ def test_rejects_non_absolute_or_unsafe_https_urls(
         load_manifest(path)
 
 
+@pytest.mark.parametrize("field", ["preview_url", "original_url"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://127.0.0.1/fish.jpg",
+        "https://[::1]/fish.jpg",
+        "https://localhost/fish.jpg",
+        "https://private.invalid/fish.jpg",
+    ],
+    ids=["ipv4-literal", "ipv6-literal", "localhost", "unapproved-host"],
+)
+def test_image_fields_require_an_approved_public_origin(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    path = write_manifest(tmp_path, rows=[valid_row(**{field: value})])
+
+    with pytest.raises(ManifestError, match=field):
+        load_manifest(path)
+
+
 def test_invalid_url_port_has_no_raw_or_secret_bearing_exception_chain(
     tmp_path: Path,
 ) -> None:

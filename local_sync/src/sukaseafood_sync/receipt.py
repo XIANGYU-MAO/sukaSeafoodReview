@@ -569,18 +569,14 @@ def submit_receipt(
                 settings["stream"] = True
                 response = transport.send(
                     prepared_request,
-                    timeout=timeout,
+                    timeout=(min(float(timeout), 5.0), min(float(timeout), 2.0)),
                     allow_redirects=False,
                     **settings,
                 )
             except (requests.ConnectionError, requests.Timeout):
                 if attempts == 3:
                     return _safe_result("RETRY_EXHAUSTED", attempts, retryable=True)
-                sleep(float(attempts))
-                try:
-                    if cancelled():
-                        return _safe_result("CANCELLED", attempts)
-                except Exception:
+                if _cancel_aware_retry_wait(float(attempts), sleep, cancelled):
                     return _safe_result("CANCELLED", attempts)
                 continue
             except requests.RequestException:
@@ -648,17 +644,36 @@ def submit_receipt(
                 except Exception:
                     pass
             assert retry_delay is not None
-            sleep(retry_delay)
-            try:
-                if cancelled():
-                    return _safe_result("CANCELLED", attempts)
-            except Exception:
+            if _cancel_aware_retry_wait(retry_delay, sleep, cancelled):
                 return _safe_result("CANCELLED", attempts)
             continue
         return _safe_result("RETRY_EXHAUSTED", attempts, retryable=True)
     finally:
         if owned:
             transport.close()
+
+
+def _cancel_aware_retry_wait(
+    delay: float,
+    sleep: Callable[[float], None],
+    cancelled: Callable[[], bool],
+) -> bool:
+    """Poll receipt cancellation during Retry-After and fallback backoff."""
+
+    remaining = max(0.0, delay)
+    while remaining > 0:
+        try:
+            if cancelled():
+                return True
+        except Exception:
+            return True
+        interval = min(0.05, remaining)
+        sleep(interval)
+        remaining -= interval
+    try:
+        return bool(cancelled())
+    except Exception:
+        return True
 
 
 def _is_reparse(metadata: os.stat_result) -> bool:

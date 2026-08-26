@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path
 import stat
@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Callable, Literal, Protocol
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import requests
 
@@ -57,6 +58,102 @@ class SyncEngineError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+class StaleGenerationError(RuntimeError):
+    """A manifest row predates durable state for the same candidate."""
+
+
+def _regular_non_reparse(metadata: os.stat_result) -> bool:
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and not bool(attributes & reparse)
+    )
+
+
+def _isolated_download_destination(destination: Path) -> Path:
+    """Give concurrent runs distinct verified staging names in one safe parent."""
+
+    return destination.with_name(
+        f".{destination.name}.{uuid4().hex}.sync-download"
+    )
+
+
+def _expected_download_staging(download_destination: Path) -> Path:
+    return download_destination.with_name(download_destination.name + ".part")
+
+
+def _discard_isolated_staging(
+    downloaded: DownloadResult, download_destination: Path
+) -> None:
+    expected = _expected_download_staging(download_destination)
+    if downloaded.staging_path != expected:
+        raise OperationError("STAGING_FILE_UNSAFE")
+    try:
+        metadata = expected.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise OperationError("STAGING_FILE_UNSAFE") from None
+    if not _regular_non_reparse(metadata):
+        raise OperationError("STAGING_FILE_UNSAFE")
+    try:
+        expected.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise OperationError("FILESYSTEM_OPERATION_FAILED") from None
+
+
+def _promote_isolated_staging(
+    root: Path,
+    row: ManifestRow,
+    destination: Path,
+    download_destination: Path,
+    downloaded: DownloadResult,
+) -> DownloadResult:
+    """Atomically hand one private download to the existing intent/apply path."""
+
+    if _ensure_parents(root, row.target_relative_path) != destination:
+        raise OperationError("PATH_UNSAFE")
+    source = _expected_download_staging(download_destination)
+    if downloaded.staging_path != source:
+        raise OperationError("STAGING_FILE_UNSAFE")
+    try:
+        source_metadata = source.lstat()
+    except OSError:
+        raise OperationError("STAGING_FILE_UNSAFE") from None
+    if not _regular_non_reparse(source_metadata):
+        raise OperationError("STAGING_FILE_UNSAFE")
+
+    staging = destination.with_name(destination.name + ".part")
+    try:
+        existing = staging.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError:
+        raise OperationError("STAGING_FILE_UNSAFE") from None
+    if existing is not None:
+        if not _regular_non_reparse(existing):
+            raise OperationError("STAGING_FILE_UNSAFE")
+        try:
+            staging.unlink()
+        except OSError:
+            raise OperationError("FILESYSTEM_OPERATION_FAILED") from None
+    try:
+        os.replace(source, staging)
+        promoted = staging.lstat()
+    except OSError:
+        raise OperationError("FILESYSTEM_OPERATION_FAILED") from None
+    if (
+        not _regular_non_reparse(promoted)
+        or not os.path.samestat(source_metadata, promoted)
+    ):
+        raise OperationError("STAGING_FILE_UNSAFE")
+    return replace(downloaded, staging_path=staging)
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +440,21 @@ class SyncEngine:
         except Exception:
             pass
 
+    @staticmethod
+    def _require_current_generation(index: SyncIndex, row: ManifestRow) -> None:
+        latest = index.latest_for_candidate(row.candidate_id)
+        if latest is None:
+            return
+        same_operation = (
+            latest.review_version == row.review_version
+            and latest.review_id == row.review_id
+            and latest.action == row.action
+        )
+        if row.review_version < latest.review_version or (
+            row.review_version == latest.review_version and not same_operation
+        ):
+            raise StaleGenerationError
+
     def run(
         self,
         manifest: ExportManifest,
@@ -369,6 +481,11 @@ class SyncEngine:
             raise SyncEngineError(setup_code) from None
         assert index is not None
         assert logger is not None
+        from .canonical import (
+            CanonicalManifestError,
+            root_state_lock,
+            write_canonical_manifest_locked,
+        )
 
         owned_session = self._session is None
         session: requests.Session | None = self._session
@@ -408,11 +525,19 @@ class SyncEngine:
                             row=row,
                             phase="RECOVERING",
                         )
-                        operation_started = True
-                        result = recover_add(
-                            safe_root, row, index, operation_log=logger
-                        )
-                        operation_started = False
+                        with root_state_lock(safe_root):
+                            self._require_current_generation(index, row)
+                            operation_started = True
+                            result = recover_add(
+                                safe_root, row, index, operation_log=logger
+                            )
+                            operation_started = False
+                            if result is not None:
+                                write_canonical_manifest_locked(
+                                    safe_root,
+                                    manifest,
+                                    (self._receipt(row, result),),
+                                )
                         if result is None:
                             bucket, interval = _source_bucket(row)
                             previous = last_activity.get(bucket)
@@ -452,6 +577,9 @@ class SyncEngine:
                             destination = _ensure_parents(
                                 safe_root, row.target_relative_path
                             )
+                            download_destination = _isolated_download_destination(
+                                destination
+                            )
                             self._emit(
                                 callbacks,
                                 current=current,
@@ -477,35 +605,55 @@ class SyncEngine:
                                 downloaded = self._downloader(
                                     session,
                                     row,
-                                    destination,
+                                    download_destination,
                                     self._policy,
                                     download_progress,
                                     cancel_event.is_set,
                                 )
                             finally:
                                 last_activity[bucket] = self._monotonic()
-                            prepare_add_intent(safe_root, row, downloaded, index)
-                            if cancel_event.is_set():
-                                cancelled = True
+                            with root_state_lock(safe_root):
+                                try:
+                                    self._require_current_generation(index, row)
+                                except StaleGenerationError:
+                                    _discard_isolated_staging(
+                                        downloaded, download_destination
+                                    )
+                                    raise
+                                downloaded = _promote_isolated_staging(
+                                    safe_root,
+                                    row,
+                                    destination,
+                                    download_destination,
+                                    downloaded,
+                                )
+                                prepare_add_intent(safe_root, row, downloaded, index)
+                                if cancel_event.is_set():
+                                    cancelled = True
+                                    self._emit(
+                                        callbacks,
+                                        current=current,
+                                        total=total,
+                                        row=row,
+                                        phase="CANCELLED",
+                                    )
+                                    break
                                 self._emit(
                                     callbacks,
                                     current=current,
                                     total=total,
                                     row=row,
-                                    phase="CANCELLED",
+                                    phase="APPLYING",
                                 )
-                                break
-                            self._emit(
-                                callbacks,
-                                current=current,
-                                total=total,
-                                row=row,
-                                phase="APPLYING",
-                            )
-                            operation_started = True
-                            result = apply_add(
-                                safe_root, row, downloaded, index, logger=logger
-                            )
+                                operation_started = True
+                                result = apply_add(
+                                    safe_root, row, downloaded, index, logger=logger
+                                )
+                                write_canonical_manifest_locked(
+                                    safe_root,
+                                    manifest,
+                                    (self._receipt(row, result),),
+                                )
                     elif row.action == "MOVE":
                         self._emit(
                             callbacks,
@@ -514,8 +662,15 @@ class SyncEngine:
                             row=row,
                             phase="APPLYING",
                         )
-                        operation_started = True
-                        result = apply_move(safe_root, row, index, logger=logger)
+                        with root_state_lock(safe_root):
+                            self._require_current_generation(index, row)
+                            operation_started = True
+                            result = apply_move(safe_root, row, index, logger=logger)
+                            write_canonical_manifest_locked(
+                                safe_root,
+                                manifest,
+                                (self._receipt(row, result),),
+                            )
                     else:
                         self._emit(
                             callbacks,
@@ -524,8 +679,15 @@ class SyncEngine:
                             row=row,
                             phase="APPLYING",
                         )
-                        operation_started = True
-                        result = apply_remove(safe_root, row, index, logger=logger)
+                        with root_state_lock(safe_root):
+                            self._require_current_generation(index, row)
+                            operation_started = True
+                            result = apply_remove(safe_root, row, index, logger=logger)
+                            write_canonical_manifest_locked(
+                                safe_root,
+                                manifest,
+                                (self._receipt(row, result),),
+                            )
                 except DownloadCancelled:
                     cancelled = True
                     self._emit(
@@ -534,6 +696,10 @@ class SyncEngine:
                     break
                 except DownloadError as error:
                     failure_code = _download_failure_code(error)
+                except StaleGenerationError:
+                    failure_code = "STALE_GENERATION"
+                except CanonicalManifestError:
+                    raise SyncEngineError("CANONICAL_MANIFEST_ERROR") from None
                 except OperationError as error:
                     failure_code = _operation_failure_code(error)
                 except SyncIndexError:
@@ -578,12 +744,6 @@ class SyncEngine:
                     pass
 
         if not cancelled:
-            from .canonical import CanonicalManifestError, write_canonical_manifest
-
-            try:
-                write_canonical_manifest(safe_root, manifest, tuple(receipts))
-            except CanonicalManifestError:
-                raise SyncEngineError("CANONICAL_MANIFEST_ERROR") from None
             self._emit(
                 callbacks,
                 current=len(receipts),

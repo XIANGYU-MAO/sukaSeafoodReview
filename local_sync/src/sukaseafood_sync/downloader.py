@@ -17,6 +17,7 @@ from PIL import Image, ImageOps
 import requests
 
 from .manifest import ManifestRow
+from .image_origins import ImageOriginPolicyError, require_approved_image_url
 
 
 MIB = 1024 * 1024
@@ -24,6 +25,7 @@ _REPARSE_POINT = 0x400
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _FORMAT_SUFFIXES = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
+_WAIT_POLL_SECONDS = 0.05
 
 
 class DownloadError(RuntimeError):
@@ -47,7 +49,7 @@ class DownloadPolicy:
     chunk_size: int = 256 * 1024
     attempts: int = 4
     backoff_delays: tuple[float, ...] = (10.0, 20.0, 40.0)
-    timeout: tuple[float, float] = (10.0, 60.0)
+    timeout: tuple[float, float] = (5.0, 2.0)
     max_redirects: int = 5
     max_retry_after: float = 300.0
 
@@ -81,6 +83,18 @@ class DownloadResult:
 
 Progress = Callable[[int, int | None], None]
 Cancel = Callable[[], bool]
+
+
+def _cancel_aware_wait(delay: float, cancel: Cancel) -> None:
+    remaining = max(0.0, delay)
+    while remaining > 0:
+        if cancel():
+            raise DownloadCancelled("download cancelled")
+        interval = min(_WAIT_POLL_SECONDS, remaining)
+        time.sleep(interval)
+        remaining -= interval
+    if cancel():
+        raise DownloadCancelled("download cancelled")
 
 
 def _is_reparse(metadata: os.stat_result) -> bool:
@@ -149,21 +163,10 @@ def _prepare_paths(destination: Path) -> Path:
 
 
 def _validated_https_url(candidate: str) -> str | None:
-    if any(character.isspace() for character in candidate):
-        return None
     try:
-        parsed = urlsplit(candidate)
-        _ = parsed.port
-    except (TypeError, ValueError):
+        return require_approved_image_url(candidate)
+    except ImageOriginPolicyError:
         return None
-    if (
-        parsed.scheme.lower() != "https"
-        or parsed.hostname is None
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
-        return None
-    return candidate
 
 
 def _request(
@@ -178,6 +181,9 @@ def _request(
     while True:
         if cancel():
             raise DownloadCancelled("download cancelled")
+        current = _validated_https_url(current)
+        if current is None:
+            raise DownloadError("image origin rejected", code="NETWORK_ERROR")
         if current in visited:
             raise DownloadError("redirect loop rejected", code="NETWORK_ERROR")
         visited.add(current)
@@ -467,6 +473,11 @@ def download_image(
             if response is not None:
                 response.close()
 
+        # A read timeout is the only opportunity to observe cancellation while
+        # requests is blocked inside a response-body read.  Prefer the user's
+        # cancellation over inventing a terminal network failure or retry.
+        if cancel():
+            raise DownloadCancelled("download cancelled")
         if attempt + 1 >= policy.attempts:
             if transport_failed:
                 raise DownloadError(
@@ -476,13 +487,11 @@ def download_image(
                 "image request failed after retriable HTTP statuses",
                 code="NETWORK_ERROR",
             )
-        if cancel():
-            raise DownloadCancelled("download cancelled")
         delay = (
             retry_delay
             if retry_delay is not None
             else policy.backoff_delays[attempt]
         )
-        time.sleep(delay)
+        _cancel_aware_wait(delay, cancel)
 
     raise DownloadError("image download failed", code="NETWORK_ERROR")

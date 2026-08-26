@@ -899,6 +899,23 @@ class SyncIndex:
                         )
                     connection.commit()
                     return existing
+                newest = connection.execute(
+                    "SELECT review_id, review_version, action FROM synced_items "
+                    "WHERE candidate_id = ? "
+                    "ORDER BY review_version DESC, rowid DESC LIMIT 1",
+                    (str(desired.candidate_id),),
+                ).fetchone()
+                if newest is not None and (
+                    desired.review_version < int(newest["review_version"])
+                    or (
+                        desired.review_version == int(newest["review_version"])
+                        and (
+                            str(desired.review_id) != newest["review_id"]
+                            or desired.action != newest["action"]
+                        )
+                    )
+                ):
+                    raise IndexConflict("candidate generation is stale or conflicting")
                 connection.execute(
                     "INSERT INTO synced_items ("
                     "candidate_id, review_id, review_version, action, batch_id, "
@@ -932,10 +949,21 @@ class SyncIndex:
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM synced_items WHERE candidate_id = ? "
-                "ORDER BY completed_at DESC, rowid DESC LIMIT 1",
+                "ORDER BY review_version DESC, completed_at DESC, rowid DESC LIMIT 1",
                 (candidate,),
             ).fetchone()
         return self._from_row(row) if row is not None else None
+
+    def max_generation(self, candidate_id: UUID | str) -> int | None:
+        """Return the highest durable server generation for one candidate."""
+
+        candidate = str(_uuid(candidate_id, "candidate_id"))
+        with self.connect() as connection:
+            value = connection.execute(
+                "SELECT MAX(review_version) FROM synced_items WHERE candidate_id = ?",
+                (candidate,),
+            ).fetchone()[0]
+        return int(value) if value is not None else None
 
     def find_present_by_sha256(self, sha256: str) -> SyncRecord | None:
         digest = _hash(sha256, "sha256", _HEX_64)
@@ -947,8 +975,10 @@ class SyncIndex:
                 "AND current.rowid = ("
                 "  SELECT newest.rowid FROM synced_items AS newest "
                 "  WHERE newest.candidate_id = current.candidate_id "
-                "  ORDER BY newest.completed_at DESC, newest.rowid DESC LIMIT 1"
-                ") ORDER BY current.completed_at DESC, current.rowid DESC LIMIT 1",
+                "  ORDER BY newest.review_version DESC, newest.completed_at DESC, "
+                "newest.rowid DESC LIMIT 1"
+                ") ORDER BY current.review_version DESC, current.completed_at DESC, "
+                "current.rowid DESC LIMIT 1",
                 (digest,),
             ).fetchone()
         return self._from_row(row) if row is not None else None

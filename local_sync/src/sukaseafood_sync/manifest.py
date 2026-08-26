@@ -12,6 +12,8 @@ import unicodedata
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from .image_origins import ImageOriginPolicyError, require_approved_image_url
+
 
 EXPORT_COLUMNS = (
     "batch_id",
@@ -182,6 +184,15 @@ def _https_url(value: str, field_name: str, *, required: bool = True) -> str | N
     return checked
 
 
+def _image_url(value: str, field_name: str) -> str:
+    checked = _https_url(value, field_name)
+    assert checked is not None
+    try:
+        return require_approved_image_url(checked)
+    except ImageOriginPolicyError as exc:
+        raise _error(field_name, str(exc)) from exc
+
+
 def _is_windows_reserved_component(component: str) -> bool:
     device_stem = component.partition(".")[0].rstrip(" .").upper()
     return device_stem in _WINDOWS_RESERVED
@@ -329,8 +340,8 @@ def _parse_row(raw: dict[str, str], row_number: int) -> tuple[ManifestRow, str]:
             if previous_raw
             else None
         ),
-        preview_url=_https_url(raw["preview_url"], "preview_url") or "",
-        original_url=_https_url(raw["original_url"], "original_url") or "",
+        preview_url=_image_url(raw["preview_url"], "preview_url"),
+        original_url=_image_url(raw["original_url"], "original_url"),
         source_url=_https_url(raw["source_url"], "source_url") or "",
         creator=_bounded_text(
             raw["creator"], "creator", required=False, allow_newlines=True

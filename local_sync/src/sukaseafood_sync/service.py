@@ -78,8 +78,11 @@ def _cancel_aware_wait(cancel_event: object, delay: float) -> None:
         except Exception:
             return
     import time
-
-    time.sleep(delay)
+    remaining = max(0.0, delay)
+    while remaining > 0 and not _is_cancelled(cancel_event):
+        interval = min(0.05, remaining)
+        time.sleep(interval)
+        remaining -= interval
 
 
 def _configure_session(session: requests.Session, request: SyncRequest) -> None:

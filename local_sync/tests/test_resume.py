@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import csv
 import threading
 from uuid import UUID
 
@@ -40,6 +41,13 @@ def test_cancelled_batch_keeps_first_durable_item_and_rerun_skips_its_network(
     index = SyncIndex(sync_root)
     assert index.get_completed(first.candidate_id, first.review_id, 2, "ADD") is not None
     assert index.get_completed(second.candidate_id, second.review_id, 2, "ADD") is None
+    with (sync_root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        canonical_rows = list(csv.DictReader(stream))
+    assert [item["candidate_id"] for item in canonical_rows] == [
+        str(first.candidate_id)
+    ]
 
     second_run_calls: list[UUID] = []
     monkeypatch.setattr(

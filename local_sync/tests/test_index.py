@@ -730,6 +730,27 @@ def test_records_and_checks_exact_four_part_completion_key(sync_root: Path) -> N
     assert not index.is_completed(CANDIDATE_ID, REVIEW_ID, 1, "MOVE")
 
 
+def test_record_success_rejects_older_or_conflicting_candidate_generation(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    newest = replace(
+        result(),
+        review_version=3,
+        review_id=UUID("44444444-4444-4444-8444-444444444444"),
+        batch_id=UUID("55555555-5555-4555-8555-555555555555"),
+    )
+    stored = index.record_success(newest)
+
+    with pytest.raises(IndexConflict, match="generation"):
+        index.record_success(result())
+    with pytest.raises(IndexConflict, match="generation"):
+        index.record_success(replace(newest, action="REMOVE"))
+
+    assert index.latest_for_candidate(CANDIDATE_ID) == stored
+    assert index.max_generation(CANDIDATE_ID) == 3
+
+
 def test_exact_key_lookup_returns_record_or_none(sync_root: Path) -> None:
     index = SyncIndex(sync_root)
     stored = index.record_success(result())

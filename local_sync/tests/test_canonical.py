@@ -5,6 +5,7 @@ import csv
 import io
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import subprocess
 import sys
 from uuid import UUID
@@ -16,7 +17,8 @@ from sukaseafood_sync.canonical import (
     CanonicalManifestError,
     write_canonical_manifest,
 )
-from sukaseafood_sync.manifest import ExportManifest
+from sukaseafood_sync.engine import ReceiptItem
+from sukaseafood_sync.manifest import ExportManifest, ManifestRow
 
 
 COLUMNS = (
@@ -140,6 +142,62 @@ def test_existing_canonical_row_preserves_server_suffix_spelling(
     empty = ExportManifest(rows=(), batch_id=BATCH_ID, receipt_token=RECEIPT_TOKEN)
 
     write_canonical_manifest(root, empty, ())
+
+    assert target.read_bytes() == original
+
+
+@pytest.mark.parametrize("action", ["ADD", "REMOVE"])
+def test_older_direct_merge_cannot_replace_or_remove_newer_canonical_state(
+    tmp_path: Path, action: str
+) -> None:
+    root = tmp_path / action
+    root.mkdir()
+    current = _valid_row()
+    current["review_version"] = "3"
+    target = root / "canonical_manifest.csv"
+    original = _encoded(COLUMNS, [current])
+    target.write_bytes(original)
+    candidate_id = UUID(CANDIDATE_ID)
+    review_id = UUID(REVIEW_ID)
+    relative = (
+        PurePosixPath(f"_removed/{BATCH_ID}/{candidate_id}.jpg")
+        if action == "REMOVE"
+        else PurePosixPath(f"images/OLDER/{candidate_id}.jpg")
+    )
+    row = ManifestRow(
+        batch_id=BATCH_ID,
+        action=action,  # type: ignore[arg-type]
+        candidate_id=candidate_id,
+        review_id=review_id,
+        review_version=1,
+        species_code="OLDER",
+        target_relative_path=relative,
+        previous_relative_path=(
+            PurePosixPath(current["relative_path"]) if action == "REMOVE" else None
+        ),
+        preview_url="https://images.example.test/preview.jpg",
+        original_url="https://images.example.test/original.jpg",
+        source_url="https://catalog.example.test/record/1",
+        creator="Researcher",
+        license="CC BY 4.0",
+        license_url="https://creativecommons.org/licenses/by/4.0/",
+        attribution="Researcher / Catalog",
+    )
+    receipt = ReceiptItem(
+        CANDIDATE_ID,
+        REVIEW_ID,
+        1,
+        "SUCCEEDED",
+        "b" * 64,
+        relative.as_posix(),
+        None,
+    )
+
+    write_canonical_manifest(
+        root,
+        ExportManifest((row,), BATCH_ID, RECEIPT_TOKEN),
+        (receipt,),
+    )
 
     assert target.read_bytes() == original
 

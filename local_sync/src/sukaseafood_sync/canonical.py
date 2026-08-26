@@ -125,6 +125,7 @@ def _canonical_lock(root: Path) -> Iterator[None]:
     except OSError:
         raise CanonicalManifestError("CANONICAL_LOCK_UNSAFE") from None
     acquired = False
+    body_active = False
     try:
         opened = os.fstat(descriptor)
         current = lock_path.lstat()
@@ -148,10 +149,14 @@ def _canonical_lock(root: Path) -> Iterator[None]:
         current = lock_path.lstat()
         if not _is_regular(current) or not os.path.samestat(opened, current):
             raise CanonicalManifestError("CANONICAL_LOCK_UNSAFE")
+        body_active = True
         yield
+        body_active = False
     except CanonicalManifestError:
         raise
     except (OSError, RuntimeError, ValueError):
+        if body_active:
+            raise
         raise CanonicalManifestError("CANONICAL_LOCK_FAILED") from None
     finally:
         if acquired:
@@ -255,13 +260,21 @@ def _write_canonical_manifest_locked(
         row = manifest_rows.get(item.candidate_id)
         if row is None or item.status != "SUCCEEDED":
             continue
+        existing = rows.get(item.candidate_id)
+        existing_version = (
+            int(existing["review_version"]) if existing is not None else None
+        )
+        if existing_version is not None and item.review_version < existing_version:
+            continue
         if row.action == "REMOVE":
+            if existing_version == item.review_version:
+                raise CanonicalManifestError("CANONICAL_GENERATION_CONFLICT")
             rows.pop(item.candidate_id, None)
             continue
         if item.relative_path is None or item.sha256 is None:
             raise CanonicalManifestError("CANONICAL_ITEM_INVALID")
         relative = validate_relative_path(item.relative_path, "relative_path")
-        rows[item.candidate_id] = {
+        replacement = {
             "candidate_id": item.candidate_id,
             "review_id": item.review_id,
             "review_version": str(item.review_version),
@@ -274,6 +287,12 @@ def _write_canonical_manifest_locked(
             "license_url": row.license_url or "",
             "attribution": row.attribution,
         }
+        replacement = _validate_canonical_row(replacement)
+        if existing_version == item.review_version:
+            if replacement != existing:
+                raise CanonicalManifestError("CANONICAL_GENERATION_CONFLICT")
+            continue
+        rows[item.candidate_id] = replacement
 
     payload = _encode(rows)
     descriptor = -1
@@ -315,6 +334,29 @@ def _write_canonical_manifest_locked(
     return target
 
 
+@contextmanager
+def root_state_lock(root: Path) -> Iterator[Path]:
+    """Serialize filesystem, index, and canonical state for one training root.
+
+    Callers must acquire this root lock before opening a mutating SQLite
+    transaction.  No code may wait for this lock while holding SQLite state.
+    """
+
+    safe_root = _validated_root(root)
+    with _canonical_lock(safe_root):
+        yield safe_root
+
+
+def write_canonical_manifest_locked(
+    root: Path,
+    manifest: ExportManifest,
+    receipt_items: tuple[ReceiptItem, ...],
+) -> Path:
+    """Merge outcomes while the caller holds ``root_state_lock``."""
+
+    return _write_canonical_manifest_locked(root, manifest, receipt_items)
+
+
 def write_canonical_manifest(
     root: Path,
     manifest: ExportManifest,
@@ -322,6 +364,5 @@ def write_canonical_manifest(
 ) -> Path:
     """Serialize and atomically merge successful outcomes for one training root."""
 
-    safe_root = _validated_root(root)
-    with _canonical_lock(safe_root):
-        return _write_canonical_manifest_locked(safe_root, manifest, receipt_items)
+    with root_state_lock(root) as safe_root:
+        return write_canonical_manifest_locked(safe_root, manifest, receipt_items)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import fields, replace
 import hashlib
 from io import BytesIO
@@ -8,6 +9,7 @@ from pathlib import Path, PurePosixPath
 import queue
 import sys
 import threading
+import time
 from uuid import UUID
 
 import imagehash
@@ -201,6 +203,187 @@ def test_engine_processes_mixed_batch_and_keeps_failure_pending(
     assert {entry["candidate_id"] for entry in log_entries} == {
         str(item.candidate_id) for item in (add, move, remove, failed, skipped)
     }
+
+
+def test_candidate_generation_is_monotonic_across_add_remove_add_and_old_replay(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_root.mkdir()
+    generation_1 = replace(row(6), review_version=1)
+    generation_2 = replace(
+        row(6, "REMOVE"),
+        review_version=2,
+        previous_relative_path=generation_1.target_relative_path,
+    )
+    generation_3 = replace(row(6), review_version=3)
+    old_move = replace(
+        row(6, "MOVE", species_code="OLDER_SPECIES"),
+        review_version=2,
+        previous_relative_path=generation_1.target_relative_path,
+    )
+    calls: list[UUID] = []
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image", fake_download(sync_root, calls)
+    )
+    engine = SyncEngine(session=Session())
+
+    first = engine.run(
+        manifest(generation_1), sync_root, SyncCallbacks(), threading.Event()
+    )
+    second = engine.run(
+        manifest(generation_2), sync_root, SyncCallbacks(), threading.Event()
+    )
+    third = engine.run(
+        manifest(generation_3), sync_root, SyncCallbacks(), threading.Event()
+    )
+    canonical_before_replay = (sync_root / "canonical_manifest.csv").read_bytes()
+    replay_add = engine.run(
+        manifest(generation_1), sync_root, SyncCallbacks(), threading.Event()
+    )
+    replay_remove = engine.run(
+        manifest(generation_2), sync_root, SyncCallbacks(), threading.Event()
+    )
+    replay_move = engine.run(
+        manifest(old_move), sync_root, SyncCallbacks(), threading.Event()
+    )
+    exact = engine.run(
+        manifest(generation_3), sync_root, SyncCallbacks(), threading.Event()
+    )
+
+    assert first.counts["succeeded"] == second.counts["succeeded"] == third.counts["succeeded"] == 1
+    assert replay_add.receipt_items[0].status == "FAILED"
+    assert replay_add.receipt_items[0].error == "STALE_GENERATION"
+    assert replay_remove.receipt_items[0].status == "FAILED"
+    assert replay_remove.receipt_items[0].error == "STALE_GENERATION"
+    assert replay_move.receipt_items[0].status == "FAILED"
+    assert replay_move.receipt_items[0].error == "STALE_GENERATION"
+    assert exact.counts == {"succeeded": 0, "failed": 0, "skipped": 1}
+    assert calls == [generation_1.candidate_id, generation_3.candidate_id]
+    assert (sync_root / "canonical_manifest.csv").read_bytes() == canonical_before_replay
+    assert SyncIndex(sync_root).latest_for_candidate(generation_3.candidate_id).review_version == 3
+
+
+def test_concurrent_old_and_new_replay_cannot_invert_candidate_state(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_root.mkdir()
+    older = replace(row(7, species_code="OLDER_SPECIES"), review_version=1)
+    newest = replace(
+        row(7, species_code="NEWER_SPECIES"),
+        review_version=3,
+        previous_relative_path=older.target_relative_path,
+    )
+    both_downloaded = threading.Barrier(2)
+
+    def concurrent_download(session, manifest_row, destination, policy, progress, cancel):
+        del session, policy, cancel
+        staging = Path(destination).with_name(Path(destination).name + ".part")
+        staging.write_bytes(JPEG)
+        progress(len(JPEG), len(JPEG))
+        both_downloaded.wait(timeout=5)
+        if manifest_row.review_version == older.review_version:
+            # Force the newer generation to durably apply before the older
+            # downloader returns and enters the root-state critical section.
+            time.sleep(0.1)
+        return DownloadResult(
+            staging, SHA256, PHASH, len(JPEG), "JPEG", ".jpg", 11, 7
+        )
+
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image", concurrent_download
+    )
+    outcomes: list[BatchResult] = []
+    failures: list[BaseException] = []
+
+    def run(item: ManifestRow) -> None:
+        try:
+            outcomes.append(
+                SyncEngine(session=Session()).run(
+                    manifest(item),
+                    sync_root,
+                    SyncCallbacks(),
+                    threading.Event(),
+                )
+            )
+        except BaseException as exc:  # surfaced below with both worker states
+            failures.append(exc)
+
+    workers = [
+        threading.Thread(target=run, args=(item,)) for item in (older, newest)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert failures == []
+    assert len(outcomes) == 2
+    latest = SyncIndex(sync_root).latest_for_candidate(newest.candidate_id)
+    assert latest is not None and latest.review_version == 3
+    with (sync_root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        canonical = list(csv.DictReader(stream))
+    assert len(canonical) == 1
+    assert canonical[0]["candidate_id"] == str(newest.candidate_id)
+    assert canonical[0]["review_version"] == "3"
+    assert local(sync_root, newest.target_relative_path).read_bytes() == JPEG
+    assert not local(sync_root, older.target_relative_path).exists()
+    assert not list(sync_root.rglob("*.part"))
+
+
+def test_concurrent_same_target_generations_download_to_isolated_staging_paths(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_root.mkdir()
+    older = replace(row(8), review_version=1)
+    newest = replace(row(8), review_version=3)
+    both_downloaded = threading.Barrier(2)
+    destinations: list[Path] = []
+
+    def concurrent_download(session, manifest_row, destination, policy, progress, cancel):
+        del session, policy, cancel
+        destination = Path(destination)
+        destinations.append(destination)
+        staging = destination.with_name(destination.name + ".part")
+        staging.write_bytes(JPEG)
+        progress(len(JPEG), len(JPEG))
+        both_downloaded.wait(timeout=5)
+        if manifest_row.review_version == older.review_version:
+            time.sleep(0.1)
+        return DownloadResult(
+            staging, SHA256, PHASH, len(JPEG), "JPEG", ".jpg", 11, 7
+        )
+
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image", concurrent_download
+    )
+    outcomes: list[BatchResult] = []
+
+    def run(item: ManifestRow) -> None:
+        outcomes.append(
+            SyncEngine(session=Session()).run(
+                manifest(item), sync_root, SyncCallbacks(), threading.Event()
+            )
+        )
+
+    workers = [
+        threading.Thread(target=run, args=(item,)) for item in (older, newest)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert len(outcomes) == 2
+    assert len(destinations) == len(set(destinations)) == 2
+    latest = SyncIndex(sync_root).latest_for_candidate(newest.candidate_id)
+    assert latest is not None and latest.review_version == 3
+    assert local(sync_root, newest.target_relative_path).read_bytes() == JPEG
+    assert not list(sync_root.rglob("*.part"))
+    assert not list(sync_root.rglob("*.sync-download"))
 
 
 def test_receipt_contract_and_progress_are_stable_and_secret_free(

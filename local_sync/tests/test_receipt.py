@@ -675,7 +675,7 @@ def test_submit_posts_exact_url_and_bare_headers(
     assert "X-Origin-Session" not in request.headers
     assert not request.url.endswith(RECEIPT_TOKEN)
     assert kwargs["allow_redirects"] is False
-    assert kwargs["timeout"] == 5
+    assert kwargs["timeout"] == (5.0, 2.0)
     assert kwargs["proxies"].get("https") == "http://proxy.example.test:8080"
     assert "verify" in kwargs
     assert session.trust_env is True
@@ -709,7 +709,8 @@ def test_connection_timeout_429_and_retryable_5xx_stop_after_three_attempts() ->
     assert result.code == "RETRY_EXHAUSTED"
     assert result.retryable
     assert result.attempts == 3
-    assert sleeps == [1.0, 7.0]
+    assert sleeps and max(sleeps) <= 0.05
+    assert sum(sleeps) == pytest.approx(8.0)
     assert second.closed and third.closed
     assert "DNS details secret" not in repr(result)
 
@@ -730,12 +731,14 @@ def test_timeout_uses_fallback_delay_then_succeeds() -> None:
     )
     assert result.submitted
     assert result.attempts == 2
-    assert sleeps == [1.0]
+    assert sleeps and max(sleeps) <= 0.05
+    assert sum(sleeps) == pytest.approx(1.0)
     assert "timeout details secret" not in repr(result)
 
 
 def test_cancel_during_retry_wait_stops_before_another_submission_attempt() -> None:
     cancel_event = Event()
+    waits: list[float] = []
     session = FakeSession(
         [
             requests.ConnectionError("private network detail"),
@@ -743,7 +746,8 @@ def test_cancel_during_retry_wait_stops_before_another_submission_attempt() -> N
         ]
     )
 
-    def cancel_wait(_delay: float) -> None:
+    def cancel_wait(delay: float) -> None:
+        waits.append(delay)
         cancel_event.set()
 
     result = submit_receipt(
@@ -759,6 +763,7 @@ def test_cancel_during_retry_wait_stops_before_another_submission_attempt() -> N
     assert result.code == "CANCELLED"
     assert result.attempts == 1
     assert len(session.sent) == 1
+    assert waits and max(waits) <= 0.05
     assert "private network detail" not in repr(result)
 
 
@@ -780,7 +785,8 @@ def test_retry_after_http_date_is_capped_at_sixty_seconds() -> None:
         now=lambda: now,
     )
     assert result.submitted
-    assert sleeps == [60.0]
+    assert sleeps and max(sleeps) <= 0.05
+    assert sum(sleeps) == pytest.approx(60.0)
 
 
 @pytest.mark.parametrize(
