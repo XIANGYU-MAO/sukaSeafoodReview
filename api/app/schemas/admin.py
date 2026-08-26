@@ -19,6 +19,7 @@ from pydantic import (
 )
 
 from app.models import Decision
+from app.image_origins import ImageOriginError, require_public_image_url
 from app.schemas.filters import MAX_FILTER_DATE
 from app.schemas.review import DecisionRequest
 from app.species_codes import require_safe_species_code
@@ -247,7 +248,19 @@ class CandidatePatchRequest(BaseModel):
     new_reviewer_id: UUID | None = None
     reason: TrimmedReason
 
-    @field_validator("preview_url", "original_url", "source_url", "license_url")
+    @field_validator("preview_url", "original_url")
+    @classmethod
+    def public_image_urls(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = _validate_https(value)
+        assert normalized is not None
+        try:
+            return require_public_image_url(normalized)
+        except ImageOriginError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator("source_url", "license_url")
     @classmethod
     def https_urls(cls, value: str | None) -> str | None:
         return _validate_https(value)

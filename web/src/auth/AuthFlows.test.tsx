@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -68,6 +68,22 @@ describe("authenticated password and logout flows", () => {
     await user.click(screen.getByRole("button", { name: "修改密码" }));
     expect(screen.getByRole("alert")).toHaveTextContent("两次输入的新密码不一致");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByLabelText("新密码"), { target: { value: "x".repeat(129) } });
+    fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: "x".repeat(129) } });
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("新密码不能超过 128 个字符");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const unicodePassword = "🐟".repeat(65);
+    fireEvent.change(screen.getByLabelText("新密码"), { target: { value: unicodePassword } });
+    fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: unicodePassword } });
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls[1]?.[1]?.body).toBe(JSON.stringify({
+      current_password: "current",
+      new_password: unicodePassword,
+    }));
   });
 
   it("offers the same password flow voluntarily from the protected shell", async () => {

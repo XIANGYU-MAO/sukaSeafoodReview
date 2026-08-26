@@ -94,6 +94,7 @@ async def post_export(
             auth.user.id,
             payload.species_code,
             _receipt_secret(settings),
+            image_origin_allowlist=settings.IMAGE_ORIGIN_ALLOWLIST,
         )
     except (ExportNotFound, ExportConflict) as exc:
         _raise_export_error(exc)
@@ -124,14 +125,21 @@ async def get_export_csv(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     try:
-        content = await render_batch_csv(db, batch_id, _receipt_secret(settings))
+        content = await render_batch_csv(
+            db,
+            batch_id,
+            _receipt_secret(settings),
+            image_origin_allowlist=settings.IMAGE_ORIGIN_ALLOWLIST,
+        )
     except (ExportNotFound, ReceiptRejected) as exc:
         _raise_export_error(exc)
     return Response(
         content=content,
         media_type="text/csv; charset=utf-8",
         headers={
-            "Content-Disposition": f'attachment; filename="sukaseafood-export-{batch_id}.csv"'
+            "Content-Disposition": f'attachment; filename="sukaseafood-export-{batch_id}.csv"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
         },
     )
 

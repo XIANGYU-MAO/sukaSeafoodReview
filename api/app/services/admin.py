@@ -19,6 +19,11 @@ from app.models import (
     Species,
     User,
 )
+from app.image_origins import (
+    DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
+    ImageOriginError,
+    require_approved_image_url,
+)
 from app.schemas.admin import (
     AdminCandidateSummary,
     AdminReviewFilters,
@@ -395,9 +400,24 @@ async def patch_species(
             if has_open:
                 raise AdminConflict("SPECIES_HAS_OPEN_CANDIDATE")
         before = species_snapshot(species)
+        active_changed = (
+            "active" in payload.model_fields_set
+            and payload.active != species.active
+        )
         for field in ("name_zh", "name_en", "scientific_name", "active", "sort_order"):
             if field in payload.model_fields_set:
                 setattr(species, field, getattr(payload, field))
+        if active_changed:
+            # Species availability changes desired local presence for every
+            # candidate in the species. Advance their wire generations in the
+            # same transaction so REMOVE/ADD transitions cannot collide with
+            # an earlier successful operation at the same generation.
+            await session.execute(
+                update(Candidate)
+                .where(Candidate.species_id == species.id)
+                .values(version=Candidate.version + 1)
+                .execution_options(synchronize_session=False)
+            )
         after = species_snapshot(species)
         await audited_change(
             session,
@@ -540,8 +560,18 @@ async def patch_candidate(
     actor_id: UUID,
     candidate_id: UUID,
     payload: CandidatePatchRequest,
+    *,
+    image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
 ) -> CandidateAdminResponse:
     try:
+        try:
+            for field_name in ("preview_url", "original_url"):
+                if field_name in payload.model_fields_set:
+                    value = getattr(payload, field_name)
+                    if value is not None:
+                        require_approved_image_url(value, image_origin_allowlist)
+        except ImageOriginError as exc:
+            raise AdminConflict("IMAGE_ORIGIN_NOT_ALLOWED") from exc
         target = await _lock_target(session, payload.new_reviewer_id)
         candidate = await session.scalar(
             select(Candidate)
@@ -772,6 +802,19 @@ async def edit_admin_review(
     payload: AdminReviewPatchRequest,
 ) -> ReviewResponse:
     try:
+        candidate_id = await session.scalar(
+            select(Review.candidate_id).where(Review.id == review_id)
+        )
+        if candidate_id is None:
+            raise AdminObjectNotFound
+        candidate = await session.scalar(
+            select(Candidate)
+            .where(Candidate.id == candidate_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if candidate is None:
+            raise AdminObjectNotFound
         review = await session.scalar(
             select(Review)
             .where(Review.id == review_id)
@@ -799,6 +842,7 @@ async def edit_admin_review(
         review.whole_fish = whole_fish
         review.exact_species_verified = exact_species
         review.version += 1
+        candidate.version += 1
         after = review_snapshot(review)
         session.add(
             ReviewRevision(

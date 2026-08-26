@@ -32,13 +32,6 @@ class ExportBatch(Base):
             "status IN ('pending', 'completed', 'expired')",
             name="ck_export_batches_status",
         ),
-        Index(
-            "uq_export_batches_pending_scope",
-            "scope_key",
-            unique=True,
-            sqlite_where=text("status = 'pending'"),
-            postgresql_where=text("status = 'pending'"),
-        ),
         Index("ix_export_batches_status_expires", "status", "expires_at"),
     )
 

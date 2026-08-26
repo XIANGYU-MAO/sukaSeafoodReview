@@ -5,6 +5,9 @@ import { API_BASE } from "../api/client";
 import { PageControls, QueryBoundary, adminMutation, mutationMessage, useAdminQuery, type AdminTabProps } from "./common";
 import { parseExportBatches, parseExportConflict, parseExportCreate, parsePendingCounts, parseReceiptFile, parseReceiptResponse, type ExportBatch } from "./types";
 
+export const MAX_RECEIPT_FILE_BYTES = 20 * 1024 * 1024;
+export const receiptFileSizeAllowed = (size: number) => size <= MAX_RECEIPT_FILE_BYTES;
+
 export function ExportsTab(props: AdminTabProps) {
   const parseCounts = useCallback((value: unknown) => parsePendingCounts(value, props.species), [props.species]);
   const counts = useAdminQuery(props.species.length ? "/admin/exports/pending-counts" : null, parseCounts, props.retryBootstrap);
@@ -19,7 +22,7 @@ export function ExportsTab(props: AdminTabProps) {
     finally { setPending(false); }
   }
   async function receiptFile(batch: ExportBatch, file: File | null) {
-    if (!file || pending) return; setNotice(null); if (!file.name.toLowerCase().endsWith(".json")) { setNotice({ kind: "error", text: "只接受 .json 回执文件。" }); return; } if (file.size > 128 * 1024) { setNotice({ kind: "error", text: "回执文件超过 128 KiB。" }); return; }
+    if (!file || pending) return; setNotice(null); if (!file.name.toLowerCase().endsWith(".json")) { setNotice({ kind: "error", text: "只接受 .json 回执文件。" }); return; } if (!receiptFileSizeAllowed(file.size)) { setNotice({ kind: "error", text: "回执文件超过 20 MiB。" }); return; }
     setPending(true);
     try {
       const parsedJson: unknown = JSON.parse(await file.text()); const upload = parseReceiptFile(parsedJson, batch.id); const submitted = new Map(upload.items.map((item) => [item.candidate_id, item.status]));

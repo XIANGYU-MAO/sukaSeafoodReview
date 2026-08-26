@@ -22,6 +22,7 @@ from app.services.auth import (
     csrf_token,
     generate_session_token,
     hash_password,
+    require_valid_new_password,
     resolve_client_address,
     session_digest,
     user_by_id_for_update,
@@ -184,6 +185,9 @@ async def change_password(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_runtime_settings),
 ) -> None:
+    # Keep the service-level guard even though the request schema rejects the
+    # same bounds, so non-HTTP callers cannot bypass the password contract.
+    require_valid_new_password(payload.new_password)
     user = await db.scalar(user_by_id_for_update(auth.user.id))
     if (
         user is None

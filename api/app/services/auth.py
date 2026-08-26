@@ -35,9 +35,23 @@ LOGIN_CLIENT_WINDOW = timedelta(minutes=5)
 LOGIN_LIMITER_MAX_CLIENTS = 10_000
 MAX_FORWARDED_HOPS = 20
 MAX_FORWARDED_LENGTH = 2048
+NEW_PASSWORD_MIN_LENGTH = 12
+NEW_PASSWORD_MAX_LENGTH = 128
 
 _PASSWORD_HASHER = PasswordHasher(type=Type.ID)
 _DUMMY_PASSWORD_HASH = _PASSWORD_HASHER.hash(secrets.token_urlsafe(32))
+
+
+class PasswordPolicyError(ValueError):
+    pass
+
+
+def require_valid_new_password(password: str) -> str:
+    if not NEW_PASSWORD_MIN_LENGTH <= len(password) <= NEW_PASSWORD_MAX_LENGTH:
+        raise PasswordPolicyError(
+            "New password must contain between 12 and 128 characters"
+        )
+    return password
 
 
 def hash_password(password: str) -> str:

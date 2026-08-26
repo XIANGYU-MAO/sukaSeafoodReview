@@ -252,7 +252,7 @@ def test_duplicate_entries_oversized_error_and_body_are_rejected_atomically(sett
         error_response = post_receipt(client, batch_id, token, [too_large_error])
         body_response = client.post(
             f"/v1/sync/batches/{batch_id}/receipt",
-            content=b'{"items":[]}' + b" " * (130 * 1024),
+            content=b'{"items":[]}' + b" " * (20 * 1024 * 1024),
             headers={
                 "Authorization": f"Batch {token}",
                 "Content-Type": "application/json",
@@ -263,6 +263,84 @@ def test_duplicate_entries_oversized_error_and_body_are_rejected_atomically(sett
     assert duplicate.status_code == error_response.status_code == 422
     assert body_response.status_code == 413
     assert asyncio.run(load_models(settings, ExportItem))[0].status == "pending"
+
+
+def test_realistic_1221_success_receipt_exceeds_old_cap_and_completes(settings):
+    seed, client, batch_id, token, rows = setup_batch(settings, count=1_221)
+    items = [
+        success_receipt(row, sha256=f"{index:064x}")
+        for index, row in enumerate(rows, start=1)
+    ]
+    body = json.dumps({"items": items}, separators=(",", ":")).encode()
+    try:
+        response = client.post(
+            f"/v1/sync/batches/{batch_id}/receipt",
+            content=body,
+            headers={
+                "Authorization": f"Batch {token}",
+                "Content-Type": "application/json",
+            },
+        )
+    finally:
+        close(client)
+
+    assert 128 * 1024 < len(body) <= 20 * 1024 * 1024
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert len(response.json()["accepted_candidate_ids"]) == 1_221
+
+
+def test_receipt_body_at_exact_20_mib_boundary_is_accepted(settings):
+    seed, client, batch_id, token, rows = setup_batch(settings)
+    payload = json.dumps(
+        {"items": [success_receipt(rows[0])]}, separators=(",", ":")
+    ).encode()
+    body = payload + b" " * (20 * 1024 * 1024 - len(payload))
+    try:
+        response = client.post(
+            f"/v1/sync/batches/{batch_id}/receipt",
+            content=body,
+            headers={
+                "Authorization": f"Batch {token}",
+                "Content-Type": "application/json",
+            },
+        )
+    finally:
+        close(client)
+
+    assert len(body) == 20 * 1024 * 1024
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+
+
+def test_receipt_schema_accepts_exactly_10000_seven_field_success_items():
+    from app.schemas.exports import ReceiptRequest
+
+    items = [
+        {
+            "candidate_id": uuid4(),
+            "review_id": uuid4(),
+            "review_version": 1,
+            "status": "SUCCEEDED",
+            "sha256": f"{index:064x}",
+            "relative_path": f"images/SF001/{index}.jpg",
+            "error": None,
+        }
+        for index in range(10_000)
+    ]
+
+    parsed = ReceiptRequest.model_validate({"items": items})
+
+    assert len(parsed.items) == 10_000
+    assert set(parsed.items[0].model_dump()) == {
+        "candidate_id",
+        "review_id",
+        "review_version",
+        "status",
+        "sha256",
+        "relative_path",
+        "error",
+    }
 
 
 def test_wrong_swapped_and_expired_batch_tokens_are_secret_free(settings):
@@ -443,7 +521,7 @@ def test_manual_receipt_file_requires_mao_csrf_bounds_batch_match_and_reuses_sem
         )
         oversized = client.post(
             f"/v1/admin/exports/{batch_id}/receipt-file",
-            content=json.dumps(payload).encode() + b" " * (130 * 1024),
+            content=json.dumps(payload).encode() + b" " * (20 * 1024 * 1024),
             headers={**mao_headers(seed, csrf=True), "Content-Type": "application/json"},
         )
         applied = client.post(

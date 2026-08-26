@@ -345,6 +345,9 @@ def test_preview_rejects_oversized_file_too_many_rows_and_overlong_field():
         ({"image_url": "https://user:pass@example.test/fish.jpg"}, "missing_urls", "UNSAFE_URL"),
         ({"image_url": "https://127.0.0.1/fish.jpg"}, "missing_urls", "UNSAFE_URL"),
         ({"image_url": "https://10.0.0.2/fish.jpg"}, "missing_urls", "UNSAFE_URL"),
+        ({"image_url": "https://[::1]/fish.jpg"}, "missing_urls", "UNSAFE_URL"),
+        ({"image_url": "https://localhost/fish.jpg"}, "missing_urls", "UNSAFE_URL"),
+        ({"image_url": "https://private.invalid/fish.jpg"}, "missing_urls", "UNSAFE_URL"),
         ({"license": "ARR"}, "invalid_licenses", "INVALID_LICENSE"),
         ({"source_dataset": "OTHER"}, "invalid_sources", "UNSUPPORTED_SOURCE"),
     ],
@@ -1111,6 +1114,44 @@ def test_cli_dry_run_writes_json_and_no_database_rows(settings, tmp_path):
     assert asyncio.run(count_rows(settings, Candidate)) == 0
     assert asyncio.run(count_rows(settings, CandidateImportPreview)) == 0
     assert asyncio.run(count_rows(settings, AuditEvent)) == 0
+
+
+def test_cli_commit_revalidates_in_one_transaction_and_is_idempotent(
+    settings, tmp_path
+):
+    seed_import_database(settings, five_species=True)
+    report_path = tmp_path / "commit-report.json"
+
+    first = run_cli(
+        settings,
+        str(FIXTURE),
+        "--commit",
+        "--json-report",
+        str(report_path),
+    )
+    second = run_cli(settings, str(FIXTURE), "--commit")
+
+    assert first.returncode == second.returncode == 0
+    assert json.loads(first.stdout)["inserted"] == 4
+    assert json.loads(report_path.read_text("utf-8"))["inserted"] == 4
+    assert json.loads(second.stdout)["inserted"] == 0
+    assert json.loads(second.stdout)["skipped_exact"] == 4
+    candidates = asyncio.run(load_all(settings, Candidate))
+    assert len(candidates) == 4
+    assert all(item.current_reviewer_id is None for item in candidates)
+    audits = asyncio.run(load_all(settings, AuditEvent))
+    assert [event.action for event in audits].count("CSV_IMPORT_CLI") == 1
+
+
+def test_cli_requires_exactly_one_of_dry_run_or_commit(settings):
+    seed_import_database(settings)
+
+    neither = run_cli(settings, str(FIXTURE))
+    both = run_cli(settings, str(FIXTURE), "--dry-run", "--commit")
+
+    assert neither.returncode != 0
+    assert both.returncode != 0
+    assert asyncio.run(count_rows(settings, Candidate)) == 0
 
 
 @pytest.mark.parametrize("kind", ["missing", "malformed", "oversized"])

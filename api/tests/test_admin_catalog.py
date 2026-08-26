@@ -364,6 +364,9 @@ def test_candidate_safe_patch_validates_https_increments_version_once_and_audits
         "http://example.com/path",
         "https://example.com/path\nheader",
         "https://example.com:65536/path",
+        "https://127.0.0.1/fish.jpg",
+        "https://[::1]/fish.jpg",
+        "https://localhost/fish.jpg",
     ],
 )
 def test_candidate_patch_strictly_rejects_malformed_https_urls(
@@ -389,15 +392,38 @@ def test_candidate_patch_strictly_rejects_malformed_https_urls(
     assert revisions == audits == []
 
 
+def test_candidate_patch_rejects_unapproved_public_hostname_without_mutation(
+    settings,
+):
+    seed = asyncio.run(seed_catalog(settings))
+    with TestClient(create_app(settings)) as client:
+        response = client.patch(
+            f"/v1/admin/candidates/{seed.candidate_ids[0]}",
+            headers=admin_headers(seed, csrf=True),
+            json={
+                "version": 1,
+                "preview_url": "https://private.invalid/fish.jpg",
+                "reason": "validate origin",
+            },
+        )
+
+    candidate, _, revisions, audits = asyncio.run(
+        load_catalog_state(settings, candidate_id=seed.candidate_ids[0])
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "IMAGE_ORIGIN_NOT_ALLOWED"
+    assert candidate.version == 1
+    assert revisions == audits == []
+
+
 @pytest.mark.parametrize(
     "valid_url",
     [
-        "https://[2001:db8::1]:8443/fish.jpg",
-        "https://例子.测试/鱼.jpg",
-        "https://example.com:443/fish.jpg",
+        "https://cdn.images.example.test/fish.jpg",
+        "https://images.example.test:443/fish.jpg",
     ],
 )
-def test_candidate_patch_accepts_valid_ipv6_idn_and_bounded_ports(
+def test_candidate_patch_accepts_only_permitted_image_cdn_origins(
     settings, valid_url
 ):
     seed = asyncio.run(seed_catalog(settings))

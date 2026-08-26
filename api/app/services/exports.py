@@ -15,7 +15,6 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, text, update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -27,6 +26,11 @@ from app.models import (
     ExportItem,
     Review,
     Species,
+)
+from app.image_origins import (
+    DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
+    ImageOriginError,
+    require_approved_image_url,
 )
 from app.schemas.exports import ExportBatchResponse, ReceiptItem, ReceiptResponse
 from app.services.auth import as_utc, utc_now
@@ -52,11 +56,12 @@ EXPORT_COLUMNS = [
     "attribution",
 ]
 EXPORT_TTL = timedelta(days=7)
-MAX_RECEIPT_BYTES = 128 * 1024
+EXPORT_MAX_ROWS = 10_000
+EXPORT_MAX_BYTES = 20 * 1024 * 1024
+MAX_RECEIPT_BYTES = EXPORT_MAX_BYTES
 FAILED_ERROR_CODE = "LOCAL_DOWNLOAD_FAILED"
 KNOWN_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff", ".bmp"}
 TOKEN_DOMAIN = b"sukaseafood:receipt:v1:"
-CREATE_LOCK_ID = 8_260_805
 
 
 class ExportNotFound(Exception):
@@ -174,11 +179,38 @@ async def _expire_batches(session: AsyncSession) -> None:
     )
 
 
-async def _global_creation_lock(session: AsyncSession) -> None:
-    if session.bind is not None and session.bind.dialect.name == "postgresql":
-        await session.execute(
-            text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": CREATE_LOCK_ID}
-        )
+def _is_postgresql(session: AsyncSession) -> bool:
+    return session.bind is not None and session.bind.dialect.name == "postgresql"
+
+
+async def _begin_creation_snapshot(session: AsyncSession) -> bool:
+    """Begin a fresh coherent PostgreSQL snapshot and serialize exporters.
+
+    Authentication may already have opened a READ COMMITTED transaction on the
+    request session, so close it first.  ``LOCK TABLE`` is a PostgreSQL utility
+    command and does not acquire the MVCC snapshot; the self-conflicting SHARE
+    UPDATE EXCLUSIVE lock therefore waits for an older exporter before the
+    first data statement establishes this transaction's REPEATABLE READ view.
+    Ordinary INSERT/UPDATE/DELETE operations take ROW EXCLUSIVE and remain
+    compatible with this lock, so receipt writers are not serialized behind an
+    export snapshot.
+    """
+    if not _is_postgresql(session):
+        return False
+    if session.in_transaction():
+        await session.commit()
+    await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+    await session.execute(
+        text("LOCK TABLE export_batches IN SHARE UPDATE EXCLUSIVE MODE")
+    )
+    return True
+
+
+async def _end_creation_snapshot_lock(session: AsyncSession, locked: bool) -> None:
+    # PostgreSQL table locks are transaction-scoped.  Successful paths commit
+    # before returning; this rollback is only a defensive exception cleanup.
+    if locked and session.in_transaction():
+        await session.rollback()
 
 
 async def _state_maps(session: AsyncSession):
@@ -324,16 +356,109 @@ async def derive_deltas(
     return sorted(deltas, key=lambda delta: (str(delta.candidate.id), delta.action.value))
 
 
+def _delta_csv_row(
+    batch_id: UUID, raw_token: str, delta: Delta
+) -> dict[str, object]:
+    candidate = delta.candidate
+    return {
+        "batch_id": str(batch_id),
+        "receipt_token": raw_token,
+        "action": delta.action.value,
+        "candidate_id": str(candidate.id),
+        "review_id": str(delta.review.id),
+        # The fixed 16-column wire contract uses this field as the monotonic
+        # candidate sync generation.  Every export-relevant mutation advances
+        # Candidate.version, including same-review corrections.
+        "review_version": candidate.version,
+        "species_code": delta.species.code,
+        "target_relative_path": delta.target_relative_path,
+        "previous_relative_path": delta.previous_relative_path or "",
+        "preview_url": candidate.preview_url,
+        "original_url": candidate.original_url,
+        "source_url": candidate.source_url,
+        "creator": candidate.creator or "",
+        "license": candidate.license,
+        "license_url": candidate.license_url or "",
+        "attribution": candidate.attribution,
+    }
+
+
+def _item_csv_row(
+    batch_id: UUID, raw_token: str, item: ExportItem
+) -> dict[str, object]:
+    action = item.action.value if isinstance(item.action, ExportAction) else str(item.action)
+    return {
+        "batch_id": str(batch_id),
+        "receipt_token": raw_token,
+        "action": action,
+        "candidate_id": str(item.candidate_id),
+        "review_id": str(item.review_id),
+        "review_version": item.review_version,
+        "species_code": item.species_code,
+        "target_relative_path": item.target_relative_path,
+        "previous_relative_path": item.previous_relative_path or "",
+        "preview_url": item.preview_url,
+        "original_url": item.original_url,
+        "source_url": item.source_url,
+        "creator": item.creator or "",
+        "license": item.license,
+        "license_url": item.license_url or "",
+        "attribution": item.attribution,
+    }
+
+
+def _encode_csv_rows(
+    rows: Iterable[dict[str, object]], *, include_header: bool
+) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=EXPORT_COLUMNS, lineterminator="\r\n")
+    if include_header:
+        writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    prefix = b"\xef\xbb\xbf" if include_header else b""
+    return prefix + output.getvalue().encode("utf-8")
+
+
+def _bounded_delta_chunk(
+    batch_id: UUID, raw_token: str, deltas: Iterable[Delta]
+) -> list[Delta]:
+    selected: list[Delta] = []
+    serialized_bytes = len(_encode_csv_rows((), include_header=True))
+    for delta in deltas:
+        if len(selected) >= EXPORT_MAX_ROWS:
+            break
+        row_bytes = len(
+            _encode_csv_rows(
+                (_delta_csv_row(batch_id, raw_token, delta),), include_header=False
+            )
+        )
+        if serialized_bytes + row_bytes > EXPORT_MAX_BYTES:
+            if not selected:
+                raise ExportConflict("EXPORT_ROW_TOO_LARGE")
+            break
+        selected.append(delta)
+        serialized_bytes += row_bytes
+    return selected
+
+
 async def create_export_batch(
     session: AsyncSession,
     actor_id: UUID,
     species_code: str | None,
     receipt_secret: str,
+    *,
+    image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
 ) -> BatchCreationResult:
     if not receipt_secret:
         raise ValueError("RECEIPT_SECRET is required for exports")
+    locked = False
     try:
-        await _global_creation_lock(session)
+        # Lock order: close the authentication transaction, begin REPEATABLE
+        # READ, serialize exporters at export_batches, then expire and inspect
+        # batches. Export creation never locks candidate/review rows, so it
+        # cannot invert the mutation services' row-lock order.
+        locked = await _begin_creation_snapshot(session)
         await _expire_batches(session)
         species = None
         if species_code is not None:
@@ -347,23 +472,35 @@ async def create_export_batch(
             .order_by(ExportBatch.created_at, ExportBatch.id)
             .limit(1)
         )
-        if existing is not None:
-            await session.commit()
-            return BatchCreationResult(existing, created=False)
-
         batch_id = uuid4()
         deltas = await derive_deltas(
             session, batch_id=batch_id, species_id=species.id if species else None
         )
+        try:
+            for delta in deltas:
+                require_approved_image_url(
+                    delta.candidate.preview_url, image_origin_allowlist
+                )
+                require_approved_image_url(
+                    delta.candidate.original_url, image_origin_allowlist
+                )
+        except ImageOriginError as exc:
+            raise ExportConflict("IMAGE_ORIGIN_NOT_ALLOWED") from exc
         if not deltas:
             await session.commit()
+            if existing is not None:
+                return BatchCreationResult(existing, created=False)
             return BatchCreationResult(None, created=False, no_work=True)
 
-        candidate_ids = [delta.candidate.id for delta in deltas]
-        overlaps = list(
+        candidate_ids = {delta.candidate.id for delta in deltas}
+        scheduled_rows = list(
             (
-                await session.scalars(
-                    select(ExportBatch.id)
+                await session.execute(
+                    select(
+                        ExportBatch.id,
+                        ExportBatch.scope_key,
+                        ExportItem.candidate_id,
+                    )
                     .join(ExportItem, ExportItem.batch_id == ExportBatch.id)
                     .where(
                         ExportBatch.status == "pending",
@@ -371,15 +508,36 @@ async def create_export_batch(
                         ExportItem.status == "pending",
                         ExportItem.candidate_id.in_(candidate_ids),
                     )
-                    .distinct()
-                    .order_by(ExportBatch.id)
+                    .order_by(ExportBatch.id, ExportItem.candidate_id)
                 )
             ).all()
         )
-        if overlaps:
-            raise ExportConflict("EXPORT_SCOPE_OVERLAP", tuple(overlaps))
+        cross_scope_overlaps = tuple(
+            sorted(
+                {
+                    row.id
+                    for row in scheduled_rows
+                    if row.scope_key != scope
+                },
+                key=str,
+            )
+        )
+        if cross_scope_overlaps:
+            raise ExportConflict("EXPORT_SCOPE_OVERLAP", cross_scope_overlaps)
+        scheduled_ids = {row.candidate_id for row in scheduled_rows}
+        unscheduled = [
+            delta for delta in deltas if delta.candidate.id not in scheduled_ids
+        ]
+        if not unscheduled:
+            await session.commit()
+            if existing is not None:
+                return BatchCreationResult(existing, created=False)
+            return BatchCreationResult(None, created=False, no_work=True)
 
         raw_token = receipt_token(batch_id, receipt_secret)
+        selected = _bounded_delta_chunk(batch_id, raw_token, unscheduled)
+        if not selected:
+            raise ExportConflict("EXPORT_ROW_TOO_LARGE")
         now = utc_now()
         batch = ExportBatch(
             id=batch_id,
@@ -391,14 +549,14 @@ async def create_export_batch(
             expires_at=now + EXPORT_TTL,
         )
         session.add(batch)
-        for delta in deltas:
+        for delta in selected:
             candidate = delta.candidate
             session.add(
                 ExportItem(
                     batch_id=batch.id,
                     candidate_id=candidate.id,
                     review_id=delta.review.id,
-                    review_version=delta.review.version,
+                    review_version=candidate.version,
                     candidate_version=candidate.version,
                     action=delta.action,
                     status="pending",
@@ -426,9 +584,9 @@ async def create_export_batch(
                 before_json=None,
                 after_json={
                     "species_code": species.code if species else None,
-                    "item_count": len(deltas),
+                    "item_count": len(selected),
                     "actions": {
-                        action.value: sum(delta.action == action for delta in deltas)
+                        action.value: sum(delta.action == action for delta in selected)
                         for action in ExportAction
                     },
                     "expires_at": batch.expires_at.isoformat(),
@@ -441,21 +599,12 @@ async def create_export_batch(
         if session.in_transaction():
             await session.rollback()
         raise
-    except IntegrityError:
-        await session.rollback()
-        scope = _scope_key(species.id if species is not None else None)
-        existing = await session.scalar(
-            select(ExportBatch).where(
-                ExportBatch.scope_key == scope, ExportBatch.status == "pending"
-            )
-        )
-        if existing is not None:
-            return BatchCreationResult(existing, created=False)
-        raise
     except BaseException:
         if session.in_transaction():
             await session.rollback()
         raise
+    finally:
+        await _end_creation_snapshot_lock(session, locked)
 
 
 async def batch_response(
@@ -542,7 +691,11 @@ async def pending_counts(session: AsyncSession) -> dict[str, int]:
 
 
 async def render_batch_csv(
-    session: AsyncSession, batch_id: UUID, secret: str
+    session: AsyncSession,
+    batch_id: UUID,
+    secret: str,
+    *,
+    image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
 ) -> bytes:
     batch = await session.get(ExportBatch, batch_id)
     if batch is None:
@@ -561,32 +714,19 @@ async def render_batch_csv(
             )
         ).all()
     )
-    output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=EXPORT_COLUMNS, lineterminator="\r\n")
-    writer.writeheader()
-    for item in items:
-        action = item.action.value if isinstance(item.action, ExportAction) else str(item.action)
-        writer.writerow(
-            {
-                "batch_id": str(batch.id),
-                "receipt_token": raw_token,
-                "action": action,
-                "candidate_id": str(item.candidate_id),
-                "review_id": str(item.review_id),
-                "review_version": item.review_version,
-                "species_code": item.species_code,
-                "target_relative_path": item.target_relative_path,
-                "previous_relative_path": item.previous_relative_path or "",
-                "preview_url": item.preview_url,
-                "original_url": item.original_url,
-                "source_url": item.source_url,
-                "creator": item.creator or "",
-                "license": item.license,
-                "license_url": item.license_url or "",
-                "attribution": item.attribution,
-            }
-        )
-    return b"\xef\xbb\xbf" + output.getvalue().encode("utf-8")
+    try:
+        for item in items:
+            require_approved_image_url(item.preview_url, image_origin_allowlist)
+            require_approved_image_url(item.original_url, image_origin_allowlist)
+    except ImageOriginError as exc:
+        raise ReceiptRejected("IMAGE_ORIGIN_NOT_ALLOWED", 409) from exc
+    content = _encode_csv_rows(
+        (_item_csv_row(batch.id, raw_token, item) for item in items),
+        include_header=True,
+    )
+    if len(items) > EXPORT_MAX_ROWS or len(content) > EXPORT_MAX_BYTES:
+        raise ReceiptRejected("EXPORT_BATCH_ENVELOPE_INVALID", 500)
+    return content
 
 
 def _safe_receipt_path(

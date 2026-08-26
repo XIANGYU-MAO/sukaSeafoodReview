@@ -3,6 +3,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_network
 
+from app.image_origins import (
+    DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
+    ImageOriginError,
+    normalize_image_origin_allowlist,
+)
+
 
 TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
@@ -43,6 +49,7 @@ class Settings:
     APP_ENV: str
     RECEIPT_SECRET: str | None = None
     TRUSTED_PROXY_CIDRS: tuple[str, ...] = ()
+    IMAGE_ORIGIN_ALLOWLIST: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST
     secure_cookie: bool = True
     app_name: str = "SukaSeafood Review API"
 
@@ -60,6 +67,13 @@ class Settings:
                 ) from exc
             if network.prefixlen == 0:
                 raise ValueError("Trusted proxy CIDR cannot cover the full network")
+        try:
+            normalized_origins = normalize_image_origin_allowlist(
+                self.IMAGE_ORIGIN_ALLOWLIST
+            )
+        except ImageOriginError as exc:
+            raise ValueError(str(exc)) from exc
+        object.__setattr__(self, "IMAGE_ORIGIN_ALLOWLIST", normalized_origins)
 
     def validate_api_secrets(self) -> None:
         if self.APP_ENV.lower() != "production":
@@ -98,6 +112,14 @@ class Settings:
             TRUSTED_PROXY_CIDRS=tuple(
                 value.strip()
                 for value in os.getenv("TRUSTED_PROXY_CIDRS", "").split(",")
+                if value.strip()
+            ),
+            IMAGE_ORIGIN_ALLOWLIST=tuple(
+                value.strip()
+                for value in os.getenv(
+                    "IMAGE_ORIGIN_ALLOWLIST",
+                    ",".join(DEFAULT_IMAGE_ORIGIN_ALLOWLIST),
+                ).split(",")
                 if value.strip()
             ),
             secure_cookie=parse_boolean_setting(

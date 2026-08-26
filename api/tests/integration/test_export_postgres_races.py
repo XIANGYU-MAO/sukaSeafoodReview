@@ -9,7 +9,18 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.models import AuditEvent, Base, Candidate, Decision, ExportBatch, ExportItem, Review, Species, User
+from app.models import (
+    AuditEvent,
+    Base,
+    Candidate,
+    Decision,
+    ExportAction,
+    ExportBatch,
+    ExportItem,
+    Review,
+    Species,
+    User,
+)
 from app.services.auth import utc_now
 
 
@@ -148,3 +159,103 @@ def test_concurrent_identical_receipt_converges_without_errors_or_duplicate_audi
     assert stored.status == "succeeded"
     assert stored.sha256 == "d" * 64
     assert receipt_audits == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["candidate_url", "species_correction", "review_reopen", "review_revision"],
+)
+def test_export_persists_one_pre_or_post_mutation_snapshot_at_deterministic_barrier(
+    monkeypatch, mutation
+):
+    from app.services import exports
+
+    async def operation(engine):
+        mao_id, candidate_id = await seed(engine)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as setup:
+            second_species = Species(
+                code="SF002",
+                name_zh="第二鱼种",
+                name_en="Second fish",
+                scientific_name="Piscis secundus",
+            )
+            setup.add(second_species)
+            await setup.commit()
+            second_species_id = second_species.id
+
+        snapshot_established = asyncio.Event()
+        mutation_committed = asyncio.Event()
+        original_state_maps = exports._state_maps
+
+        async def barrier_state_maps(session):
+            # Export creation has already begun its REPEATABLE READ transaction.
+            # This read makes the PostgreSQL snapshot boundary explicit before
+            # the competing writer commits.
+            await session.scalar(
+                select(Candidate.id).where(Candidate.id == candidate_id)
+            )
+            snapshot_established.set()
+            await mutation_committed.wait()
+            return await original_state_maps(session)
+
+        monkeypatch.setattr(exports, "_state_maps", barrier_state_maps)
+        async with factory() as export_db:
+            task = asyncio.create_task(
+                exports.create_export_batch(export_db, mao_id, None, SECRET)
+            )
+            await asyncio.wait_for(snapshot_established.wait(), timeout=5)
+            async with factory() as writer:
+                candidate = await writer.get(Candidate, candidate_id)
+                assert candidate is not None
+                review = await writer.scalar(
+                    select(Review).where(
+                        Review.candidate_id == candidate_id,
+                        Review.is_current.is_(True),
+                    )
+                )
+                assert review is not None
+                candidate.version += 1
+                if mutation == "candidate_url":
+                    candidate.preview_url = "https://images.example.test/changed/preview.jpg"
+                    candidate.original_url = "https://images.example.test/changed/original.jpg"
+                elif mutation == "species_correction":
+                    candidate.species_id = second_species_id
+                elif mutation == "review_reopen":
+                    review.is_current = False
+                    writer.add(
+                        Review(
+                            candidate_id=candidate_id,
+                            reviewer_id=review.reviewer_id,
+                            decision=Decision.UNSURE,
+                            is_current=True,
+                            version=1,
+                        )
+                    )
+                else:
+                    review.decision = Decision.REJECTED
+                    review.rejection_reason = "OTHER"
+                    review.whole_fish = "NO"
+                    review.exact_species_verified = "NO"
+                    review.version += 1
+                await writer.commit()
+            mutation_committed.set()
+            result = await asyncio.wait_for(task, timeout=10)
+
+        async with factory() as verify:
+            item = await verify.scalar(
+                select(ExportItem).where(ExportItem.batch_id == result.batch.id)
+            )
+            current = await verify.get(Candidate, candidate_id)
+        return item, current
+
+    item, current = asyncio.run(in_isolated_schema(operation))
+
+    # The writer committed before delta derivation continued, but the persisted
+    # item is wholly from the old state.  Seeing any new field paired with old
+    # fields would prove a torn READ COMMITTED export.
+    assert item.action == ExportAction.ADD
+    assert item.candidate_version == item.review_version == 1
+    assert item.species_code == "SF001"
+    assert item.original_url == "https://images.example.test/race/original.jpg"
+    assert current.version == 2

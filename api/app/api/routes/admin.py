@@ -6,9 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
     CurrentAuth,
+    get_runtime_settings,
     require_admin_access,
     require_admin_csrf,
 )
+from app.config import Settings
 from app.database import get_db
 from app.schemas.admin import (
     AdminReviewFilters,
@@ -138,10 +140,17 @@ async def update_candidate(
     candidate_id: UUID,
     payload: CandidatePatchRequest,
     auth: CurrentAuth = Depends(require_admin_csrf),
+    settings: Settings = Depends(get_runtime_settings),
     db: AsyncSession = Depends(get_db),
 ) -> CandidateAdminResponse:
     try:
-        return await patch_candidate(db, auth.user.id, candidate_id, payload)
+        return await patch_candidate(
+            db,
+            auth.user.id,
+            candidate_id,
+            payload,
+            image_origin_allowlist=settings.IMAGE_ORIGIN_ALLOWLIST,
+        )
     except (AdminObjectNotFound, AdminConflict) as exc:
         _raise_admin_error(exc)
 

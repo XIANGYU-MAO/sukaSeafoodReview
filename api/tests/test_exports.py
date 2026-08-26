@@ -16,7 +16,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import Settings
 from app.main import create_app
-from app.models import AuditEvent, Candidate, Decision, ExportBatch, ExportItem, Review, Species
+from app.models import (
+    AuditEvent,
+    Candidate,
+    Decision,
+    ExportAction,
+    ExportBatch,
+    ExportItem,
+    Review,
+    Species,
+)
 from tests.export_support import (
     csv_rows,
     load_models,
@@ -103,6 +112,7 @@ def test_new_approved_export_is_immutable_rfc4180_snapshot_and_csv_get_stays_pen
     assert decoded.splitlines()[0] == ",".join(EXPORT_COLUMNS)
     assert csv_response.headers["content-type"].startswith("text/csv; charset=utf-8")
     assert f"sukaseafood-export-{batch_id}.csv" in csv_response.headers["content-disposition"]
+    assert csv_response.headers["cache-control"] == "no-store"
     assert counts.status_code == 200
     assert counts.json() == {"SF001": 1, "SF002": 0}
 
@@ -111,6 +121,185 @@ def test_new_approved_export_is_immutable_rfc4180_snapshot_and_csv_get_stays_pen
     assert batches[0].status == "pending"
     assert items[0].status == "pending"
     assert items[0].succeeded_at is None
+
+
+def test_export_and_receipt_envelope_constants_agree():
+    from app.services import exports
+
+    assert exports.EXPORT_MAX_ROWS == 10_000
+    assert exports.EXPORT_MAX_BYTES == 20 * 1024 * 1024
+    assert exports.MAX_RECEIPT_BYTES == exports.EXPORT_MAX_BYTES
+
+
+def test_postgres_export_snapshot_uses_transaction_scoped_table_serialization():
+    from app.services import exports
+
+    class Dialect:
+        name = "postgresql"
+
+    class Bind:
+        dialect = Dialect()
+
+    class RecordingSession:
+        bind = Bind()
+
+        def __init__(self):
+            self.calls = []
+            self.transaction = True
+
+        def in_transaction(self):
+            return self.transaction
+
+        async def commit(self):
+            self.calls.append("COMMIT")
+            self.transaction = False
+
+        async def execute(self, statement, parameters=None):
+            self.calls.append(str(statement))
+            self.transaction = True
+
+    session = RecordingSession()
+    locked = asyncio.run(exports._begin_creation_snapshot(session))
+
+    assert locked is True
+    assert session.calls == [
+        "COMMIT",
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+        "LOCK TABLE export_batches IN SHARE UPDATE EXCLUSIVE MODE",
+    ]
+
+
+def test_repeated_same_scope_creation_chunks_unscheduled_rows(monkeypatch, settings):
+    from app.services import exports
+
+    monkeypatch.setattr(exports, "EXPORT_MAX_ROWS", 1, raising=False)
+    seed = create_seed(settings, (Decision.APPROVED, Decision.APPROVED))
+    with TestClient(create_app(settings)) as client:
+        first = create_batch(client, seed)
+        second = create_batch(client, seed)
+        first_response, first_rows = download(client, seed, first.json()["id"])
+        second_response, second_rows = download(client, seed, second.json()["id"])
+
+    assert first.json()["id"] != second.json()["id"]
+    assert len(first_rows) == len(second_rows) == 1
+    assert {first_rows[0]["candidate_id"], second_rows[0]["candidate_id"]} == {
+        str(candidate_id) for candidate_id in seed.candidate_ids
+    }
+    assert len(first_response.content) <= exports.EXPORT_MAX_BYTES
+    assert len(second_response.content) <= exports.EXPORT_MAX_BYTES
+
+
+def envelope_delta(*, maximum_fields: bool = False):
+    from app.services.exports import Delta
+
+    def url(host: str, maximum: int) -> str:
+        prefix = f"https://{host}/"
+        return prefix + "x" * (maximum - len(prefix))
+
+    candidate = Candidate(
+        id=uuid4(),
+        species_id=uuid4(),
+        source_dataset="S",
+        source_record_id="R",
+        preview_url=url("images.example.test", 2048) if maximum_fields else "https://images.example.test/p.jpg",
+        original_url=url("images.example.test", 2048) if maximum_fields else "https://images.example.test/o.jpg",
+        source_url=url("source.example.test", 2048) if maximum_fields else "https://source.example.test/r",
+        creator='"' * 512 if maximum_fields else "C",
+        license="L" * (255 if maximum_fields else 1),
+        license_url=url("license.example.test", 2048) if maximum_fields else None,
+        attribution='"' * (1024 if maximum_fields else 1),
+        metadata_json={},
+        version=1,
+    )
+    species = Species(
+        id=candidate.species_id,
+        code="SF001",
+        name_zh="鱼",
+        name_en="Fish",
+        scientific_name="Piscis",
+    )
+    review = Review(
+        id=uuid4(),
+        candidate_id=candidate.id,
+        reviewer_id=uuid4(),
+        decision=Decision.APPROVED,
+        whole_fish="YES",
+        exact_species_verified="YES",
+    )
+    return Delta(
+        candidate=candidate,
+        species=species,
+        review=review,
+        action=ExportAction.ADD,
+        target_relative_path=f"images/SF001/{candidate.id}.jpg",
+        previous_relative_path=None,
+        original_fingerprint="a" * 64,
+        metadata_fingerprint="b" * 64,
+    )
+
+
+def test_exact_10000_minimal_rows_fit_and_10001st_is_a_later_chunk():
+    from app.services import exports
+
+    delta = envelope_delta()
+    deltas = [delta] * 10_001
+    batch_id = uuid4()
+    token = "t" * 43
+
+    first = exports._bounded_delta_chunk(batch_id, token, deltas)
+    second = exports._bounded_delta_chunk(batch_id, token, deltas[len(first):])
+    first_csv = exports._encode_csv_rows(
+        (exports._delta_csv_row(batch_id, token, item) for item in first),
+        include_header=True,
+    )
+
+    assert len(first) == exports.EXPORT_MAX_ROWS == 10_000
+    assert len(second) == 1
+    assert len(first_csv) <= exports.EXPORT_MAX_BYTES
+
+
+def test_maximum_length_fields_split_before_the_20_mib_csv_boundary():
+    from app.services import exports
+
+    delta = envelope_delta(maximum_fields=True)
+    deltas = [delta] * exports.EXPORT_MAX_ROWS
+    batch_id = uuid4()
+    token = "t" * 43
+
+    selected = exports._bounded_delta_chunk(batch_id, token, deltas)
+    content = exports._encode_csv_rows(
+        (exports._delta_csv_row(batch_id, token, item) for item in selected),
+        include_header=True,
+    )
+    next_row = exports._encode_csv_rows(
+        (exports._delta_csv_row(batch_id, token, delta),), include_header=False
+    )
+
+    assert 0 < len(selected) < exports.EXPORT_MAX_ROWS
+    assert len(content) <= exports.EXPORT_MAX_BYTES
+    assert len(content) + len(next_row) > exports.EXPORT_MAX_BYTES
+
+
+def test_single_row_over_byte_envelope_fails_before_batch_persist(
+    monkeypatch, settings
+):
+    from app.services import exports
+
+    header_size = len(exports._encode_csv_rows((), include_header=True))
+    monkeypatch.setattr(exports, "EXPORT_MAX_BYTES", header_size, raising=False)
+    seed = create_seed(settings)
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/v1/admin/exports",
+            json={},
+            headers=mao_headers(seed, csrf=True),
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "EXPORT_ROW_TOO_LARGE"
+    assert asyncio.run(load_models(settings, ExportBatch)) == []
+    assert asyncio.run(load_models(settings, ExportItem)) == []
 
 
 def test_batch_json_history_never_exposes_token_and_digest_is_recomputable(settings):
@@ -280,6 +469,9 @@ def test_locally_present_candidate_becoming_absent_emits_remove(settings, desire
             else:
                 review.decision = desired
             review.version += 1
+            candidate = await db.get(Candidate, seed.candidate_ids[0])
+            assert candidate is not None
+            candidate.version += 1
             await db.commit()
         await engine.dispose()
 
@@ -474,14 +666,20 @@ def test_mid_rereview_remove_then_later_approval_add_and_inactive_catalog_remove
 
 def test_inactive_species_makes_a_locally_present_candidate_removable(settings):
     seed, local = _successful_initial_sync(settings)
-    asyncio.run(mutate(settings, Species, seed.species_ids[0], active=False))
 
     with TestClient(create_app(settings)) as client:
+        changed = client.patch(
+            f"/v1/admin/species/{seed.species_ids[0]}",
+            json={"active": False, "reason": "retire synchronized species"},
+            headers=mao_headers(seed, csrf=True),
+        )
+        assert changed.status_code == 200
         batch = create_batch(client, seed, "SF001")
         _, rows = download(client, seed, batch.json()["id"])
 
     assert len(rows) == 1
     assert rows[0]["action"] == "REMOVE"
+    assert int(rows[0]["review_version"]) == int(local["review_version"]) + 1
     assert rows[0]["previous_relative_path"] == local["target_relative_path"]
 
 
@@ -560,6 +758,40 @@ def test_export_boundary_rejects_corrupted_unsafe_species_without_creating_paths
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "UNSAFE_SPECIES_CODE"
+    assert asyncio.run(load_models(settings, ExportBatch)) == []
+
+
+@pytest.mark.parametrize(
+    "image_url",
+    [
+        "https://127.0.0.1/private.jpg",
+        "https://[::1]/private.jpg",
+        "https://localhost/private.jpg",
+        "https://private.invalid/private.jpg",
+    ],
+    ids=["ipv4-literal", "ipv6-literal", "localhost", "unapproved-host"],
+)
+def test_export_boundary_rejects_unapproved_or_private_image_origin(
+    settings, image_url
+):
+    seed = create_seed(settings)
+    asyncio.run(
+        mutate(
+            settings,
+            Candidate,
+            seed.candidate_ids[0],
+            original_url=image_url,
+        )
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/v1/admin/exports",
+            json={},
+            headers=mao_headers(seed, csrf=True),
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "IMAGE_ORIGIN_NOT_ALLOWED"
     assert asyncio.run(load_models(settings, ExportBatch)) == []
 
 
@@ -678,6 +910,10 @@ def test_export_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(t
                     "batch": {column["name"] for column in inspect(sync).get_columns("export_batches")},
                     "item": {column["name"] for column in inspect(sync).get_columns("export_items")},
                     "checks": {check["name"] for check in inspect(sync).get_check_constraints("export_items")},
+                    "batch_indexes": {
+                        index["name"]
+                        for index in inspect(sync).get_indexes("export_batches")
+                    },
                 }
             )
         await engine.dispose()
@@ -691,6 +927,11 @@ def test_export_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(t
         "original_fingerprint", "metadata_fingerprint", "local_relative_path",
     } <= current["item"]
     assert "ck_export_items_status" in current["checks"]
+    assert "uq_export_batches_pending_scope" not in current["batch_indexes"]
+    command.downgrade(config, "20260826_05")
+    assert "uq_export_batches_pending_scope" in asyncio.run(shape())["batch_indexes"]
+    command.upgrade(config, "head")
+    assert "uq_export_batches_pending_scope" not in asyncio.run(shape())["batch_indexes"]
     command.downgrade(config, "20260826_04")
     assert "scope_key" not in asyncio.run(shape())["batch"]
     command.upgrade(config, "head")
@@ -702,8 +943,9 @@ def test_export_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(t
     pg.set_main_option("sqlalchemy.url", "postgresql://review:password@db/review")
     command.upgrade(pg, "head", sql=True)
     ddl = output.getvalue()
-    assert "20260826_05" in ddl
+    assert "20260827_06" in ddl
     assert "CREATE UNIQUE INDEX uq_export_batches_pending_scope" in ddl
+    assert "DROP INDEX uq_export_batches_pending_scope" in ddl
     assert "original_fingerprint" in ddl
 
 

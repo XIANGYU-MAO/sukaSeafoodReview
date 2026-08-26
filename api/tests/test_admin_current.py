@@ -306,6 +306,10 @@ def test_admin_review_edit_uses_canonical_mapping_revision_version_and_audit(set
     )
     assert response.status_code == 200
     assert response.json()["version"] == review.version == 2
+    candidate, _, _, _, _, _ = asyncio.run(
+        load_state(settings, candidate_id=review.candidate_id)
+    )
+    assert candidate.version == 2
     assert review.reviewer_id == seed.user_ids["Hassan"]
     assert review.decision == Decision.REJECTED
     assert review.whole_fish == "REVIEW"

@@ -23,8 +23,15 @@ export function ChangePasswordPage({ forced, onCancel }: ChangePasswordPageProps
       setError("请输入当前密码。");
       return;
     }
-    if (newPassword.length < 12) {
+    // Array.from counts Unicode code points, matching Python/Pydantic's length
+    // contract; JavaScript's UTF-16 .length would count astral characters twice.
+    const newPasswordLength = Array.from(newPassword).length;
+    if (newPasswordLength < 12) {
       setError("新密码至少需要 12 个字符。");
+      return;
+    }
+    if (newPasswordLength > 128) {
+      setError("新密码不能超过 128 个字符。");
       return;
     }
     if (newPassword !== confirmation) {
@@ -77,7 +84,7 @@ export function ChangePasswordPage({ forced, onCancel }: ChangePasswordPageProps
             autoComplete="new-password"
             disabled={pending}
           />
-          <p className="field-hint">至少 12 个字符；服务器会执行最终校验。</p>
+          <p className="field-hint">12–128 个字符；服务器会执行最终校验。</p>
           <PasswordField
             id="confirm-password"
             label="确认新密码"

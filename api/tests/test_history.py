@@ -373,19 +373,21 @@ def test_history_patch_increments_once_and_appends_complete_before_after_revisio
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as db:
             stored = await db.get(Review, review.id)
+            candidate = await db.get(Candidate, review.candidate_id)
             revisions = (
                 await db.scalars(
                     select(ReviewRevision).where(ReviewRevision.review_id == review.id)
                 )
             ).all()
         await engine.dispose()
-        return stored, revisions
+        return stored, candidate, revisions
 
-    stored, revisions = asyncio.run(load_state())
+    stored, candidate, revisions = asyncio.run(load_state())
     assert response.status_code == 200
     assert response.json()["version"] == stored.version == 2
     assert stored.reviewer_id == seed.hassan_id
     assert stored.is_current is True
+    assert candidate.version == 2
     assert len(revisions) == 1
     revision = revisions[0]
     assert revision.actor_id == revision.reviewer_id == seed.hassan_id

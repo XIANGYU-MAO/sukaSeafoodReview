@@ -26,6 +26,11 @@ from app.models import (
     Species,
     User,
 )
+from app.image_origins import (
+    DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
+    ImageOriginError,
+    require_approved_image_url,
+)
 from app.schemas.imports import ImportIssue, ImportPreview, ImportResult, NormalizedCandidate
 from app.services.auth import as_utc
 from app.species_codes import is_safe_species_code
@@ -351,7 +356,11 @@ def _validate_final_candidate_values(values: dict[str, str | None]) -> None:
             )
 
 
-def normalize_legacy_row(row: dict[str, str]) -> NormalizedCandidate:
+def normalize_legacy_row(
+    row: dict[str, str],
+    *,
+    image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
+) -> NormalizedCandidate:
     for name, limit in FIELD_LIMITS.items():
         if len(row.get(name, "")) > limit:
             raise RowProblem("FIELD_TOO_LONG", "parse_errors", f"{name} exceeds its limit")
@@ -409,6 +418,14 @@ def normalize_legacy_row(row: dict[str, str]) -> NormalizedCandidate:
         preview_url = original_url = _strip_commons_tracking(image_url)
     else:
         preview_url = original_url = image_url
+
+    try:
+        require_approved_image_url(preview_url, image_origin_allowlist)
+        require_approved_image_url(original_url, image_origin_allowlist)
+    except ImageOriginError as exc:
+        raise RowProblem(
+            "UNSAFE_URL", "missing_urls", "Image origin is not approved"
+        ) from exc
 
     creator = _normalize_human_text(row.get("creator"), "creator") or None
     license_value = _normalize_license(row.get("license"))
@@ -504,7 +521,11 @@ def _file_error(content: bytes, code: str, message: str) -> ImportPreview:
     )
 
 
-def _parse_candidate_csv(content: bytes) -> ImportPreview:
+def _parse_candidate_csv(
+    content: bytes,
+    *,
+    image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
+) -> ImportPreview:
     if len(content) > MAX_UPLOAD_BYTES and content.count(b"\n") <= MAX_ROWS:
         return _file_error(content, "CSV_TOO_LARGE", "CSV exceeds the upload limit")
     try:
@@ -563,7 +584,9 @@ def _parse_candidate_csv(content: bytes) -> ImportPreview:
             if species_code:
                 _increment_count(report.species_counts, species_code)
             try:
-                normalized = normalize_legacy_row(row)
+                normalized = normalize_legacy_row(
+                    row, image_origin_allowlist=image_origin_allowlist
+                )
                 normalized.source_row = row_number
                 report.normalized_rows.append(normalized)
                 for warning in normalized.normalization_warnings:
@@ -775,14 +798,28 @@ def _classify(
     return report
 
 
-def preview_candidate_csv(content: bytes) -> ImportPreview:
-    return _classify(_parse_candidate_csv(content))
+def preview_candidate_csv(
+    content: bytes,
+    *,
+    image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
+) -> ImportPreview:
+    return _classify(
+        _parse_candidate_csv(
+            content, image_origin_allowlist=image_origin_allowlist
+        )
+    )
 
 
 async def _db_preview(
-    session: AsyncSession, content: bytes, *, lock: bool = False
+    session: AsyncSession,
+    content: bytes,
+    *,
+    lock: bool = False,
+    image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
 ) -> ImportPreview:
-    report = _parse_candidate_csv(content)
+    report = _parse_candidate_csv(
+        content, image_origin_allowlist=image_origin_allowlist
+    )
     if not report.normalized_rows:
         report.can_commit = report.blocking_errors == 0
         report.database_fingerprint = _digest(b"[]")
@@ -807,8 +844,84 @@ async def _db_preview(
     )
 
 
-async def dry_run_candidate_csv(session: AsyncSession, content: bytes) -> ImportPreview:
-    return await _db_preview(session, content)
+async def dry_run_candidate_csv(
+    session: AsyncSession,
+    content: bytes,
+    *,
+    image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
+) -> ImportPreview:
+    return await _db_preview(
+        session, content, image_origin_allowlist=image_origin_allowlist
+    )
+
+
+async def commit_candidate_csv_from_cli(
+    session: AsyncSession,
+    content: bytes,
+    *,
+    image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
+) -> ImportResult:
+    """Privileged server-console import with transactional revalidation.
+
+    This path is intentionally unavailable over HTTP.  It requires the fixed
+    Mao account to exist, locks catalog state, recomputes the same bounded
+    preview used by the admin UI, and commits only non-conflicting new rows.
+    """
+
+    try:
+        actor = await session.scalar(
+            select(User)
+            .where(User.name == "Mao")
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if actor is None or actor.role != "admin" or not actor.active:
+            raise ImportConflict("IMPORT_ACTOR_NOT_ALLOWED")
+        report = await _db_preview(
+            session,
+            content,
+            lock=True,
+            image_origin_allowlist=image_origin_allowlist,
+        )
+        if not report.can_commit:
+            raise ImportConflict("IMPORT_PREVIEW_BLOCKED")
+        species = {
+            record.code: record.id
+            for record in (await session.scalars(select(Species))).all()
+        }
+        records = [
+            _candidate_record(species[row.species_code], row)
+            for row in report.new_normalized_rows
+        ]
+        session.add_all(records)
+        result = ImportResult(
+            total=report.total,
+            inserted=len(records),
+            skipped_exact=report.exact_duplicates,
+            possible_url_duplicates=report.possible_url_duplicates,
+            file_sha256=report.file_sha256,
+        )
+        if records:
+            session.add(
+                AuditEvent(
+                    actor_id=actor.id,
+                    action="CSV_IMPORT_CLI",
+                    object_type="CandidateImport",
+                    object_id=report.file_sha256,
+                    reason="Validated server-console candidate CSV import",
+                    before_json=None,
+                    after_json=result.model_dump(mode="json"),
+                )
+            )
+        await session.commit()
+        return result
+    except IntegrityError as exc:
+        await session.rollback()
+        raise ImportConflict("IMPORT_PREVIEW_STALE") from exc
+    except BaseException:
+        if session.in_transaction():
+            await session.rollback()
+        raise
 
 
 def _safe_report(report: ImportPreview) -> dict[str, Any]:
@@ -864,6 +977,7 @@ async def stage_candidate_csv(
     actor_id: UUID,
     actor_session_id: UUID,
     filename: str | None,
+    image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
 ) -> ImportPreview:
     try:
         await _lock_valid_mao_session(session, actor_id, actor_session_id)
@@ -874,7 +988,11 @@ async def stage_candidate_csv(
         await session.execute(
             delete(CandidateImportPreview).where(CandidateImportPreview.id.in_(expired_ids))
         )
-        report = await _db_preview(session, content)
+        report = await _db_preview(
+            session,
+            content,
+            image_origin_allowlist=image_origin_allowlist,
+        )
         fatal_file_codes = {
             "CSV_TOO_LARGE",
             "CSV_TOO_MANY_ROWS",

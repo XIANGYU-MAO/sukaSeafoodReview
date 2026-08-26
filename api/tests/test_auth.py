@@ -747,6 +747,51 @@ def test_change_password_requires_the_current_password(auth_client, seeded_users
     assert login(auth_client, password=NEW_TEST_PASSWORD).status_code == 401
 
 
+@pytest.mark.parametrize("new_password", ["x", "x" * 11, "x" * 129])
+def test_change_password_rejects_out_of_policy_lengths_without_mutation(
+    auth_client, auth_settings, seeded_users, new_password
+):
+    login_response = login(auth_client)
+    raw_token = session_cookie(auth_client)
+    before_users, before_sessions = asyncio.run(
+        load_auth_rows(auth_settings.DATABASE_URL)
+    )
+
+    response = auth_client.post(
+        "/v1/auth/change-password",
+        json={"current_password": TEST_PASSWORD, "new_password": new_password},
+        headers=session_headers(raw_token, login_response.json()["csrf_token"]),
+    )
+    after_users, after_sessions = asyncio.run(load_auth_rows(auth_settings.DATABASE_URL))
+
+    assert response.status_code == 422
+    assert [
+        (user.password_hash, user.password_version, user.must_change_password)
+        for user in after_users
+    ] == [
+        (user.password_hash, user.password_version, user.must_change_password)
+        for user in before_users
+    ]
+    assert [
+        (session.token_hash, session.password_version, session.revoked_at)
+        for session in after_sessions
+    ] == [
+        (session.token_hash, session.password_version, session.revoked_at)
+        for session in before_sessions
+    ]
+    assert auth_client.get(
+        "/v1/auth/me", headers=session_headers(raw_token)
+    ).status_code == 200
+
+
+@pytest.mark.parametrize("new_password", ["x" * 11, "x" * 129])
+def test_password_service_enforces_the_same_length_contract(new_password):
+    from app.services.auth import PasswordPolicyError, require_valid_new_password
+
+    with pytest.raises(PasswordPolicyError):
+        require_valid_new_password(new_password)
+
+
 def test_change_password_rejects_same_password_without_changing_state(
     auth_client, auth_settings, seeded_users
 ):

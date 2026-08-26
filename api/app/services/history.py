@@ -173,6 +173,23 @@ async def edit_review(
     payload: HistoryEditRequest,
 ) -> ReviewResponse:
     try:
+        candidate_id = await session.scalar(
+            select(Review.candidate_id).where(
+                Review.id == review_id, Review.reviewer_id == reviewer_id
+            )
+        )
+        if candidate_id is None:
+            await session.rollback()
+            raise HistoryReviewNotFound
+        candidate = await session.scalar(
+            select(Candidate)
+            .where(Candidate.id == candidate_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if candidate is None:
+            await session.rollback()
+            raise HistoryReviewNotFound
         review = await session.scalar(
             review_for_update_query(reviewer_id, review_id)
         )
@@ -199,6 +216,7 @@ async def edit_review(
         review.whole_fish = whole_fish
         review.exact_species_verified = exact_species
         review.version += 1
+        candidate.version += 1
         after = review_snapshot(review)
         session.add(
             ReviewRevision(
