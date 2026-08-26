@@ -117,8 +117,8 @@ export interface ExportBatch {
 }
 export interface ExportBatchList { total: number; items: ExportBatch[] }
 export type ExportCreateResult =
-  | { kind: "no-work" }
-  | { kind: "batch"; batch: ExportBatch };
+  | { kind: "no-work"; scope: string | null }
+  | { kind: "batch"; scope: string | null; batch: ExportBatch };
 
 export interface ReceiptUploadItem {
   candidate_id: string; review_id: string; review_version: number;
@@ -296,13 +296,15 @@ export function parseExportBatches(value: unknown): ExportBatchList {
   catch { throw new Error("同步批次响应无效"); }
 }
 
-export function parseExportCreate(value: unknown): ExportCreateResult {
+export function parseExportCreate(value: unknown, expectedScope: string | null): ExportCreateResult {
   try {
+    const scope = expectedScope === null ? null : safeCode(expectedScope);
     const root = object(value);
     if (root.code === "NO_WORK") {
-      exact(root, ["code", "created", "batch"]); if (root.created !== false || root.batch !== null) fail(); return { kind: "no-work" };
+      exact(root, ["code", "created", "batch"]); if (root.created !== false || root.batch !== null) fail(); return { kind: "no-work", scope };
     }
-    return { kind: "batch", batch: parseExportBatch(root) };
+    const batch = parseExportBatch(root); if (batch.species_code !== scope) fail();
+    return { kind: "batch", scope, batch };
   } catch { throw new Error("创建同步批次结果无效"); }
 }
 
@@ -331,7 +333,11 @@ export function parseReceiptResponse(value: unknown, batchId: string, submitted:
     const root = object(value); exact(root, ["batch_id", "status", "accepted_candidate_ids", "pending_candidate_ids"]);
     if (uuid(root.batch_id) !== batchId || !["pending", "completed"].includes(String(root.status))) fail();
     const accepted = array(root.accepted_candidate_ids, 10_000).map(uuid); const pending = array(root.pending_candidate_ids, 10_000).map(uuid);
-    if (accepted.some((id) => submitted.get(id) !== "SUCCEEDED") || new Set([...accepted, ...pending]).size !== accepted.length + pending.length) fail();
+    const acceptedSet = new Set(accepted); const pendingSet = new Set(pending);
+    const succeeded = [...submitted].filter(([, status]) => status === "SUCCEEDED").map(([id]) => id);
+    const failed = [...submitted].filter(([, status]) => status === "FAILED").map(([id]) => id);
+    if (accepted.some((id) => submitted.get(id) !== "SUCCEEDED") || succeeded.some((id) => !acceptedSet.has(id)) || accepted.length !== succeeded.length) fail();
+    if (failed.some((id) => !pendingSet.has(id)) || new Set([...accepted, ...pending]).size !== accepted.length + pending.length) fail();
     if ((root.status === "completed" && pending.length !== 0) || (root.status === "pending" && pending.length === 0)) fail();
     return { accepted: accepted.length, pending: pending.length };
   } catch { throw new Error("回执处理结果无效"); }

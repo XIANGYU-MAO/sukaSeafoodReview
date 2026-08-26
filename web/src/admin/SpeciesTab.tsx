@@ -44,7 +44,7 @@ export function SpeciesTab(props: AdminTabProps) {
       const submitted = mode === "create"
         ? { name_zh: draft.name_zh.trim(), name_en: draft.name_en.trim(), scientific_name: draft.scientific_name.trim(), sort_order: Number(draft.sort_order), active: draft.active }
         : Object.fromEntries(Object.entries(body).filter(([key]) => key !== "reason"));
-      parseSpeciesReceipt(raw, mode === "create" ? { code: draft.code, submitted, create: true } : { id: selected?.id, submitted });
+      parseSpeciesReceipt(raw, mode === "create" ? { code: draft.code, submitted, create: true } : { id: selected?.id, code: selected?.code, submitted });
       setNotice({ kind: "success", text: mode === "create" ? "鱼种已创建。" : "鱼种修改已保存。" }); close(); query.reload(); props.refreshDirectories();
     } catch (error) { setNotice({ kind: "error", text: error instanceof ApiError && error.status === 409 ? "鱼种状态已变化，请刷新后重试。" : mutationMessage(error) }); if (error instanceof ApiError && error.status === 409) query.reload(); }
     finally { setPending(false); }

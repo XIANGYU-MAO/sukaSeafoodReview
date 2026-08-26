@@ -13,7 +13,8 @@ export function ExportsTab(props: AdminTabProps) {
   const [scope, setScope] = useState(""); const [pending, setPending] = useState(false); const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   async function create() {
     if (pending || counts.unavailable || batches.unavailable || props.directoriesUnavailable) return; setPending(true); setNotice(null);
-    try { const raw = await adminMutation<unknown>("/admin/exports", { method: "POST", body: scope ? { species_code: scope } : {}, csrfToken: props.csrfToken }, props.retryBootstrap); const result = parseExportCreate(raw); setNotice(result.kind === "no-work" ? { kind: "success", text: "没有待同步项目。" } : { kind: "success", text: result.batch.created ? "已创建新的同步批次。" : "已返回现有未完成批次。" }); counts.reload(); batches.reload(); }
+    const requestedScope = scope || null;
+    try { const raw = await adminMutation<unknown>("/admin/exports", { method: "POST", body: requestedScope ? { species_code: requestedScope } : {}, csrfToken: props.csrfToken }, props.retryBootstrap); const result = parseExportCreate(raw, requestedScope); setNotice(result.kind === "no-work" ? { kind: "success", text: "没有待同步项目。" } : { kind: "success", text: result.batch.created ? "已创建新的同步批次。" : "已返回现有未完成批次。" }); counts.reload(); batches.reload(); }
     catch (error) { const conflict = error instanceof ApiError && error.status === 409 ? parseExportConflict(error.body) : null; const text = conflict?.code === "EXPORT_SCOPE_OVERLAP" ? `同步范围重叠，涉及 ${conflict.overlapCount} 个批次；列表已刷新。` : conflict?.code === "EXPORT_BATCH_EXPIRED" ? "同步批次已过期；列表已刷新。" : conflict?.code === "UNSAFE_SPECIES_CODE" ? "鱼种代码不适合本地路径；列表已刷新。" : mutationMessage(error); setNotice({ kind: "error", text }); if (error instanceof ApiError && error.status === 409) { counts.reload(); batches.reload(); } }
     finally { setPending(false); }
   }
