@@ -8,6 +8,7 @@ from .operations import (
     apply_add,
     apply_move,
     apply_remove,
+    recover_add,
 )
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "apply_add",
     "apply_move",
     "apply_remove",
+    "recover_add",
     "load_manifest",
 ]
 

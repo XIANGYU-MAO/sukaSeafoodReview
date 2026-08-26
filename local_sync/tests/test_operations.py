@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -10,6 +11,8 @@ import traceback
 from uuid import UUID
 
 import pytest
+import imagehash
+from PIL import Image
 
 from conftest import BATCH_ID, CANDIDATE_ID, RECEIPT_TOKEN, REVIEW_ID
 from sukaseafood_sync.downloader import DownloadResult
@@ -21,6 +24,7 @@ from sukaseafood_sync.operations import (
     apply_add,
     apply_move,
     apply_remove,
+    recover_add,
 )
 
 
@@ -29,6 +33,22 @@ OTHER_CANDIDATE_ID = UUID("55555555-5555-4555-8555-555555555555")
 JPEG_BYTES = b"verified-jpeg-payload"
 JPEG_SHA = hashlib.sha256(JPEG_BYTES).hexdigest()
 PHASH = "0123456789abcdef"
+
+
+def encoded_image(
+    format_name: str = "JPEG", size: tuple[int, int] = (13, 9)
+) -> tuple[bytes, str]:
+    output = BytesIO()
+    image = Image.new("RGB", size)
+    pixels = image.load()
+    for y in range(size[1]):
+        for x in range(size[0]):
+            pixels[x, y] = ((x * 19) % 256, (y * 31) % 256, ((x + y) * 23) % 256)
+    image.save(output, format=format_name)
+    content = output.getvalue()
+    with Image.open(BytesIO(content)) as decoded:
+        phash = str(imagehash.phash(decoded.convert("RGB"))).lower()
+    return content, phash
 
 
 def row(action: str = "ADD", **overrides: object) -> ManifestRow:
@@ -688,3 +708,247 @@ def test_index_failure_after_move_is_recoverable_without_data_loss(
     result = apply_move(sync_root, manifest_row, index)
     assert result.status == "SUCCEEDED"
     assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "MOVE") is not None
+
+
+def test_recover_add_returns_none_only_when_no_target_candidate_exists(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+
+    result = recover_add(sync_root, row(), index)
+
+    assert result is None
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
+
+
+def test_recover_add_verifies_decoder_target_and_persists_derived_metadata(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    manifest_row = row(
+        target_relative_path=PurePosixPath(f"images/SF006/{CANDIDATE_ID}.image")
+    )
+    content, expected_phash = encoded_image("PNG", (13, 9))
+    actual_relative = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.png")
+    write_file(sync_root, actual_relative, content)
+
+    result = recover_add(sync_root, manifest_row, index)
+
+    assert result is not None
+    assert result.status == "SUCCEEDED"
+    assert result.relative_path == actual_relative
+    assert result.sha256 == hashlib.sha256(content).hexdigest()
+    assert result.perceptual_hash == expected_phash
+    stored = index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD")
+    assert stored is not None
+    assert stored.relative_path == actual_relative
+    assert stored.sha256 == hashlib.sha256(content).hexdigest()
+    assert stored.perceptual_hash == expected_phash
+
+
+def test_recover_add_canonicalizes_uppercase_server_suffix_to_decoder_suffix(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    manifest_row = row(
+        target_relative_path=PurePosixPath(f"images/SF006/{CANDIDATE_ID}.JPG")
+    )
+    content, _expected_phash = encoded_image("JPEG")
+    actual_relative = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    write_file(sync_root, actual_relative, content)
+
+    result = recover_add(sync_root, manifest_row, index)
+
+    assert result is not None
+    assert result.relative_path.as_posix() == actual_relative.as_posix()
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD").relative_path == actual_relative  # type: ignore[union-attr]
+
+
+def test_recover_add_converges_target_and_staging_crash_state(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    manifest_row = row()
+    content, expected_phash = encoded_image("JPEG", (15, 7))
+    target = write_file(sync_root, manifest_row.target_relative_path, content)
+    staging = target.with_name(target.name + ".part")
+    os.link(target, staging)
+
+    result = recover_add(sync_root, manifest_row, index)
+
+    assert result is not None
+    assert result.perceptual_hash == expected_phash
+    assert target.read_bytes() == content
+    assert not staging.exists()
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is not None
+
+
+def test_recover_add_promotes_verified_staging_only_without_network(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    manifest_row = row(
+        target_relative_path=PurePosixPath(f"images/SF006/{CANDIDATE_ID}.image")
+    )
+    content, expected_phash = encoded_image("PNG", (17, 11))
+    server_target = local_path(sync_root, manifest_row.target_relative_path)
+    staging = server_target.with_name(server_target.name + ".part")
+    staging.parent.mkdir(parents=True)
+    staging.write_bytes(content)
+
+    result = recover_add(sync_root, manifest_row, index)
+
+    actual_relative = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.png")
+    assert result is not None
+    assert result.relative_path == actual_relative
+    assert result.perceptual_hash == expected_phash
+    assert local_path(sync_root, actual_relative).read_bytes() == content
+    assert not staging.exists()
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is not None
+
+
+def test_recover_add_rejects_ambiguous_or_invalid_target_candidates(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    manifest_row = row(
+        target_relative_path=PurePosixPath(f"images/SF006/{CANDIDATE_ID}.image")
+    )
+    png, _phash = encoded_image("PNG")
+    jpeg, _jpeg_phash = encoded_image("JPEG")
+    png_relative = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.png")
+    jpeg_relative = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    write_file(sync_root, png_relative, png)
+    write_file(sync_root, jpeg_relative, jpeg)
+
+    with pytest.raises(OperationError, match="ADD_RECOVERY_AMBIGUOUS"):
+        recover_add(sync_root, manifest_row, index)
+
+    local_path(sync_root, jpeg_relative).unlink()
+    local_path(sync_root, png_relative).write_bytes(b"not-an-image")
+    with pytest.raises(OperationError, match="ADD_RECOVERY_INVALID"):
+        recover_add(sync_root, manifest_row, index)
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is None
+
+
+def test_recover_add_cleans_composite_previous_after_target_verification(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    previous = PurePosixPath(f"images/OLD/{CANDIDATE_ID}.jpg")
+    manifest_row = row(previous_relative_path=previous)
+    old = seed_prior(sync_root, index, manifest_row)
+    content, _phash = encoded_image("JPEG")
+    target = write_file(sync_root, manifest_row.target_relative_path, content)
+
+    result = recover_add(sync_root, manifest_row, index)
+
+    assert result is not None
+    assert target.read_bytes() == content
+    assert not old.exists()
+    assert index.get_completed(CANDIDATE_ID, REVIEW_ID, 2, "ADD") is not None
+
+
+def test_apply_add_retains_staging_until_index_success(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    manifest_row = row()
+    verified = download(sync_root, manifest_row)
+    original_record = SyncIndex.record_success
+    observed_staging = False
+
+    def observe_staging(self: SyncIndex, result: SyncResult):
+        nonlocal observed_staging
+        if result.action == "ADD":
+            observed_staging = verified.staging_path.is_file()
+        return original_record(self, result)
+
+    monkeypatch.setattr(SyncIndex, "record_success", observe_staging)
+
+    result = apply_add(sync_root, manifest_row, verified, index)
+
+    assert result.status == "SUCCEEDED"
+    assert observed_staging
+    assert not verified.staging_path.exists()
+
+
+def test_apply_add_non_manifest_row_raises_secret_free_operation_error(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    malicious = {
+        "batch_id": RECEIPT_TOKEN,
+        "target_relative_path": f"C:/{RECEIPT_TOKEN}/fish.jpg",
+    }
+
+    with pytest.raises(OperationError, match="INVALID_ROW") as caught:
+        apply_add(sync_root, malicious, object(), index)  # type: ignore[arg-type]
+
+    assert_secret_free(caught.value, sync_root)
+    assert not (sync_root / "logs").exists()
+
+
+def test_malformed_manifest_paths_are_never_logged_or_exposed(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    malicious_path = PurePosixPath(f"/{RECEIPT_TOKEN}/absolute-secret.jpg")
+    manifest_row = row(
+        target_relative_path=malicious_path,
+        previous_relative_path=malicious_path,
+        original_url=f"https://example.test/{RECEIPT_TOKEN}",
+    )
+
+    with pytest.raises(OperationError, match="PATH_UNSAFE") as caught:
+        apply_add(sync_root, manifest_row, object(), index)  # type: ignore[arg-type]
+
+    assert_secret_free(caught.value, sync_root)
+    logs = sync_root / "logs"
+    serialized = "" if not logs.exists() else "".join(
+        path.read_text(encoding="utf-8") for path in logs.iterdir()
+    )
+    assert RECEIPT_TOKEN not in serialized
+    assert malicious_path.as_posix() not in serialized
+
+
+def test_logger_setup_exception_is_sanitized_without_raw_chain(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    logger = OperationLogger(sync_root, BATCH_ID)
+    manifest_row = row()
+    verified = download(sync_root, manifest_row)
+
+    def fail_validate(self: OperationLogger) -> None:
+        raise RuntimeError(f"{RECEIPT_TOKEN} {sync_root.resolve()}")
+
+    monkeypatch.setattr(OperationLogger, "validate", fail_validate)
+    with pytest.raises(OperationError, match="LOG_SETUP_FAILED") as caught:
+        apply_add(sync_root, manifest_row, verified, index, logger=logger)
+
+    assert_secret_free(caught.value, sync_root)
+    assert verified.staging_path.read_bytes() == JPEG_BYTES
+
+
+def test_unsafe_log_parent_failure_is_secret_free_and_non_mutating(
+    sync_root: Path, tmp_path: Path
+) -> None:
+    index = SyncIndex(sync_root)
+    outside = tmp_path / RECEIPT_TOKEN
+    outside.mkdir()
+    logs = sync_root / "logs"
+    try:
+        logs.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    manifest_row = row()
+    verified = DownloadResult(
+        sync_root / "unused.part", JPEG_SHA, PHASH, len(JPEG_BYTES), "JPEG", ".jpg", 1, 1
+    )
+
+    with pytest.raises(OperationError, match="LOG_PATH_UNSAFE") as caught:
+        apply_add(sync_root, manifest_row, verified, index)
+
+    assert_secret_free(caught.value, sync_root)
+    assert list(outside.iterdir()) == []

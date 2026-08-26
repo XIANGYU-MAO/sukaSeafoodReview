@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -10,6 +11,10 @@ import re
 import stat
 from typing import Literal
 from uuid import UUID
+import warnings
+
+import imagehash
+from PIL import Image, ImageOps
 
 from .downloader import DownloadResult
 from .index import SyncIndex, SyncRecord, SyncResult
@@ -26,6 +31,7 @@ _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _HEX_64 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _HEX_16 = re.compile(r"[0-9a-f]{16}\Z", re.ASCII)
 _FORMAT_SUFFIXES = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
+_MAX_RECOVERY_IMAGE_BYTES = 100 * 1024 * 1024
 _LOG_FIELDS = (
     "candidate_id",
     "action",
@@ -200,6 +206,105 @@ def _hash_regular(path: Path, unsafe_code: str) -> tuple[str, int, os.stat_resul
     return digest.hexdigest(), size, before
 
 
+def _read_recovery_image(
+    path: Path, relative: PurePosixPath | None
+) -> tuple[str, str, int, int, int, str, os.stat_result]:
+    before = _lstat(path, "TARGET_UNSAFE")
+    if (
+        before is None
+        or not _regular(before)
+        or stat.S_ISLNK(before.st_mode)
+        or not 0 < before.st_size <= _MAX_RECOVERY_IMAGE_BYTES
+    ):
+        raise OperationError("ADD_RECOVERY_INVALID")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    open_failed = False
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        open_failed = True
+        descriptor = -1
+    if open_failed:
+        raise OperationError("TARGET_UNSAFE")
+
+    content = bytearray()
+    read_failed = False
+    opened: os.stat_result | None = None
+    after: os.stat_result | None = None
+    try:
+        opened = os.fstat(descriptor)
+        if not _regular(opened) or not _same_file(before, opened):
+            read_failed = True
+        else:
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                content.extend(chunk)
+                if len(content) > _MAX_RECOVERY_IMAGE_BYTES:
+                    read_failed = True
+                    break
+            after = os.fstat(descriptor)
+    except OSError:
+        read_failed = True
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            read_failed = True
+    current = _lstat(path, "TARGET_UNSAFE")
+    if (
+        read_failed
+        or opened is None
+        or after is None
+        or current is None
+        or not _regular(current)
+        or not _same_file(before, after)
+        or not _same_file(before, current)
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or len(content) != after.st_size
+    ):
+        raise OperationError("TARGET_UNSAFE")
+
+    decode_failed = False
+    decoded_format: str | None = None
+    perceptual_hash = ""
+    width = height = 0
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(content)) as image:
+                image.verify()
+            with Image.open(BytesIO(content)) as image:
+                decoded_format = image.format
+                if decoded_format not in _FORMAT_SUFFIXES:
+                    decode_failed = True
+                else:
+                    image.load()
+                    transposed = ImageOps.exif_transpose(image)
+                    width, height = transposed.size
+                    if width <= 0 or height <= 0:
+                        decode_failed = True
+                    else:
+                        rgb = transposed.convert("RGB")
+                        rgb.load()
+                        perceptual_hash = str(imagehash.phash(rgb)).lower()
+    except Exception:
+        decode_failed = True
+    if decoded_format is None or decode_failed:
+        raise OperationError("ADD_RECOVERY_INVALID")
+    suffix = _FORMAT_SUFFIXES[decoded_format]
+    if relative is not None and relative.suffix != suffix:
+        raise OperationError("ADD_RECOVERY_INVALID")
+    digest = hashlib.sha256(content).hexdigest()
+    return digest, perceptual_hash, len(content), width, height, suffix, before
+
+
 def _unlink_owned(path: Path, owned: os.stat_result, code: str) -> None:
     current = _lstat(path, code)
     if current is None:
@@ -246,9 +351,29 @@ def _link_no_clobber(
     return target_metadata
 
 
-def _validated_row_path(row: ManifestRow, expected_action: str) -> tuple[PurePosixPath, PurePosixPath | None]:
-    if not isinstance(row, ManifestRow) or row.action != expected_action:
+def _validated_row_identity(row: ManifestRow, expected_action: str) -> None:
+    if not isinstance(row, ManifestRow):
+        raise OperationError("INVALID_ROW")
+    if row.action != expected_action:
         raise OperationError("ACTION_MISMATCH")
+    valid = (
+        isinstance(row.batch_id, UUID)
+        and isinstance(row.candidate_id, UUID)
+        and isinstance(row.review_id, UUID)
+        and isinstance(row.review_version, int)
+        and not isinstance(row.review_version, bool)
+        and row.review_version > 0
+        and isinstance(row.species_code, str)
+        and bool(row.species_code)
+    )
+    if not valid:
+        raise OperationError("INVALID_ROW")
+
+
+def _validated_row_path(
+    row: ManifestRow, expected_action: str
+) -> tuple[PurePosixPath, PurePosixPath | None]:
+    _validated_row_identity(row, expected_action)
     target = _safe_relative(row.target_relative_path, "target_relative_path")
     previous = (
         _safe_relative(row.previous_relative_path, "previous_relative_path")
@@ -463,21 +588,35 @@ class OperationLogger:
 def _operation_logger(
     root: Path, row: ManifestRow, logger: OperationLogger | None
 ) -> OperationLogger:
-    if logger is None:
-        return OperationLogger(root, row.batch_id)
-    if (
-        not isinstance(logger, OperationLogger)
-        or logger.root != root
-        or logger.batch_id != row.batch_id
-    ):
-        raise OperationError("LOG_PATH_UNSAFE")
-    logger.validate()
-    return logger
+    failure: OperationError | None = None
+    active: OperationLogger | None = None
+    try:
+        if logger is None:
+            active = OperationLogger(root, row.batch_id)
+        elif (
+            not isinstance(logger, OperationLogger)
+            or logger.root != root
+            or logger.batch_id != row.batch_id
+        ):
+            failure = OperationError("LOG_PATH_UNSAFE")
+        else:
+            logger.validate()
+            active = logger
+    except OperationError:
+        failure = OperationError("LOG_PATH_UNSAFE")
+    except Exception:
+        failure = OperationError("LOG_SETUP_FAILED")
+    if failure is not None:
+        raise failure
+    assert active is not None
+    return active
 
 
 def _safe_log(
     logger: OperationLogger,
-    row: ManifestRow,
+    candidate_id: UUID,
+    action: str,
+    previous_relative_path: PurePosixPath | None,
     status: str,
     relative: PurePosixPath,
     sha256: str | None,
@@ -487,10 +626,10 @@ def _safe_log(
 
     try:
         logger.append(
-            candidate_id=row.candidate_id,
-            action=row.action,
+            candidate_id=candidate_id,
+            action=action,
             status=status,
-            previous_relative_path=row.previous_relative_path,
+            previous_relative_path=previous_relative_path,
             relative_path=relative,
             sha256=sha256,
             error=error,
@@ -537,21 +676,6 @@ def _cleanup_composite_previous(
     if digest != prior.sha256:
         raise OperationError("SOURCE_STATE_MISMATCH")
     _unlink_owned(previous_path, owned, "FILESYSTEM_OPERATION_FAILED")
-
-
-def _restore_staging_after_post_commit_failure(
-    target: Path, staging: Path, expected_sha: str
-) -> None:
-    """Best-effort restoration of the verified retry handle."""
-
-    try:
-        target_sha, _target_size, target_owned = _hash_regular(
-            target, "TARGET_UNSAFE"
-        )
-        if target_sha == expected_sha:
-            _link_no_clobber(target, target_owned, staging, expected_sha)
-    except OperationError:
-        return
 
 
 def _validated_download(
@@ -631,19 +755,94 @@ def _apply_add(
             _link_no_clobber(dedupe_source[0], dedupe_source[1], target, sha256)
         else:
             _link_no_clobber(staging, staging_metadata, target, sha256)
-    _unlink_owned(staging, staging_metadata, "FILESYSTEM_OPERATION_FAILED")
     result = _desired_result(row, actual_relative, sha256, phash)
-    post_commit_failure: OperationError | None = None
+    _cleanup_composite_previous(root, row, actual_relative, index)
+    _record(index, result)
     try:
-        _cleanup_composite_previous(root, row, actual_relative, index)
-        _record(index, result)
-    except OperationError as error:
-        post_commit_failure = error
-    if post_commit_failure is not None:
-        current_staging = _lstat(staging, "STAGING_FILE_UNSAFE")
-        if current_staging is None:
-            _restore_staging_after_post_commit_failure(target, staging, sha256)
-        raise post_commit_failure
+        _unlink_owned(staging, staging_metadata, "FILESYSTEM_OPERATION_FAILED")
+    except OperationError:
+        pass
+    return result
+
+
+def _recovery_target_candidates(
+    root: Path, target_relative: PurePosixPath
+) -> list[tuple[PurePosixPath, Path]]:
+    relative_candidates = [
+        *(target_relative.with_suffix(suffix) for suffix in _FORMAT_SUFFIXES.values()),
+        target_relative,
+    ]
+    unique: list[PurePosixPath] = []
+    seen: set[str] = set()
+    for relative in relative_candidates:
+        folded = relative.as_posix().casefold()
+        if folded not in seen:
+            seen.add(folded)
+            unique.append(relative)
+
+    present: list[tuple[PurePosixPath, Path]] = []
+    for relative in unique:
+        lexical = root.joinpath(*relative.parts)
+        if _lstat(lexical, "TARGET_UNSAFE") is None:
+            continue
+        present.append((relative, _resolved_path(root, relative)))
+    return present
+
+
+def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult | None:
+    target_relative, _previous = _validated_row_path(row, "ADD")
+    stored = _index_exact(index, row)
+    candidates = _recovery_target_candidates(root, target_relative)
+    if len(candidates) > 1:
+        raise OperationError("ADD_RECOVERY_AMBIGUOUS")
+
+    staging_relative = target_relative.with_name(target_relative.name + ".part")
+    staging_lexical = root.joinpath(*staging_relative.parts)
+    staging_metadata = _lstat(staging_lexical, "STAGING_FILE_UNSAFE")
+    staging: Path | None = None
+    staging_image: tuple[str, str, int, int, int, str, os.stat_result] | None = None
+    if staging_metadata is not None:
+        staging = _resolved_path(root, staging_relative)
+        staging_image = _read_recovery_image(staging, None)
+
+    if not candidates and staging is None:
+        if stored is not None:
+            raise OperationError("COMPLETED_STATE_STALE")
+        return None
+
+    if candidates:
+        actual_relative, target = candidates[0]
+        target_image = _read_recovery_image(target, actual_relative)
+        if staging_image is not None and staging_image[0] != target_image[0]:
+            raise OperationError("ADD_RECOVERY_CONFLICT")
+    else:
+        assert staging is not None
+        assert staging_image is not None
+        actual_relative = target_relative.with_suffix(staging_image[5])
+        target = _ensure_parents(root, actual_relative)
+        target_metadata = _lstat(target, "TARGET_UNSAFE")
+        if target_metadata is not None:
+            raise OperationError("ADD_RECOVERY_AMBIGUOUS")
+        _link_no_clobber(staging, staging_image[6], target, staging_image[0])
+        target_image = _read_recovery_image(target, actual_relative)
+
+    sha256, phash, _byte_count, _width, _height, _suffix, _owned = target_image
+    result = _desired_result(row, actual_relative, sha256, phash)
+    if stored is not None and (
+        stored.relative_path != actual_relative
+        or stored.sha256 != sha256
+        or stored.perceptual_hash != phash
+    ):
+        raise OperationError("COMPLETED_STATE_STALE")
+    _cleanup_composite_previous(root, row, actual_relative, index)
+    _record(index, result)
+    if staging is not None and staging_image is not None:
+        try:
+            _unlink_owned(
+                staging, staging_image[6], "FILESYSTEM_OPERATION_FAILED"
+            )
+        except OperationError:
+            pass
     return result
 
 
@@ -696,10 +895,29 @@ def _run(
     index: SyncIndex,
     operation,
     *,
+    expected_action: str,
     logger: OperationLogger | None,
 ) -> SyncResult:
-    safe_root = _validated_root(root, index)
-    active_logger = _operation_logger(safe_root, row, logger)
+    setup_failure: OperationError | None = None
+    safe_root: Path | None = None
+    active_logger: OperationLogger | None = None
+    target_relative: PurePosixPath | None = None
+    previous_relative: PurePosixPath | None = None
+    try:
+        target_relative, previous_relative = _validated_row_path(
+            row, expected_action
+        )
+        safe_root = _validated_root(root, index)
+        active_logger = _operation_logger(safe_root, row, logger)
+    except OperationError as error:
+        setup_failure = error
+    except Exception:
+        setup_failure = OperationError("OPERATION_SETUP_FAILED")
+    if setup_failure is not None:
+        raise setup_failure from None
+    assert safe_root is not None
+    assert active_logger is not None
+    assert target_relative is not None
     failure: OperationError | None = None
     result: SyncResult | None = None
     try:
@@ -711,9 +929,11 @@ def _run(
     if failure is not None:
         _safe_log(
             active_logger,
-            row,
+            row.candidate_id,
+            row.action,
+            previous_relative,
             "FAILED",
-            row.target_relative_path,
+            target_relative,
             None,
             failure.code,
         )
@@ -721,7 +941,9 @@ def _run(
     assert result is not None
     _safe_log(
         active_logger,
-        row,
+        row.candidate_id,
+        row.action,
+        previous_relative,
         result.status,
         result.relative_path,
         result.sha256,
@@ -745,8 +967,71 @@ def apply_add(
         row,
         index,
         lambda safe_root: _apply_add(safe_root, row, download_result, index),
+        expected_action="ADD",
         logger=logger,
     )
+
+
+def recover_add(
+    root: Path,
+    row: ManifestRow,
+    index: SyncIndex,
+    *,
+    operation_log: OperationLogger | None = None,
+) -> SyncResult | None:
+    """Recover an ADD filesystem commit without accessing the network."""
+
+    setup_failure: OperationError | None = None
+    safe_root: Path | None = None
+    active_logger: OperationLogger | None = None
+    target_relative: PurePosixPath | None = None
+    previous_relative: PurePosixPath | None = None
+    try:
+        target_relative, previous_relative = _validated_row_path(row, "ADD")
+        safe_root = _validated_root(root, index)
+        active_logger = _operation_logger(safe_root, row, operation_log)
+    except OperationError as error:
+        setup_failure = error
+    except Exception:
+        setup_failure = OperationError("OPERATION_SETUP_FAILED")
+    if setup_failure is not None:
+        raise setup_failure from None
+    assert safe_root is not None
+    assert active_logger is not None
+    assert target_relative is not None
+
+    failure: OperationError | None = None
+    result: SyncResult | None = None
+    try:
+        result = _recover_add(safe_root, row, index)
+    except OperationError as error:
+        failure = error
+    except Exception:
+        failure = OperationError("UNEXPECTED_OPERATION_FAILURE")
+    if failure is not None:
+        _safe_log(
+            active_logger,
+            row.candidate_id,
+            row.action,
+            previous_relative,
+            "FAILED",
+            target_relative,
+            None,
+            failure.code,
+        )
+        raise failure from None
+    if result is not None:
+        _safe_log(
+            active_logger,
+            row.candidate_id,
+            row.action,
+            previous_relative,
+            result.status,
+            result.relative_path,
+            result.sha256,
+            None,
+        )
+    return result
 
 
 def apply_move(
@@ -763,6 +1048,7 @@ def apply_move(
         row,
         index,
         lambda safe_root: _apply_relocation(safe_root, row, index, "MOVE"),
+        expected_action="MOVE",
         logger=logger,
     )
 
@@ -781,5 +1067,6 @@ def apply_remove(
         row,
         index,
         lambda safe_root: _apply_relocation(safe_root, row, index, "REMOVE"),
+        expected_action="REMOVE",
         logger=logger,
     )
