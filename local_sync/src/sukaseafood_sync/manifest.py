@@ -183,7 +183,7 @@ def _https_url(value: str, field_name: str, *, required: bool = True) -> str | N
 
 
 def _is_windows_reserved_component(component: str) -> bool:
-    device_stem = component.partition(".")[0].upper()
+    device_stem = component.partition(".")[0].rstrip(" .").upper()
     return device_stem in _WINDOWS_RESERVED
 
 
@@ -237,9 +237,11 @@ def resolve_inside(root: Path, relative: str | PurePosixPath) -> Path:
     safe = validate_relative_path(relative)
     try:
         resolved_root = Path(root).resolve()
-        resolved = resolved_root.joinpath(*safe.parts).resolve(strict=False)
+        resolved = resolved_root
+        for component in safe.parts:
+            resolved = resolved.joinpath(component).resolve(strict=False)
         resolved.relative_to(resolved_root)
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         resolved = None
     if resolved is None:
         raise ManifestError("relative_path resolves outside the selected root") from None
