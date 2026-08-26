@@ -82,16 +82,18 @@ describe("authenticated password and logout flows", () => {
 
   it("logs out with CSRF and clears auth only after success", async () => {
     let resolveLogout!: (response: Response) => void;
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse(authState))
-      .mockImplementationOnce(
-        () =>
-          new Promise<Response>((resolve) => {
-            resolveLogout = resolve;
-          }),
-      )
-      .mockResolvedValueOnce(jsonResponse(fixedNames()));
+    const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
+      if (url.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+      if (url.endsWith("/auth/logout")) {
+        return new Promise<Response>((resolve) => {
+          resolveLogout = resolve;
+        });
+      }
+      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     renderWithAuth(<App />);
@@ -109,10 +111,14 @@ describe("authenticated password and logout flows", () => {
   it("also clears auth on logout 401", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn()
-        .mockResolvedValueOnce(jsonResponse(authState))
-        .mockResolvedValueOnce(jsonResponse({}, 401))
-        .mockResolvedValueOnce(jsonResponse(fixedNames())),
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
+        if (url.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+        if (url.endsWith("/auth/logout")) return Promise.resolve(jsonResponse({}, 401));
+        if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+        return Promise.reject(new Error(`Unexpected request: ${url}`));
+      }),
     );
     const user = userEvent.setup();
     renderWithAuth(<App />);
@@ -122,13 +128,20 @@ describe("authenticated password and logout flows", () => {
   });
 
   it("stays authenticated after transient logout failure and allows retry", async () => {
+    let logoutCalls = 0;
     vi.stubGlobal(
       "fetch",
-      vi.fn()
-        .mockResolvedValueOnce(jsonResponse(authState))
-        .mockResolvedValueOnce(jsonResponse({}, 503))
-        .mockResolvedValueOnce(new Response(null, { status: 204 }))
-        .mockResolvedValueOnce(jsonResponse(fixedNames())),
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
+        if (url.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+        if (url.endsWith("/auth/logout")) {
+          logoutCalls += 1;
+          return Promise.resolve(logoutCalls === 1 ? jsonResponse({}, 503) : new Response(null, { status: 204 }));
+        }
+        if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+        return Promise.reject(new Error(`Unexpected request: ${url}`));
+      }),
     );
     const user = userEvent.setup();
     renderWithAuth(<App />);

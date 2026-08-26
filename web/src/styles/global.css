@@ -20,7 +20,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -33,7 +34,9 @@ button:disabled {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
   outline: 3px solid #ffb703;
   outline-offset: 3px;
 }
@@ -186,6 +189,16 @@ h1 {
   font-weight: 800;
 }
 
+.danger-button {
+  min-height: 2.85rem;
+  padding: 0.65rem 1.1rem;
+  border: 1px solid #a43e38;
+  border-radius: 0.8rem;
+  color: #762d28;
+  background: #fff1ef;
+  font-weight: 800;
+}
+
 .primary-button {
   width: 100%;
   margin-top: 1.3rem;
@@ -314,6 +327,248 @@ h1 {
   box-shadow: 0 1rem 3rem rgba(7, 59, 76, 0.1);
 }
 
+.shell-notice {
+  width: min(72rem, calc(100% - 2rem));
+  margin: 1rem auto 0;
+}
+
+.review-workspace {
+  width: min(92rem, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: clamp(1.4rem, 4vw, 3rem) 0 4rem;
+}
+
+.review-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.review-heading .eyebrow {
+  margin-top: 0;
+}
+
+.session-progress {
+  padding: 0.75rem 1rem;
+  border: 1px solid #71a9a5;
+  border-radius: 999px;
+  color: #104750;
+  background: rgba(222, 247, 242, 0.92);
+  font-weight: 800;
+}
+
+.review-state {
+  display: grid;
+  min-height: 22rem;
+  place-content: center;
+  justify-items: center;
+  text-align: center;
+}
+
+.review-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.inline-actions,
+.image-actions,
+.rejection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.candidate-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(22rem, 0.8fr);
+  overflow: hidden;
+  border: 1px solid rgba(7, 59, 76, 0.14);
+  border-radius: 1.5rem;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 1.2rem 3.4rem rgba(7, 59, 76, 0.12);
+}
+
+.candidate-visual {
+  min-width: 0;
+  padding: clamp(0.75rem, 2vw, 1.25rem);
+  background: #092e38;
+}
+
+.image-stage,
+.image-stage__viewport {
+  min-height: min(68vh, 46rem);
+  height: 100%;
+}
+
+.image-stage__viewport {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  place-items: center;
+  border-radius: 1rem;
+  background: #051f27;
+}
+
+.candidate-image {
+  display: block;
+  width: 100%;
+  height: min(68vh, 46rem);
+  object-fit: contain;
+  opacity: 0;
+}
+
+.candidate-image--visible {
+  opacity: 1;
+}
+
+.image-stage__loading,
+.image-stage__error {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  max-width: 34rem;
+  place-items: center;
+  padding: 1.5rem;
+  color: #edfafa;
+  text-align: center;
+}
+
+.image-stage__loading {
+  gap: 0.8rem;
+}
+
+.image-stage__error p {
+  font-weight: 700;
+}
+
+.external-link {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.candidate-details {
+  min-width: 0;
+  padding: clamp(1.25rem, 3vw, 2rem);
+}
+
+.species-code {
+  margin: 0 0 0.35rem;
+  color: #4c7379;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.species-title h2 {
+  margin: 0;
+  color: #073b4c;
+  font-size: clamp(1.45rem, 3vw, 2rem);
+}
+
+.species-title em {
+  display: block;
+  margin-top: 0.35rem;
+  color: #587278;
+  font-family: Georgia, serif;
+  font-size: 0.72em;
+  font-weight: 500;
+}
+
+.metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem 1rem;
+  margin: 1.5rem 0;
+}
+
+.metadata-grid div {
+  min-width: 0;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid #d8e8e7;
+}
+
+.metadata-grid dt {
+  color: #617b80;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.metadata-grid dd {
+  overflow-wrap: anywhere;
+  margin: 0.25rem 0 0;
+  color: #153f49;
+}
+
+.decision-panel {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 2px solid #d8e8e7;
+}
+
+.decision-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.decision-button {
+  min-height: 3.4rem;
+  padding: 0.7rem;
+  border: 2px solid transparent;
+  border-radius: 1rem;
+  font-weight: 900;
+}
+
+.decision-button--keep {
+  border-color: #16735b;
+  color: #0d5946;
+  background: #dcf7eb;
+}
+
+.decision-button--reject {
+  border-color: #a43e38;
+  color: #762d28;
+  background: #fff0ee;
+}
+
+.decision-button--unsure {
+  border-color: #947018;
+  color: #684d0f;
+  background: #fff5d6;
+}
+
+.rejection-panel {
+  margin-top: 1rem;
+  padding: 1rem;
+  border-radius: 1rem;
+  background: #f3f9f8;
+}
+
+.rejection-panel .pill-group {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.rejection-panel .pill-choice {
+  flex: 1 1 10.5rem;
+}
+
+.rejection-notes {
+  margin-top: 1rem;
+}
+
+.rejection-notes textarea {
+  min-height: 6rem;
+  resize: vertical;
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -331,6 +586,28 @@ h1 {
 
   .user-actions {
     width: 100%;
+  }
+
+  .review-heading,
+  .review-notice {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .candidate-card {
+    grid-template-columns: 1fr;
+  }
+
+  .image-stage,
+  .image-stage__viewport,
+  .candidate-image {
+    min-height: 22rem;
+    height: 48vh;
+  }
+
+  .metadata-grid,
+  .decision-actions {
+    grid-template-columns: 1fr;
   }
 }
 

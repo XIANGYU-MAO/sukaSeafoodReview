@@ -6,6 +6,7 @@ interface PillChoiceGroupProps<T extends string> {
   value: T | null;
   onChange: (value: T) => void;
   disabled?: boolean;
+  getOptionLabel?: (value: T) => string;
 }
 
 export function PillChoiceGroup<T extends string>({
@@ -14,6 +15,7 @@ export function PillChoiceGroup<T extends string>({
   value,
   onChange,
   disabled = false,
+  getOptionLabel = (option) => option,
 }: PillChoiceGroupProps<T>) {
   const selectedIndex = value === null ? 0 : Math.max(0, options.indexOf(value));
 
@@ -70,7 +72,7 @@ export function PillChoiceGroup<T extends string>({
             onClick={() => onChange(option)}
             onKeyDown={(event) => handleKeyDown(event, index)}
           >
-            <span>{option}</span>
+            <span>{getOptionLabel(option)}</span>
             {selected ? (
               <span className="pill-choice__check" aria-hidden="true">
                 ✓

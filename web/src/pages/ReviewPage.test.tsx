@@ -99,13 +99,20 @@ describe("ReviewPage current candidate", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
     renderPage();
 
-    expect(await screen.findByRole("status")).toHaveTextContent("暂时没有待审核图片");
+    expect(await screen.findByText("暂时没有待审核图片。稍后重试即可。")).toHaveAttribute("role", "status");
     expect(screen.getByText("本次会话已完成 0 张")).toBeInTheDocument();
   });
 
   it.each([
     ["network failure", () => Promise.reject(new TypeError("offline"))],
     ["server failure", () => Promise.resolve(jsonResponse({}, 503))],
+    [
+      "non-JSON success",
+      () => Promise.resolve(new Response("<html>not candidate JSON</html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      })),
+    ],
     ["malformed success", () => Promise.resolve(jsonResponse({ preview_url: "https://x.test/a.jpg" }))],
   ])("makes a %s finite and retryable", async (_label, firstResponse) => {
     const fetchMock = vi
@@ -118,7 +125,7 @@ describe("ReviewPage current candidate", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("无法载入当前图片");
     await user.click(screen.getByRole("button", { name: "重试载入" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("暂时没有待审核图片");
+    expect(await screen.findByText("暂时没有待审核图片。稍后重试即可。")).toHaveAttribute("role", "status");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -280,7 +287,7 @@ describe("ReviewPage immediate decision state machine", () => {
     await user.click(screen.getByRole("button", { name: "重试保存" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("保存结果无法确认");
     await user.click(screen.getByRole("button", { name: "重试保存" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("暂时没有待审核图片");
+    expect(await screen.findByText("暂时没有待审核图片。稍后重试即可。")).toHaveAttribute("role", "status");
 
     const decisionCalls = fetchMock.mock.calls.filter(([input]) =>
       String(input).endsWith("/decision"),
@@ -369,6 +376,36 @@ describe("ReviewPage immediate decision state machine", () => {
     expect(screen.getByText("Piscis probatio")).toBeInTheDocument();
     expect(screen.getByText("本次会话已完成 0 张")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retires a definitively rejected key but retries the preserved payload with a new key", async () => {
+    const unsure = { decision: "UNSURE", rejection_reason: null, notes: null };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(candidate))
+      .mockResolvedValueOnce(jsonResponse({}, 422))
+      .mockResolvedValueOnce(jsonResponse(decisionResponse(unsure), 201))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    uuidSequence(
+      "10000000-0000-4000-8000-000000000001",
+      "10000000-0000-4000-8000-000000000002",
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("Piscis probatio");
+    await user.click(screen.getByRole("button", { name: "不确定 (U)" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("保存请求被明确拒绝");
+    await user.click(screen.getByRole("button", { name: "重试保存" }));
+    expect(await screen.findByText("暂时没有待审核图片。稍后重试即可。")).toBeInTheDocument();
+
+    const decisionCalls = fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/decision"));
+    expect(decisionCalls.map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"))).toEqual([
+      "10000000-0000-4000-8000-000000000001",
+      "10000000-0000-4000-8000-000000000002",
+    ]);
+    expect(new Set(decisionCalls.map(([, init]) => init?.body))).toHaveLength(1);
   });
 
   it("explains a 409 assignment conflict and refreshes current instead of replaying", async () => {
