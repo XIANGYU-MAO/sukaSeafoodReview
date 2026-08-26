@@ -6,6 +6,7 @@ import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { LoginPage } from "./pages/LoginPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { ReviewPage } from "./pages/ReviewPage";
+import { AdminPage } from "./pages/AdminPage";
 import { I18nProvider, useI18n } from "./i18n/I18nProvider";
 
 export const APP_PATHS = ["/", "/history", "/admin"] as const;
@@ -87,18 +88,15 @@ export function App() {
         <Route
           path="/admin"
           element={
-            <AuthenticatedShell
+            authenticatedUser.name === "Mao" && authenticatedUser.role === "admin" ? <AuthenticatedShell
               name={authenticatedUser.name}
               isAdmin={authenticatedUser.role === "admin"}
               onChangePassword={() => setChangingPassword(true)}
               onLogout={auth.logout}
             >
-              <DeferredPage
-                eyebrow="即将推出"
-                title="管理后台尚未接入"
-                description="Mao 中文后台将在后续任务接入真实管理接口。"
-              />
+              <AdminPage csrfToken={authenticatedUser.csrf_token} retryBootstrap={auth.retryBootstrap} />
             </AuthenticatedShell>
+            : <Navigate to="/" replace />
           }
         />
         <Route path="*" element={<Navigate to="/" replace />} />
@@ -168,23 +166,5 @@ function AuthenticatedShell({ name, isAdmin, onChangePassword, onLogout, childre
       ) : null}
       {children}
     </div>
-  );
-}
-
-function DeferredPage({
-  eyebrow,
-  title,
-  description,
-}: {
-  eyebrow: string;
-  title: string;
-  description: string;
-}) {
-  return (
-    <main className="placeholder-panel">
-      <p className="eyebrow">{eyebrow}</p>
-      <h1>{title}</h1>
-      <p>{description}</p>
-    </main>
   );
 }

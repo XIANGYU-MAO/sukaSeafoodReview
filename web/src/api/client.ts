@@ -19,7 +19,7 @@ export class ApiError extends Error {
 }
 
 export interface ApiRequestOptions extends Omit<RequestInit, "body" | "headers"> {
-  body?: unknown;
+  body?: unknown | BodyInit;
   csrfToken?: string;
   headers?: HeadersInit;
 }
@@ -30,7 +30,8 @@ export async function request<T = void>(
 ): Promise<T> {
   const { body, csrfToken, headers: suppliedHeaders, ...requestInit } = options;
   const headers = new Headers(suppliedHeaders);
-  if (body !== undefined) {
+  const rawBody = isRawBody(body);
+  if (body !== undefined && !rawBody) {
     headers.set("Content-Type", "application/json");
   }
   if (csrfToken) {
@@ -41,7 +42,7 @@ export async function request<T = void>(
     ...requestInit,
     credentials: "include",
     headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: body === undefined ? undefined : rawBody ? body : JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -61,6 +62,10 @@ export async function request<T = void>(
   } catch {
     throw new ApiError(response.status, SAFE_PROTOCOL_FAILURE);
   }
+}
+
+function isRawBody(body: unknown): body is BodyInit {
+  return body instanceof FormData || body instanceof Blob || body instanceof URLSearchParams || typeof body === "string";
 }
 
 function normalizePath(path: string): string {
