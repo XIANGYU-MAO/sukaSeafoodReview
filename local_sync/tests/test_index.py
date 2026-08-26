@@ -120,6 +120,56 @@ def test_rejects_windows_reparse_point_before_sqlite_open(
     assert marker.read_bytes() == b"unchanged"
 
 
+def test_absent_database_rejects_linked_rollback_journal_before_sqlite_open(
+    sync_root: Path, tmp_path: Path
+) -> None:
+    sync_root.mkdir()
+    database = sync_root / ".sukaseafood-sync.sqlite3"
+    journal = Path(f"{database}-journal")
+    outside = tmp_path / "outside-journal.bin"
+    original = b"outside-journal-must-not-change"
+    outside.write_bytes(original)
+    try:
+        journal.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"journal symlink creation unavailable: {exc}")
+
+    try:
+        with pytest.raises(SyncIndexError, match="sidecar|symlink|reparse"):
+            SyncIndex(sync_root)
+    finally:
+        assert outside.read_bytes() == original
+
+    assert not database.exists()
+    assert journal.is_symlink()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_canonical_database_rejects_linked_wal_sidecars_without_touching_them(
+    sync_root: Path, tmp_path: Path, suffix: str
+) -> None:
+    index = SyncIndex(sync_root)
+    sidecar = Path(f"{index.path}{suffix}")
+    assert not sidecar.exists()
+    outside = tmp_path / f"outside-{suffix[1:]}.bin"
+    original = f"outside-{suffix}-must-not-change".encode()
+    outside.write_bytes(original)
+    try:
+        sidecar.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"{suffix} symlink creation unavailable: {exc}")
+    database_before = index.path.read_bytes()
+
+    try:
+        with pytest.raises(SyncIndexError, match="sidecar|symlink|reparse"):
+            SyncIndex(sync_root)
+    finally:
+        assert outside.read_bytes() == original
+
+    assert index.path.read_bytes() == database_before
+    assert sidecar.is_symlink()
+
+
 @pytest.mark.parametrize("attempt", range(3))
 def test_concurrent_first_initialization_is_serialized_and_idempotent(
     sync_root: Path, attempt: int
@@ -431,6 +481,50 @@ def test_rejects_exact_columns_and_primary_key_when_checks_are_missing(
 
     with pytest.raises(SyncIndexError, match="incompatible"):
         SyncIndex(sync_root)
+
+
+def test_schema_fingerprint_preserves_action_literal_case_and_database_bytes(
+    sync_root: Path,
+) -> None:
+    sync_root.mkdir()
+    db = sync_root / ".sukaseafood-sync.sqlite3"
+    with closing(sqlite3.connect(db)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE synced_items (
+                candidate_id TEXT NOT NULL,
+                review_id TEXT NOT NULL,
+                review_version INTEGER NOT NULL CHECK (
+                    review_version >= 1 AND review_version <= 9223372036854775807
+                ),
+                action TEXT NOT NULL CHECK (action IN ('add', 'move', 'remove')),
+                batch_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                perceptual_hash TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                receipt_submitted_at TEXT,
+                PRIMARY KEY (candidate_id, review_id, review_version, action)
+            )
+            """
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+    before = db.read_bytes()
+
+    with pytest.raises(SyncIndexError, match="incompatible"):
+        SyncIndex(sync_root)
+
+    assert db.read_bytes() == before
+    with closing(sqlite3.connect(db)) as connection:
+        assert connection.execute("SELECT count(*) FROM synced_items").fetchone()[0] == 0
+
+
+def test_canonical_action_literal_case_is_accepted(sync_root: Path) -> None:
+    index = SyncIndex(sync_root)
+
+    assert index.path.is_file()
+    assert not index.is_completed(CANDIDATE_ID, REVIEW_ID, 1, "ADD")
 
 
 def test_rejects_sha_corrupting_trigger_before_any_record_and_without_db_change(

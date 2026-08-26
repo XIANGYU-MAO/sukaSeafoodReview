@@ -276,6 +276,63 @@ def test_rejects_nul_and_non_newline_controls_in_text(tmp_path: Path) -> None:
             load_manifest(path)
 
 
+@pytest.mark.parametrize("field", ["creator", "license", "attribution"])
+def test_rejects_unicode_c1_controls_in_human_text_without_exposing_secret(
+    tmp_path: Path, field: str
+) -> None:
+    unsafe = f"human\u009ftext-{RECEIPT_TOKEN}"
+    path = write_manifest(tmp_path, rows=[valid_row(**{field: unsafe})])
+
+    with pytest.raises(ManifestError, match="control") as caught:
+        load_manifest(path)
+
+    assert RECEIPT_TOKEN not in str(caught.value)
+    assert unsafe not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["preview_url", "original_url", "source_url", "license_url"],
+)
+def test_rejects_unicode_c1_controls_in_urls_without_exposing_secret(
+    tmp_path: Path, field: str
+) -> None:
+    unsafe = f"https://example.test/{RECEIPT_TOKEN}\u009fasset"
+    path = write_manifest(tmp_path, rows=[valid_row(**{field: unsafe})])
+
+    with pytest.raises(ManifestError, match="control") as caught:
+        load_manifest(path)
+
+    assert RECEIPT_TOKEN not in str(caught.value)
+    assert unsafe not in str(caught.value)
+
+
+def test_rejects_unicode_c1_control_in_receipt_token_without_echoing_it(
+    tmp_path: Path,
+) -> None:
+    unsafe = f"{RECEIPT_TOKEN}\u009f"
+    path = write_manifest(tmp_path, rows=[valid_row(receipt_token=unsafe)])
+
+    with pytest.raises(ManifestError, match="control") as caught:
+        load_manifest(path)
+
+    assert unsafe not in str(caught.value)
+
+
+@pytest.mark.parametrize("field", ["creator", "license", "attribution"])
+@pytest.mark.parametrize("newline", ["\r\n", "\n"])
+def test_preserves_quoted_newlines_only_in_approved_human_text_fields(
+    tmp_path: Path, field: str, newline: str
+) -> None:
+    value = f"Line one{newline}Line two"
+
+    manifest = load_manifest(
+        write_manifest(tmp_path, rows=[valid_row(**{field: value})])
+    )
+
+    assert getattr(manifest.rows[0], field) == value
+
+
 @pytest.mark.parametrize("field", ["preview_url", "original_url", "source_url"])
 @pytest.mark.parametrize(
     "value",
@@ -346,6 +403,11 @@ def test_rejects_windows_unsafe_relative_paths(tmp_path: Path, target: str) -> N
 def test_shared_path_validator_rejects_delete_control_character() -> None:
     with pytest.raises(ManifestError, match="control"):
         validate_relative_path("images/SF006/bad\x7fname.jpg")
+
+
+def test_shared_path_validator_rejects_unicode_c1_control_character() -> None:
+    with pytest.raises(ManifestError, match="control"):
+        validate_relative_path("images/SF006/bad\u0085name.jpg")
 
 
 @pytest.mark.parametrize(
