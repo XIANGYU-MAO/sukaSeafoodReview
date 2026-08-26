@@ -22,7 +22,9 @@ from .engine import BatchResult, ReceiptItem
 from .index import SyncIndex
 from .manifest import (
     ExportManifest,
+    MAX_MANIFEST_BYTES,
     ManifestError,
+    SUPPORTED_SUFFIXES,
     _TOKEN_PATTERN,
     validate_relative_path,
 )
@@ -45,6 +47,8 @@ _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 _AUTHENTICATION_STATUSES = frozenset({401, 403})
 _VALIDATION_STATUSES = frozenset({400, 404, 422})
 _MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_RECEIPT_FILE_BYTES = MAX_MANIFEST_BYTES
+MAX_RECEIPT_JSON_DEPTH = 8
 _REPARSE_POINT = 0x400
 
 
@@ -344,6 +348,15 @@ def _validated_api_base(api_base: object) -> str | None:
     else:
         return None
     return api_base.rstrip("/")
+
+
+def validate_api_base(api_base: object) -> str:
+    """Return the canonical receipt API base or raise a stable safe error."""
+
+    validated = _validated_api_base(api_base)
+    if validated is None:
+        raise ReceiptError("INVALID_API_BASE")
+    return validated
 
 
 def _safe_result(
@@ -729,3 +742,101 @@ def save_receipt_file(receipt: Receipt, path: str | os.PathLike[str]) -> Path:
     if write_failed:
         raise ReceiptError("FILE_WRITE_FAILED")
     return target
+
+
+def load_receipt_file(
+    path: str | os.PathLike[str],
+    manifest: ExportManifest,
+) -> Receipt:
+    """Load the exact offline schema and bind it to its original manifest."""
+
+    if not isinstance(manifest, ExportManifest):
+        raise ReceiptError("INVALID_MANIFEST")
+    try:
+        requested = Path(path)
+        selected_metadata = requested.lstat()
+        if (
+            not stat.S_ISREG(selected_metadata.st_mode)
+            or stat.S_ISLNK(selected_metadata.st_mode)
+            or _is_reparse(selected_metadata)
+        ):
+            raise OSError("unsafe receipt file")
+        with requested.open("rb") as stream:
+            opened_metadata = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened_metadata.st_mode)
+                or _is_reparse(opened_metadata)
+                or not os.path.samestat(selected_metadata, opened_metadata)
+            ):
+                raise OSError("receipt file changed")
+            encoded = stream.read(MAX_RECEIPT_FILE_BYTES + 1)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        raise ReceiptError("INVALID_RECEIPT_FILE") from None
+    if len(encoded) > MAX_RECEIPT_FILE_BYTES:
+        raise ReceiptError("RECEIPT_FILE_TOO_LARGE")
+    try:
+        payload = json.loads(encoded.decode("utf-8"))
+    except Exception:
+        raise ReceiptError("INVALID_RECEIPT_FILE") from None
+    stack: list[tuple[object, int]] = [(payload, 1)]
+    while stack:
+        value, depth = stack.pop()
+        if depth > MAX_RECEIPT_JSON_DEPTH:
+            raise ReceiptError("RECEIPT_FILE_TOO_DEEP")
+        if isinstance(value, dict):
+            stack.extend((child, depth + 1) for child in value.values())
+        elif isinstance(value, list):
+            stack.extend((child, depth + 1) for child in value)
+    if not isinstance(payload, dict) or set(payload) != {"batch_id", "items"}:
+        raise ReceiptError("INVALID_RECEIPT_FILE")
+    if payload["batch_id"] != str(manifest.batch_id):
+        raise ReceiptError("BATCH_MISMATCH")
+    raw_items = payload["items"]
+    if not isinstance(raw_items, list) or not 1 <= len(raw_items) <= len(manifest.rows):
+        raise ReceiptError("INVALID_RECEIPT_FILE")
+    items: list[ReceiptItem] = []
+    actions: list[tuple[str, str, int, str]] = []
+    for position, raw in enumerate(raw_items):
+        if not isinstance(raw, dict) or set(raw) != set(_ONLINE_ITEM_KEYS):
+            raise ReceiptError("INVALID_RECEIPT_FILE")
+        try:
+            item = ReceiptItem(**raw)
+        except (TypeError, ValueError):
+            raise ReceiptError("INVALID_RECEIPT_FILE") from None
+        row = manifest.rows[position]
+        if (
+            item.candidate_id != str(row.candidate_id)
+            or item.review_id != str(row.review_id)
+            or item.review_version != row.review_version
+        ):
+            raise ReceiptError("ITEM_MISMATCH")
+        if item.status == "SUCCEEDED":
+            try:
+                received_path = validate_relative_path(
+                    item.relative_path,
+                    "relative_path",
+                )
+            except (ManifestError, TypeError, ValueError):
+                raise ReceiptError("ITEM_MISMATCH") from None
+            target = row.target_relative_path
+            suffix_adjustment = (
+                row.action == "ADD"
+                and received_path.parent == target.parent
+                and received_path.stem == target.stem
+                and received_path.suffix.lower() in SUPPORTED_SUFFIXES
+            )
+            if received_path != target and not suffix_adjustment:
+                raise ReceiptError("ITEM_MISMATCH")
+        items.append(item)
+        actions.append(
+            (item.candidate_id, item.review_id, item.review_version, row.action)
+        )
+    try:
+        return Receipt(
+            manifest.batch_id,
+            tuple(items),
+            tuple(actions),
+            tuple(str(row.candidate_id) for row in manifest.rows),
+        )
+    except ReceiptError:
+        raise ReceiptError("INVALID_RECEIPT_FILE") from None

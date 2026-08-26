@@ -23,6 +23,7 @@ from .receipt import (
     ReceiptError,
     SubmitResult,
     build_receipt,
+    load_receipt_file,
     save_receipt_file,
     submit_receipt,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "recover_add",
     "build_receipt",
     "load_manifest",
+    "load_receipt_file",
     "save_receipt_file",
     "submit_receipt",
 ]

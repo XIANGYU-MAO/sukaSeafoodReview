@@ -13,6 +13,9 @@ dependencies = [
     "ImageHash>=4.3,<5",
 ]
 
+[project.scripts]
+suka-seafood-sync = "sukaseafood_sync.cli:main"
+
 [project.optional-dependencies]
 test = ["pytest>=8.3,<9", "responses>=0.25,<1"]
 
