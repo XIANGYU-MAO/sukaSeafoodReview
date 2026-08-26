@@ -274,6 +274,85 @@ def test_regular_rollback_journal_removed_after_lstat_is_treated_as_absent(
     assert index.path.is_file()
 
 
+def test_sidecar_transient_resolution_failure_then_disappearance_is_absent(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    journal = Path(f"{index.path}-journal")
+    journal.write_bytes(b"transient SQLite rollback journal")
+    original_resolve = Path.resolve
+    failures = 0
+
+    def disappear_and_fail_once(candidate: Path, strict: bool = False) -> Path:
+        nonlocal failures
+        if candidate == journal and strict and failures == 0:
+            failures += 1
+            journal.unlink()
+            raise OSError("transient SQLite sidecar lifecycle")
+        return original_resolve(candidate, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", disappear_and_fail_once)
+
+    index._validate_sqlite_path(journal, sidecar=True)
+
+    assert failures == 1
+    assert not journal.exists()
+
+
+def test_sidecar_transient_resolution_failure_then_identity_change_retries(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    journal = Path(f"{index.path}-journal")
+    retired = sync_root / "retired-transient-journal"
+    journal.write_bytes(b"first SQLite sidecar identity")
+    original_resolve = Path.resolve
+    resolutions = 0
+
+    def replace_and_fail_once(candidate: Path, strict: bool = False) -> Path:
+        nonlocal resolutions
+        if candidate == journal and strict:
+            resolutions += 1
+            if resolutions == 1:
+                journal.replace(retired)
+                journal.write_bytes(b"second SQLite sidecar identity")
+                raise OSError("transient SQLite sidecar lifecycle")
+        return original_resolve(candidate, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", replace_and_fail_once)
+
+    index._validate_sqlite_path(journal, sidecar=True)
+
+    assert resolutions == 2
+    assert retired.read_bytes() == b"first SQLite sidecar identity"
+    assert journal.read_bytes() == b"second SQLite sidecar identity"
+
+
+def test_same_sidecar_with_persistent_resolution_failure_exhausts_bound(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    journal = Path(f"{index.path}-journal")
+    journal.write_bytes(b"same regular SQLite sidecar")
+    original_resolve = Path.resolve
+    resolutions = 0
+
+    def fail_same_entry(candidate: Path, strict: bool = False) -> Path:
+        nonlocal resolutions
+        if candidate == journal and strict:
+            resolutions += 1
+            raise OSError("persistent SQLite sidecar resolution failure")
+        return original_resolve(candidate, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fail_same_entry)
+
+    with pytest.raises(SyncIndexError, match="sidecar.*selected root"):
+        index._validate_sqlite_path(journal, sidecar=True)
+
+    assert resolutions == 2
+    assert journal.read_bytes() == b"same regular SQLite sidecar"
+
+
 @pytest.mark.parametrize("replacement", ["symlink", "directory"])
 def test_sidecar_symlink_reparse_or_nonregular_swap_is_rejected_without_touching_outside(
     sync_root: Path,
@@ -708,12 +787,14 @@ print('CLEARED' if index.clear_add_intent_if_matches(expected) else 'UNCHANGED')
     gate.write_text("go", encoding="ascii")
     outputs = [process.communicate(timeout=30) for process in processes]
 
-    assert sorted(stdout.strip() for stdout, _stderr in outputs) == [
-        "CLEARED",
-        "UNCHANGED",
+    observed = sorted(
+        (process.returncode, stdout.strip(), stderr)
+        for process, (stdout, stderr) in zip(processes, outputs, strict=True)
+    )
+    assert observed == [
+        (0, "CLEARED", ""),
+        (0, "UNCHANGED", ""),
     ]
-    assert all(process.returncode == 0 for process in processes)
-    assert all(stderr == "" for _stdout, stderr in outputs)
     assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 1, "ADD") is None
 
 

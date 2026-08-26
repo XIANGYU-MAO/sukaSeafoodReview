@@ -361,9 +361,22 @@ class SyncIndex:
             except (OSError, RuntimeError, ValueError):
                 resolution_failed = True
             if resolution_failed:
-                raise SyncIndexError(
-                    f"{label} path must remain inside the selected root"
-                )
+                if not sidecar:
+                    raise SyncIndexError(
+                        f"{label} path must remain inside the selected root"
+                    )
+                self._validate_sqlite_parent(candidate, label=label)
+                current = self._inspect_sqlite_path(candidate, label=label)
+                if current is None:
+                    return
+                self._validate_sqlite_metadata(current, label=label)
+                if os.path.samestat(metadata, current):
+                    if attempt + 1 == attempts:
+                        raise SyncIndexError(
+                            f"{label} path must remain inside the selected root"
+                        )
+                    time.sleep(0)
+                continue
             if resolution_missing:
                 if not sidecar:
                     raise SyncIndexError(
