@@ -8,7 +8,8 @@ import { ReviewsTab } from "../admin/ReviewsTab";
 import { SpeciesTab } from "../admin/SpeciesTab";
 import { UsersTab } from "../admin/UsersTab";
 import { useAdminQuery } from "../admin/common";
-import { parseAdminUsers, parseSpeciesList } from "../admin/types";
+import { useSpeciesDirectory } from "../admin/directory";
+import { parseAdminSources, parseAdminUsers } from "../admin/types";
 
 const TABS = [
   ["progress", "审核进度", ProgressTab],
@@ -21,14 +22,16 @@ const TABS = [
 ] as const;
 const EMPTY_USERS: never[] = [];
 const EMPTY_SPECIES: never[] = [];
+const EMPTY_SOURCES: string[] = [];
 
 export function AdminPage({ csrfToken, retryBootstrap }: { csrfToken: string; retryBootstrap: () => Promise<void> }) {
   const [active, setActive] = useState(0);
   const [visited, setVisited] = useState(() => new Set([0]));
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const usersQuery = useAdminQuery("/admin/users", parseAdminUsers, retryBootstrap);
-  const speciesQuery = useAdminQuery("/admin/species?active=true&limit=100&offset=0", parseSpeciesList, retryBootstrap);
-  const refreshDirectories = useCallback(() => { usersQuery.reload(); speciesQuery.reload(); }, [speciesQuery.reload, usersQuery.reload]);
+  const speciesQuery = useSpeciesDirectory(retryBootstrap);
+  const sourcesQuery = useAdminQuery("/admin/sources", parseAdminSources, retryBootstrap);
+  const refreshDirectories = useCallback(() => { usersQuery.reload(); speciesQuery.reload(); sourcesQuery.reload(); }, [sourcesQuery.reload, speciesQuery.reload, usersQuery.reload]);
 
   useEffect(() => { setVisited((current) => current.has(active) ? current : new Set(current).add(active)); }, [active]);
 
@@ -50,12 +53,14 @@ export function AdminPage({ csrfToken, retryBootstrap }: { csrfToken: string; re
     retryBootstrap,
     users: usersQuery.data?.items ?? EMPTY_USERS,
     species: speciesQuery.data?.items ?? EMPTY_SPECIES,
+    sources: sourcesQuery.data?.sources ?? EMPTY_SOURCES,
+    directoriesUnavailable: usersQuery.unavailable || speciesQuery.unavailable || sourcesQuery.unavailable,
     refreshDirectories,
   };
 
   return <main className="admin-workspace" lang="zh-CN">
     <div className="admin-heading"><p className="eyebrow">Mao 管理</p><h1>中文管理后台</h1><p>管理共享审核、目录、导入和本地训练集同步。</p></div>
-    {usersQuery.error || speciesQuery.error ? <div role="alert" className="notice notice--error">管理选项加载失败。<button className="text-button" type="button" onClick={refreshDirectories}>重试</button></div> : null}
+    {usersQuery.error || speciesQuery.error || sourcesQuery.error ? <div role="alert" className="notice notice--error">管理选项加载失败。<button className="text-button" type="button" onClick={refreshDirectories}>重试</button></div> : null}
     <div className="admin-tabs" role="tablist" aria-label="后台管理功能">
       {TABS.map(([key, label], index) => <button
         key={key}

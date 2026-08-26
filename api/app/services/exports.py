@@ -491,17 +491,20 @@ async def batch_response(
     )
 
 
-async def list_batches(session: AsyncSession) -> list[ExportBatchResponse]:
+async def list_batches(
+    session: AsyncSession, *, limit: int = 100, offset: int = 0
+) -> tuple[int, list[ExportBatchResponse]]:
+    total = int(await session.scalar(select(func.count()).select_from(ExportBatch)) or 0)
     batches = list(
         (
             await session.scalars(
                 select(ExportBatch).order_by(
                     ExportBatch.created_at.desc(), ExportBatch.id.desc()
-                )
+                ).limit(limit).offset(offset)
             )
         ).all()
     )
-    return [await batch_response(session, batch) for batch in batches]
+    return total, [await batch_response(session, batch) for batch in batches]
 
 
 async def pending_counts(session: AsyncSession) -> dict[str, int]:

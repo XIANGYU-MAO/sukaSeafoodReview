@@ -14,6 +14,7 @@ from app.schemas.admin import (
     AdminReviewFilters,
     AdminReviewListResponse,
     AdminReviewPatchRequest,
+    AdminSourceListResponse,
     AdminUserListResponse,
     CandidateAdminResponse,
     CandidateFilters,
@@ -39,6 +40,7 @@ from app.services.admin import (
     create_species,
     edit_admin_review,
     list_admin_reviews,
+    list_admin_sources,
     list_admin_users,
     list_candidates,
     list_current,
@@ -74,6 +76,14 @@ async def get_users(
     db: AsyncSession = Depends(get_db),
 ) -> AdminUserListResponse:
     return await list_admin_users(db)
+
+
+@router.get("/sources", response_model=AdminSourceListResponse)
+async def get_sources(
+    _: CurrentAuth = Depends(require_admin_access),
+    db: AsyncSession = Depends(get_db),
+) -> AdminSourceListResponse:
+    return await list_admin_sources(db)
 
 
 @router.get("/species", response_model=SpeciesListResponse)

@@ -26,6 +26,7 @@ from app.schemas.admin import (
     AdminReviewListResponse,
     AdminReviewPatchRequest,
     AdminReviewSummary,
+    AdminSourceListResponse,
     AdminSpeciesSummary,
     AdminUserDirectoryItem,
     AdminUserListResponse,
@@ -204,6 +205,23 @@ async def list_admin_users(session: AsyncSession) -> AdminUserListResponse:
         if name in by_name
     ]
     return AdminUserListResponse(total=len(items), items=items)
+
+
+async def list_admin_sources(session: AsyncSession) -> AdminSourceListResponse:
+    sources = list(
+        (
+            await session.scalars(
+                select(Candidate.source_dataset)
+                .distinct()
+                .limit(1001)
+            )
+        ).all()
+    )
+    if len(sources) > 1000:
+        raise RuntimeError("admin source catalog exceeds supported cardinality")
+    return AdminSourceListResponse(
+        sources=sorted(sources, key=lambda value: (value.casefold(), value))
+    )
 
 
 async def _candidate_response(

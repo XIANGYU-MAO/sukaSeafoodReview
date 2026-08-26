@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { ApiError, request } from "../api/client";
 import { adminMutation, mutationMessage, type AdminTabProps } from "./common";
@@ -16,23 +16,30 @@ const ISSUE_LABELS: Record<string, string> = {
 
 export function ImportsTab(props: AdminTabProps) {
   const [file, setFile] = useState<File | null>(null); const [preview, setPreview] = useState<ImportPreview | null>(null); const [pending, setPending] = useState(false); const [confirming, setConfirming] = useState(false); const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
-  function choose(next: File | null) { setFile(next); setPreview(null); setConfirming(false); setNotice(null); }
+  const generation = useRef(0); const previewController = useRef<AbortController | null>(null);
+  function choose(next: File | null) { generation.current += 1; previewController.current?.abort(); previewController.current = null; setPending(false); setFile(next); setPreview(null); setConfirming(false); setNotice(null); }
   async function runPreview() {
     if (!file || pending) return; if (!file.name.toLowerCase().endsWith(".csv")) { setNotice({ kind: "error", text: "只接受 .csv 文件。" }); return; }
-    const form = new FormData(); form.append("file", file); setPending(true); setNotice(null);
+    const selectedFile = file; const owner = ++generation.current; previewController.current?.abort(); const controller = new AbortController(); previewController.current = controller;
+    const form = new FormData(); form.append("file", selectedFile); setPreview(null); setConfirming(false); setPending(true); setNotice(null);
     try {
-      const raw = await request<unknown>("/admin/imports/preview", { method: "POST", body: form, csrfToken: props.csrfToken });
-      const parsed = parseImportPreview(raw); setPreview(parsed); setNotice(parsed.can_commit ? null : { kind: "error", text: "预检查发现阻断问题，不能提交。" });
+      const raw = await request<unknown>("/admin/imports/preview", { method: "POST", body: form, csrfToken: props.csrfToken, signal: controller.signal });
+      const parsed = parseImportPreview(raw); if (owner !== generation.current || controller.signal.aborted || selectedFile !== file) return; setPreview(parsed); setNotice(parsed.can_commit ? null : { kind: "error", text: "预检查发现阻断问题，不能提交。" });
     } catch (error) {
+      if (owner !== generation.current || controller.signal.aborted) return;
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) void props.retryBootstrap();
-      const code = error instanceof ApiError && typeof error.body === "object" && error.body && "detail" in error.body && typeof error.body.detail === "object" && error.body.detail && "code" in error.body.detail ? String(error.body.detail.code) : "";
+      const detail = error instanceof ApiError && typeof error.body === "object" && error.body && "detail" in error.body && typeof error.body.detail === "object" && error.body.detail ? error.body.detail as Record<string, unknown> : null;
+      const code = detail && typeof detail.code === "string" ? detail.code : "";
+      if (error instanceof ApiError && (error.status === 413 || error.status === 422) && detail && "report" in detail) {
+        try { const report = parseImportPreview(detail.report); if (!report.can_commit && report.preview_token === null) setPreview(report); } catch { /* Malformed reports remain opaque. */ }
+      }
       setNotice({ kind: "error", text: ISSUE_LABELS[code] ?? "预检查失败，请检查 CSV 后重试。" });
-    } finally { setPending(false); }
+    } finally { if (owner === generation.current) { setPending(false); previewController.current = null; } }
   }
   async function commit() {
     if (!preview?.can_commit || !preview.preview_token || pending) return; setPending(true); setNotice(null);
     try { const raw = await adminMutation<unknown>("/admin/imports/commit", { method: "POST", body: { preview_token: preview.preview_token }, csrfToken: props.csrfToken }, props.retryBootstrap); const result = parseImportResult(raw, preview); setPreview(null); setFile(null); setConfirming(false); setNotice({ kind: "success", text: `导入完成：新增 ${result.inserted}，跳过完全重复 ${result.skipped_exact}，可能重复地址 ${result.possible_url_duplicates}。` }); }
-    catch (error) { setNotice({ kind: "error", text: error instanceof ApiError && error.status === 409 ? "预检查已过期、已使用或与当前会话/数据库不一致，请重新预检查。" : mutationMessage(error) }); }
+    catch (error) { if (error instanceof ApiError && error.status === 409) { setPreview(null); setConfirming(false); } setNotice({ kind: "error", text: error instanceof ApiError && error.status === 409 ? "预检查已过期、已使用或与当前会话/数据库不一致，请重新预检查。" : mutationMessage(error) }); }
     finally { setPending(false); }
   }
   const summaries = preview ? [

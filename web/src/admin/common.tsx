@@ -8,6 +8,8 @@ export interface AdminTabProps {
   retryBootstrap: () => Promise<void>;
   users: AdminUser[];
   species: Required<AdminSpecies>[];
+  sources: string[];
+  directoriesUnavailable: boolean;
   refreshDirectories: () => void;
 }
 
@@ -15,6 +17,7 @@ export interface QueryState<T> {
   data: T | null;
   loading: boolean;
   error: string | null;
+  unavailable: boolean;
   reload: () => void;
 }
 
@@ -54,14 +57,18 @@ export function useAdminQuery<T>(
       });
     return () => controller.abort();
   }, [generation, parse, path, retryBootstrap]);
-  return { data, loading, error, reload };
+  return { data, loading, error, unavailable: loading || error !== null, reload };
 }
 
-export function QueryBoundary<T>({ query, children, empty = "暂无数据" }: { query: QueryState<T>; children: (data: T) => ReactNode; empty?: string }) {
+export function QueryBoundary<T>({ query, children, empty = "暂无数据" }: { query: QueryState<T>; children: (data: T, unavailable: boolean) => ReactNode; empty?: string }) {
   if (query.loading && !query.data) return <p role="status" className="admin-state">正在加载…</p>;
   if (query.error && !query.data) return <div className="notice notice--error" role="alert">{query.error}<button type="button" className="text-button" onClick={query.reload}>重试</button></div>;
   if (!query.data) return <p className="admin-state">{empty}</p>;
-  return <>{children(query.data)}</>;
+  return <div className="admin-refresh-boundary" aria-busy={query.loading || undefined}>
+    {query.loading ? <p role="status" className="notice">正在刷新，旧数据暂不可操作…</p> : null}
+    {query.error ? <div className="notice notice--error" role="alert">刷新失败，旧数据暂不可操作。<button type="button" className="text-button" onClick={query.reload}>重试刷新</button></div> : null}
+    {children(query.data, query.unavailable)}
+  </div>;
 }
 
 export async function adminMutation<T>(
@@ -83,18 +90,20 @@ export function mutationMessage(error: unknown, conflictText = "数据已被更�
   return "操作失败，请重试。";
 }
 
-export function PageControls({ offset, total, limit, onChange }: { offset: number; total: number; limit: number; onChange: (next: number) => void }) {
+export function PageControls({ offset, total, limit, onChange, disabled = false }: { offset: number; total: number; limit: number; onChange: (next: number) => void; disabled?: boolean }) {
   return <div className="history-pagination">
-    <button type="button" className="secondary-button" disabled={offset === 0} onClick={() => onChange(Math.max(0, offset - limit))}>上一页</button>
+    <button type="button" className="secondary-button" disabled={disabled || offset === 0} onClick={() => onChange(Math.max(0, offset - limit))}>上一页</button>
     <span>{Math.floor(offset / limit) + 1} / {Math.max(1, Math.ceil(total / limit))}</span>
-    <button type="button" className="secondary-button" disabled={offset + limit >= total} onClick={() => onChange(offset + limit)}>下一页</button>
+    <button type="button" className="secondary-button" disabled={disabled || offset + limit >= total} onClick={() => onChange(offset + limit)}>下一页</button>
   </div>;
 }
 
 export const sourceLabels: Record<string, string> = {
   INATURALIST: "iNaturalist",
+  iNaturalist: "iNaturalist",
   GBIF: "GBIF",
   WIKIMEDIA_COMMONS: "维基共享资源",
+  Wikimedia: "维基共享资源",
   FISH_VISTA: "Fish-Vista",
 };
 export function sourceLabel(code: string): string { return sourceLabels[code] ?? code; }

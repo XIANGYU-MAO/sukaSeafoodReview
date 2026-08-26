@@ -145,6 +145,12 @@ class AdminUserListResponse(BaseModel):
     items: list[AdminUserDirectoryItem]
 
 
+class AdminSourceListResponse(BaseModel):
+    sources: list[Annotated[str, StringConstraints(min_length=1, max_length=128)]] = Field(
+        max_length=1000
+    )
+
+
 class AdminSpeciesSummary(BaseModel):
     id: UUID
     code: str

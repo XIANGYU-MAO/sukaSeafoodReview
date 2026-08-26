@@ -17,6 +17,7 @@ export interface AdminUser {
 }
 
 export interface AdminUserList { total: number; items: AdminUser[] }
+export interface AdminSourceList { sources: string[] }
 
 export interface AdminSpecies {
   id: string;
@@ -155,6 +156,15 @@ export function parseAdminUsers(value: unknown): AdminUserList {
   } catch { throw new Error("管理员账号响应无效"); }
 }
 
+export function parseAdminSources(value: unknown): AdminSourceList {
+  try {
+    const root = object(value); exact(root, ["sources"]);
+    const sources = array(root.sources, 1_000).map((value) => text(value, 128));
+    if (new Set(sources).size !== sources.length || sources.some((value, index) => index > 0 && sources[index - 1].localeCompare(value, undefined, { sensitivity: "base" }) > 0)) fail();
+    return { sources };
+  } catch { throw new Error("来源目录响应无效"); }
+}
+
 export function parseSpeciesList(value: unknown): AdminSpeciesList {
   try {
     const root = listRoot(value);
@@ -162,10 +172,11 @@ export function parseSpeciesList(value: unknown): AdminSpeciesList {
   } catch { throw new Error("鱼种响应无效"); }
 }
 
-export function parseSpeciesReceipt(value: unknown, expected: { id?: string; code?: string }): Required<AdminSpecies> {
+export function parseSpeciesReceipt(value: unknown, expected: { id?: string; code?: string; submitted: Partial<Pick<Required<AdminSpecies>, "name_zh" | "name_en" | "scientific_name" | "sort_order" | "active">>; create?: boolean }): Required<AdminSpecies> {
   try {
     const item = parseSpeciesFull(value);
-    if ((expected.id && item.id !== expected.id) || (expected.code && item.code !== expected.code)) fail();
+    if ((expected.id && item.id !== expected.id) || (expected.code && item.code !== expected.code) || (expected.create && item.candidate_count !== 0)) fail();
+    for (const key of ["name_zh", "name_en", "scientific_name", "sort_order", "active"] as const) if (key in expected.submitted && item[key] !== expected.submitted[key]) fail();
     return item;
   } catch { throw new Error("鱼种操作结果无效"); }
 }
@@ -187,19 +198,25 @@ export function parseCurrentList(value: unknown): CurrentList {
 
 export function parseCandidateReceipt(
   value: unknown,
-  expected: { id: string; previousVersion: number; currentReviewerId?: string | null; changed?: Partial<Pick<AdminCandidate, "preview_url" | "original_url" | "active">> & { species_id?: string } },
+  expected: {
+    id: string; previousVersion: number;
+    operation: "release" | "transfer" | "reopen" | "invalidation" | "patch";
+    targetReviewerId?: string; speciesId?: string;
+    submitted?: Partial<Pick<AdminCandidate, "preview_url" | "original_url" | "active">> & { species_id?: string };
+    previous?: AdminCandidate;
+  },
 ): AdminCandidate {
   try {
     const item = parseCandidate(value);
     if (item.id !== expected.id || expected.previousVersion >= Number.MAX_SAFE_INTEGER || item.version !== expected.previousVersion + 1) fail();
-    if (expected.currentReviewerId !== undefined && item.current_reviewer?.id !== expected.currentReviewerId) {
-      if (!(expected.currentReviewerId === null && item.current_reviewer === null)) fail();
-    }
-    if (expected.changed) {
-      for (const key of ["preview_url", "original_url", "active"] as const) {
-        if (key in expected.changed && item[key] !== expected.changed[key]) fail();
-      }
-      if (expected.changed.species_id && item.species.id !== expected.changed.species_id) fail();
+    if (expected.operation === "release" && (item.current_reviewer !== null || item.current_started_at !== null || item.current_review !== null)) fail();
+    if (["transfer", "reopen", "invalidation"].includes(expected.operation) && (item.current_reviewer?.id !== expected.targetReviewerId || item.current_started_at === null || item.current_review !== null)) fail();
+    if (expected.operation === "invalidation" && item.species.id !== expected.speciesId) fail();
+    if (expected.submitted) for (const key of ["preview_url", "original_url", "active"] as const) if (key in expected.submitted && item[key] !== expected.submitted[key]) fail();
+    if (expected.submitted?.species_id !== undefined && item.species.id !== expected.submitted.species_id) fail();
+    if (expected.operation === "patch" && expected.previous) {
+      if (expected.submitted?.species_id === undefined && item.species.id !== expected.previous.species.id) fail();
+      if (item.current_reviewer?.id !== expected.previous.current_reviewer?.id || item.current_started_at !== expected.previous.current_started_at || item.current_review?.id !== expected.previous.current_review?.id || item.current_review?.version !== expected.previous.current_review?.version) fail();
     }
     return item;
   } catch { throw new Error("候选操作结果无效"); }
@@ -224,7 +241,7 @@ export function parseAdminReviewList(value: unknown): AdminReviewList {
   } catch { throw new Error("审核历史响应无效"); }
 }
 
-export function parseReviewReceipt(value: unknown, expected: { id: string; candidateId: string; reviewerId: string; previousVersion: number; decision: DecisionCode; rejectionReason: RejectionReasonCode | null; notes: string | null }): void {
+export function parseReviewReceipt(value: unknown, expected: { id: string; candidateId: string; reviewerId: string; previousVersion: number; decision: DecisionCode; rejectionReason: RejectionReasonCode | null; notes: string | null; wholeFish?: "YES" | "NO" | "REVIEW"; exactSpeciesVerified?: "YES" | "NO" | "REVIEW" }): void {
   try {
     const item = object(value);
     exact(item, ["id", "candidate_id", "reviewer_id", "decision", "rejection_reason", "notes", "whole_fish", "exact_species_verified", "is_current", "version"]);
@@ -233,7 +250,8 @@ export function parseReviewReceipt(value: unknown, expected: { id: string; candi
       decision: decision(item.decision), rejectionReason: reason(item.rejection_reason), notes: optionalText(item.notes, 2_000),
       whole: fact(item.whole_fish), exactSpecies: fact(item.exact_species_verified), current: bool(item.is_current), version: positive(item.version),
     };
-    if (!parsed.current || parsed.id !== expected.id || parsed.candidateId !== expected.candidateId || parsed.reviewerId !== expected.reviewerId || parsed.version !== expected.previousVersion + 1 || parsed.decision !== expected.decision || parsed.rejectionReason !== expected.rejectionReason || parsed.notes !== expected.notes) fail();
+    const facts = canonicalFacts(expected.decision, expected.rejectionReason);
+    if (!parsed.current || parsed.id !== expected.id || parsed.candidateId !== expected.candidateId || parsed.reviewerId !== expected.reviewerId || parsed.version !== expected.previousVersion + 1 || parsed.decision !== expected.decision || parsed.rejectionReason !== expected.rejectionReason || parsed.notes !== expected.notes || parsed.whole !== (expected.wholeFish ?? facts.whole) || parsed.exactSpecies !== (expected.exactSpeciesVerified ?? facts.exact)) fail();
   } catch { throw new Error("审核操作结果无效"); }
 }
 
@@ -308,12 +326,13 @@ export function parseReceiptFile(value: unknown, expectedBatchId: string, allowe
   } catch { throw new Error("回执 JSON 无效或批次不匹配"); }
 }
 
-export function parseReceiptResponse(value: unknown, batchId: string, candidates: Set<string>): { accepted: number; pending: number } {
+export function parseReceiptResponse(value: unknown, batchId: string, submitted: Map<string, "SUCCEEDED" | "FAILED">): { accepted: number; pending: number } {
   try {
     const root = object(value); exact(root, ["batch_id", "status", "accepted_candidate_ids", "pending_candidate_ids"]);
     if (uuid(root.batch_id) !== batchId || !["pending", "completed"].includes(String(root.status))) fail();
     const accepted = array(root.accepted_candidate_ids, 10_000).map(uuid); const pending = array(root.pending_candidate_ids, 10_000).map(uuid);
-    if ([...accepted, ...pending].some((id) => !candidates.has(id)) || new Set([...accepted, ...pending]).size !== accepted.length + pending.length) fail();
+    if (accepted.some((id) => submitted.get(id) !== "SUCCEEDED") || new Set([...accepted, ...pending]).size !== accepted.length + pending.length) fail();
+    if ((root.status === "completed" && pending.length !== 0) || (root.status === "pending" && pending.length === 0)) fail();
     return { accepted: accepted.length, pending: pending.length };
   } catch { throw new Error("回执处理结果无效"); }
 }
@@ -325,6 +344,16 @@ export function parseTemporaryPassword(value: unknown): string {
 
 export function conflictCode(errorBody: unknown): string | null {
   try { const root = object(errorBody); const detail = object(root.detail); return enumCode(detail.code); } catch { return null; }
+}
+
+export function parseExportConflict(errorBody: unknown): { code: "EXPORT_SCOPE_OVERLAP" | "EXPORT_BATCH_EXPIRED" | "UNSAFE_SPECIES_CODE"; overlapCount: number } | null {
+  try {
+    const root = object(errorBody); const detail = object(root.detail); const code = enumCode(detail.code);
+    if (code !== "EXPORT_SCOPE_OVERLAP" && code !== "EXPORT_BATCH_EXPIRED" && code !== "UNSAFE_SPECIES_CODE") return null;
+    const ids = detail.batch_ids === undefined ? [] : array(detail.batch_ids, 100).map(uuid);
+    if (new Set(ids).size !== ids.length || (code === "EXPORT_SCOPE_OVERLAP" && ids.length === 0)) fail();
+    return { code, overlapCount: ids.length };
+  } catch { return null; }
 }
 
 function parseSpeciesFull(value: unknown): Required<AdminSpecies> {
@@ -383,3 +412,10 @@ function enumCode(value: unknown): string { if (typeof value !== "string" || !/^
 function countMap(value: unknown): Record<string, number> { const root = object(value); if (Object.keys(root).length > 1_000) fail(); return Object.fromEntries(Object.entries(root).map(([key, count]) => [text(key, 128), integer(count)])); }
 function safePath(value: unknown): string { const raw = text(value, 1_024); if (raw.includes("\\") || raw.startsWith("/") || raw.split("/").some((part) => !part || part === "." || part === "..")) fail(); return raw; }
 function fail(): never { throw new Error("invalid wire response"); }
+
+function canonicalFacts(decisionValue: DecisionCode, rejection: RejectionReasonCode | null): { whole: "YES" | "NO" | "REVIEW"; exact: "YES" | "NO" | "REVIEW" } {
+  if (decisionValue === "APPROVED") return { whole: "YES", exact: "YES" };
+  if (decisionValue === "REJECTED" && rejection === "WRONG_SPECIES") return { whole: "REVIEW", exact: "NO" };
+  if (decisionValue === "REJECTED" && rejection === "NOT_WHOLE_FISH") return { whole: "NO", exact: "REVIEW" };
+  return { whole: "REVIEW", exact: "REVIEW" };
+}

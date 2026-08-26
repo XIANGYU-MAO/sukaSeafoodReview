@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,11 +63,13 @@ def _raise_export_error(exc: Exception) -> None:
 
 @router.get("", response_model=ExportBatchListResponse)
 async def get_exports(
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     _: CurrentAuth = Depends(require_admin_access),
     db: AsyncSession = Depends(get_db),
 ) -> ExportBatchListResponse:
-    items = await list_batches(db)
-    return ExportBatchListResponse(total=len(items), items=items)
+    total, items = await list_batches(db, limit=limit, offset=offset)
+    return ExportBatchListResponse(total=total, items=items)
 
 
 @router.get("/pending-counts", response_model=dict[str, int])
