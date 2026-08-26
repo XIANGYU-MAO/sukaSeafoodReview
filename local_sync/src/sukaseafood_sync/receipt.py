@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import ipaddress
 import json
 import math
 import os
@@ -39,6 +40,7 @@ _ONLINE_ITEM_KEYS = (
 _COUNT_KEYS = frozenset({"succeeded", "failed", "skipped"})
 _ERROR_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z", re.ASCII)
 _LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+_DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z", re.ASCII)
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 _AUTHENTICATION_STATUSES = frozenset({401, 403})
 _VALIDATION_STATUSES = frozenset({400, 404, 422})
@@ -60,6 +62,10 @@ class Receipt:
     items: tuple[ReceiptItem, ...]
     _item_actions: tuple[tuple[str, str, int, str], ...] = field(repr=False)
     manifest_candidate_ids: tuple[str, ...] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not _valid_receipt(self):
+            raise ReceiptError("INVALID_RECEIPT")
 
     @staticmethod
     def _serialize_item(item: ReceiptItem) -> dict[str, object]:
@@ -90,7 +96,7 @@ class SubmitResult:
 
 
 def _canonical_uuid(value: object) -> str | None:
-    if not isinstance(value, str):
+    if type(value) is not str:
         return None
     try:
         parsed = UUID(value)
@@ -100,20 +106,22 @@ def _canonical_uuid(value: object) -> str | None:
 
 
 def _valid_item(item: object) -> bool:
-    if not isinstance(item, ReceiptItem):
+    if type(item) is not ReceiptItem:
         return False
     if _canonical_uuid(item.candidate_id) is None:
         return False
     if _canonical_uuid(item.review_id) is None:
         return False
-    if isinstance(item.review_version, bool) or not isinstance(item.review_version, int):
+    if type(item.review_version) is not int:
         return False
     if item.review_version < 1 or item.review_version > 2**63 - 1:
         return False
+    if type(item.status) is not str:
+        return False
     if item.status == "SUCCEEDED":
-        if not isinstance(item.sha256, str) or _LOWER_HEX_64.fullmatch(item.sha256) is None:
+        if type(item.sha256) is not str or _LOWER_HEX_64.fullmatch(item.sha256) is None:
             return False
-        if item.error is not None or not isinstance(item.relative_path, str):
+        if item.error is not None or type(item.relative_path) is not str:
             return False
         try:
             relative = validate_relative_path(item.relative_path, "relative_path")
@@ -126,10 +134,66 @@ def _valid_item(item: object) -> bool:
         return (
             item.sha256 is None
             and item.relative_path is None
-            and isinstance(item.error, str)
+            and type(item.error) is str
             and _ERROR_CODE_PATTERN.fullmatch(item.error) is not None
         )
     return False
+
+
+def _valid_receipt(receipt: Receipt) -> bool:
+    if type(receipt.batch_id) is not UUID:
+        return False
+    if type(receipt.items) is not tuple or not 1 <= len(receipt.items) <= 10_000:
+        return False
+    if type(receipt._item_actions) is not tuple or len(receipt._item_actions) != len(receipt.items):
+        return False
+    if type(receipt.manifest_candidate_ids) is not tuple:
+        return False
+    if not len(receipt.items) <= len(receipt.manifest_candidate_ids) <= 10_000:
+        return False
+
+    item_triples: list[tuple[str, str, int]] = []
+    seen_triples: set[tuple[str, str, int]] = set()
+    for receipt_item in receipt.items:
+        if not _valid_item(receipt_item):
+            return False
+        triple = (
+            receipt_item.candidate_id,
+            receipt_item.review_id,
+            receipt_item.review_version,
+        )
+        if triple in seen_triples:
+            return False
+        seen_triples.add(triple)
+        item_triples.append(triple)
+
+    for expected, mapping in zip(item_triples, receipt._item_actions, strict=True):
+        if type(mapping) is not tuple or len(mapping) != 4:
+            return False
+        candidate_id, review_id, review_version, action = mapping
+        if (
+            type(candidate_id) is not str
+            or type(review_id) is not str
+            or type(review_version) is not int
+            or type(action) is not str
+            or _canonical_uuid(candidate_id) is None
+            or _canonical_uuid(review_id) is None
+            or not 1 <= review_version <= 2**63 - 1
+            or action not in {"ADD", "MOVE", "REMOVE"}
+            or (candidate_id, review_id, review_version) != expected
+        ):
+            return False
+
+    seen_candidates: set[str] = set()
+    for candidate_id in receipt.manifest_candidate_ids:
+        if (
+            type(candidate_id) is not str
+            or _canonical_uuid(candidate_id) is None
+            or candidate_id in seen_candidates
+        ):
+            return False
+        seen_candidates.add(candidate_id)
+    return tuple(item[0] for item in item_triples) == receipt.manifest_candidate_ids[: len(item_triples)]
 
 
 def build_receipt(manifest: ExportManifest, batch_result: BatchResult) -> Receipt:
@@ -138,7 +202,7 @@ def build_receipt(manifest: ExportManifest, batch_result: BatchResult) -> Receip
     if not isinstance(manifest, ExportManifest) or not isinstance(batch_result, BatchResult):
         raise ReceiptError("INVALID_INPUT")
     batch_id = _canonical_uuid(batch_result.batch_id)
-    if batch_id is None or batch_id != str(manifest.batch_id):
+    if type(manifest.batch_id) is not UUID or batch_id is None or batch_id != str(manifest.batch_id):
         raise ReceiptError("BATCH_MISMATCH")
     rows = manifest.rows
     items = batch_result.receipt_items
@@ -155,8 +219,11 @@ def build_receipt(manifest: ExportManifest, batch_result: BatchResult) -> Receip
     )
     if (
         not valid_counts
-        or isinstance(batch_result.processed, bool)
-        or isinstance(batch_result.total, bool)
+        or type(batch_result.processed) is not int
+        or type(batch_result.total) is not int
+        or type(batch_result.cancelled) is not bool
+        or batch_result.processed < 0
+        or batch_result.total < 0
         or batch_result.total != len(rows)
         or batch_result.processed != len(items)
         or batch_result.processed > batch_result.total
@@ -190,12 +257,59 @@ def build_receipt(manifest: ExportManifest, batch_result: BatchResult) -> Receip
     return Receipt(manifest.batch_id, tuple(items), tuple(actions), manifest_candidates)
 
 
+def _valid_origin_host(host: str, netloc: str, port: int | None) -> bool:
+    if (
+        not host
+        or "%" in netloc
+        or any(ord(character) < 32 or ord(character) == 127 for character in netloc)
+        or port == 0
+    ):
+        return False
+    if ":" in host:
+        closing = netloc.find("]")
+        if not netloc.startswith("[") or closing < 0:
+            return False
+        suffix = netloc[closing + 1 :]
+        if suffix and (not suffix.startswith(":") or not suffix[1:].isdigit()):
+            return False
+        try:
+            ipaddress.IPv6Address(host)
+        except ipaddress.AddressValueError:
+            return False
+        return True
+    if "[" in netloc or "]" in netloc:
+        return False
+    if netloc.endswith(":"):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None:
+        return isinstance(address, ipaddress.IPv4Address) and str(address) == host
+    if all(character in "0123456789." for character in host):
+        return False
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        return False
+    if not ascii_host or len(ascii_host) > 253:
+        return False
+    labels = ascii_host.split(".")
+    return all(_DNS_LABEL.fullmatch(label) is not None for label in labels)
+
+
 def _validated_api_base(api_base: object) -> str | None:
-    if not isinstance(api_base, str) or not api_base or any(ch.isspace() for ch in api_base):
+    if (
+        not isinstance(api_base, str)
+        or not api_base
+        or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in api_base)
+    ):
         return None
     try:
         parsed = urlsplit(api_base)
-        _ = parsed.port
+        port = parsed.port
+        host = parsed.hostname
     except (TypeError, ValueError):
         return None
     if (
@@ -204,14 +318,15 @@ def _validated_api_base(api_base: object) -> str | None:
         or parsed.query
         or parsed.fragment
         or not parsed.netloc
-        or parsed.hostname is None
+        or host is None
         or parsed.path not in {"/sukaseafood/api/v1", "/sukaseafood/api/v1/"}
+        or not _valid_origin_host(host, parsed.netloc, port)
     ):
         return None
     scheme = parsed.scheme.lower()
     if scheme == "https":
         pass
-    elif scheme == "http" and parsed.hostname.casefold() in {
+    elif scheme == "http" and host.casefold() in {
         "localhost",
         "127.0.0.1",
         "::1",
@@ -282,7 +397,14 @@ def _parse_success(receipt: Receipt, content: object) -> tuple[str, tuple[str, .
         return None
     try:
         payload = json.loads(bytes(content).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+        OverflowError,
+    ):
         return None
     expected_keys = {
         "batch_id",
@@ -384,23 +506,28 @@ def submit_receipt(
     transport.trust_env = True
     url = f"{base}/sync/batches/{receipt.batch_id}/receipt"
     body = json.dumps(receipt.to_dict(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    try:
+        prepared_request = requests.Request(
+            "POST",
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Batch {token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+        ).prepare()
+    except Exception:
+        if owned:
+            transport.close()
+        return _safe_result("INVALID_API_BASE", 0)
     attempts = 0
     try:
         for attempts in range(1, 4):
-            request = requests.Request(
-                "POST",
-                url,
-                data=body,
-                headers={
-                    "Authorization": f"Batch {token}",
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-            ).prepare()
             response = None
             try:
                 settings = transport.merge_environment_settings(
-                    request.url,
+                    prepared_request.url,
                     {},
                     False,
                     transport.verify,
@@ -408,7 +535,7 @@ def submit_receipt(
                 )
                 settings["stream"] = True
                 response = transport.send(
-                    request,
+                    prepared_request,
                     timeout=timeout,
                     allow_redirects=False,
                     **settings,

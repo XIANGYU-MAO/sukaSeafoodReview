@@ -17,6 +17,7 @@ from sukaseafood_sync.engine import BatchResult, ReceiptItem
 from sukaseafood_sync.index import SyncIndex, SyncResult
 from sukaseafood_sync.manifest import ExportManifest, ManifestRow
 from sukaseafood_sync.receipt import (
+    Receipt,
     ReceiptError,
     build_receipt,
     save_receipt_file,
@@ -27,6 +28,14 @@ from sukaseafood_sync.receipt import (
 SHA256 = "a" * 64
 SECOND_CANDIDATE = UUID("44444444-4444-4444-8444-444444444444")
 SECOND_REVIEW = UUID("55555555-5555-4555-8555-555555555555")
+
+
+class EqualToOne:
+    def __eq__(self, _other: object) -> bool:
+        return True
+
+    def __gt__(self, _other: object) -> bool:
+        return False
 
 
 def row(
@@ -209,6 +218,102 @@ def test_online_and_offline_receipts_have_exact_secret_free_schemas() -> None:
         assert secret not in exposed
 
 
+def direct_receipt(
+    *,
+    batch_id: object = BATCH_ID,
+    items: object | None = None,
+    actions: object | None = None,
+    candidate_ids: object | None = None,
+) -> Receipt:
+    selected_items = (item(),) if items is None else items
+    selected_actions = (
+        ((str(CANDIDATE_ID), str(REVIEW_ID), 1, "ADD"),)
+        if actions is None
+        else actions
+    )
+    selected_candidates = (
+        (str(CANDIDATE_ID),) if candidate_ids is None else candidate_ids
+    )
+    return Receipt(
+        batch_id,  # type: ignore[arg-type]
+        selected_items,  # type: ignore[arg-type]
+        selected_actions,  # type: ignore[arg-type]
+        selected_candidates,  # type: ignore[arg-type]
+    )
+
+
+def exception_graph(error: BaseException) -> str:
+    graph: list[str] = []
+    current: BaseException | None = error
+    while current is not None:
+        graph.append(repr(current))
+        current = current.__cause__ or current.__context__
+    return " ".join(graph)
+
+
+def test_direct_receipt_constructor_preserves_safe_public_serializers() -> None:
+    receipt = direct_receipt()
+    assert receipt.to_dict() == {"items": [item_dict(item())]}
+    assert receipt.to_file_dict() == {
+        "batch_id": str(BATCH_ID),
+        "items": [item_dict(item())],
+    }
+
+
+def item_dict(receipt_item: ReceiptItem) -> dict[str, object]:
+    return {
+        "candidate_id": receipt_item.candidate_id,
+        "review_id": receipt_item.review_id,
+        "review_version": receipt_item.review_version,
+        "status": receipt_item.status,
+        "sha256": receipt_item.sha256,
+        "relative_path": receipt_item.relative_path,
+        "error": receipt_item.error,
+    }
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"batch_id": RECEIPT_TOKEN},
+        {"items": ()},
+        {"items": [item()]},
+        {"items": (replace(item(), candidate_id=RECEIPT_TOKEN),)},
+        {
+            "items": (item(), item()),
+            "actions": (
+                (str(CANDIDATE_ID), str(REVIEW_ID), 1, "ADD"),
+                (str(CANDIDATE_ID), str(REVIEW_ID), 1, "ADD"),
+            ),
+            "candidate_ids": (str(CANDIDATE_ID), str(CANDIDATE_ID)),
+        },
+        {"actions": ()},
+        {"actions": ((str(SECOND_CANDIDATE), str(REVIEW_ID), 1, "ADD"),)},
+        {"actions": ((str(CANDIDATE_ID), str(REVIEW_ID), 1, RECEIPT_TOKEN),)},
+        {"candidate_ids": (RECEIPT_TOKEN,)},
+        {"candidate_ids": (str(CANDIDATE_ID), str(CANDIDATE_ID))},
+        {"items": (replace(item(), relative_path="https://secret.example.test/a.jpg"),)},
+        {
+            "items": (
+                replace(
+                    item(status="FAILED"),
+                    error=f"FAILED_{RECEIPT_TOKEN}",
+                ),
+            )
+        },
+    ],
+)
+def test_direct_receipt_constructor_rejects_invariant_bypass_without_secret_graph(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ReceiptError) as captured:
+        direct_receipt(**overrides)
+    assert captured.value.code == "INVALID_RECEIPT"
+    exposed = exception_graph(captured.value)
+    assert RECEIPT_TOKEN not in exposed
+    assert "https://secret.example.test" not in exposed
+
+
 def test_build_accepts_ordered_nonempty_partial_cancellation() -> None:
     first = row()
     second = row(SECOND_CANDIDATE, SECOND_REVIEW)
@@ -219,6 +324,38 @@ def test_build_accepts_ordered_nonempty_partial_cancellation() -> None:
     assert [entry["candidate_id"] for entry in receipt.to_dict()["items"]] == [
         str(first.candidate_id)
     ]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("processed", 1.0),
+        ("processed", "1"),
+        ("processed", EqualToOne()),
+        ("processed", -1),
+        ("total", 1.0),
+        ("total", "1"),
+        ("total", EqualToOne()),
+        ("total", -1),
+        ("cancelled", 0),
+        ("cancelled", 1),
+        ("cancelled", "false"),
+        ("cancelled", EqualToOne()),
+    ],
+)
+def test_build_rejects_nonexact_runtime_count_and_cancel_types(
+    field_name: str, value: object
+) -> None:
+    source = manifest()
+    result = batch()
+    malformed = replace(result, **{field_name: value})
+    original_items = malformed.receipt_items
+    original_counts = malformed.counts
+    with pytest.raises(ReceiptError) as captured:
+        build_receipt(source, malformed)
+    assert captured.value.code == "COUNT_MISMATCH"
+    assert malformed.receipt_items is original_items
+    assert malformed.counts is original_counts
 
 
 @pytest.mark.parametrize(
@@ -290,6 +427,91 @@ def test_submit_rejects_noncanonical_api_base_before_transport(api_base: str) ->
     result = submit_receipt(build_receipt(manifest(), batch()), api_base, RECEIPT_TOKEN, 5, session=session)
     assert result.code == "INVALID_API_BASE"
     assert result.attempts == 0
+    assert session.sent == []
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    [
+        "https://%zz/sukaseafood/api/v1",
+        "https://.example.com/sukaseafood/api/v1",
+        "https://example..com/sukaseafood/api/v1",
+        "https://example.com./sukaseafood/api/v1",
+        "https://-bad.example/sukaseafood/api/v1",
+        "https://bad-.example/sukaseafood/api/v1",
+        "https://bad_host.example/sukaseafood/api/v1",
+        "https://999.999.999.999/sukaseafood/api/v1",
+        "https://[:::1]/sukaseafood/api/v1",
+        "https://::1/sukaseafood/api/v1",
+        "https://[v1.example]/sukaseafood/api/v1",
+        "https://example.test:65536/sukaseafood/api/v1",
+        "https://example.test:0/sukaseafood/api/v1",
+        "https://example.test:notaport/sukaseafood/api/v1",
+        "https://example.test:/sukaseafood/api/v1",
+        f"https://{RECEIPT_TOKEN}@example.test/sukaseafood/api/v1",
+    ],
+)
+def test_submit_rejects_malformed_https_hosts_ports_and_userinfo_secret_free(
+    api_base: str,
+) -> None:
+    session = FakeSession([])
+    result = submit_receipt(
+        build_receipt(manifest(), batch()),
+        api_base,
+        RECEIPT_TOKEN,
+        5,
+        session=session,
+    )
+    assert result.code == "INVALID_API_BASE"
+    assert result.attempts == 0
+    assert session.sent == []
+    assert RECEIPT_TOKEN not in repr(result)
+
+
+def test_request_preparation_failure_is_a_safe_invalid_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = f"{RECEIPT_TOKEN} https://secret.example.test"
+
+    def reject_prepare(_request: requests.Request) -> requests.PreparedRequest:
+        raise requests.exceptions.InvalidURL(secret)
+
+    monkeypatch.setattr(requests.Request, "prepare", reject_prepare)
+    session = FakeSession([])
+    result = submit_receipt(
+        build_receipt(manifest(), batch()),
+        "https://api.example.test/sukaseafood/api/v1",
+        RECEIPT_TOKEN,
+        5,
+        session=session,
+    )
+    assert result.code == "INVALID_API_BASE"
+    assert result.attempts == 0
+    assert session.sent == []
+    assert secret not in repr(result)
+
+
+def test_invalid_bracketed_host_is_rejected_before_request_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = False
+
+    def observe_prepare(_request: requests.Request) -> requests.PreparedRequest:
+        nonlocal prepared
+        prepared = True
+        raise AssertionError("request preparation must not run")
+
+    monkeypatch.setattr(requests.Request, "prepare", observe_prepare)
+    session = FakeSession([])
+    result = submit_receipt(
+        build_receipt(manifest(), batch()),
+        "https://[v1.example]/sukaseafood/api/v1",
+        RECEIPT_TOKEN,
+        5,
+        session=session,
+    )
+    assert result.code == "INVALID_API_BASE"
+    assert not prepared
     assert session.sent == []
 
 
@@ -448,6 +670,22 @@ def test_oversized_or_non_json_success_response_fails_safely() -> None:
         result = submit_receipt(build_receipt(manifest(), batch()), "https://api.example.test/sukaseafood/api/v1", RECEIPT_TOKEN, 5, session=session)
         assert result.code == "MALFORMED_RESPONSE"
         assert content[:20].decode("ascii") not in repr(result)
+
+
+def test_deeply_nested_sub_limit_json_is_malformed_and_response_closes() -> None:
+    nested = b"[" * 10_000 + b"0" + b"]" * 10_000
+    response = FakeResponse(200, content=nested)
+    session = FakeSession([response])
+    result = submit_receipt(
+        build_receipt(manifest(), batch()),
+        "https://api.example.test/sukaseafood/api/v1",
+        RECEIPT_TOKEN,
+        5,
+        session=session,
+    )
+    assert result.code == "MALFORMED_RESPONSE"
+    assert not result.submitted
+    assert response.closed
 
 
 def test_success_response_is_streamed_with_a_bounded_read() -> None:
