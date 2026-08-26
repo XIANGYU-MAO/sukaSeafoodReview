@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import datetime, timedelta, timezone
 import json
 from uuid import UUID, uuid4
@@ -11,7 +12,7 @@ from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.main import create_app
-from app.models import AuditEvent, ExportBatch, ExportItem
+from app.models import AuditEvent, Candidate, ExportBatch, ExportItem
 from tests.export_support import (
     csv_rows,
     load_models,
@@ -128,6 +129,60 @@ def test_token_receipt_ignores_browser_identity_and_attributes_audit_to_batch_cr
     assert receipt_audits[0].actor_id != seed.hassan_id
 
 
+@pytest.mark.parametrize("route_kind", ["sync", "manual"])
+@pytest.mark.parametrize(
+    "sensitive_kind",
+    ["token", "token_case", "token_base64", "secret", "secret_case", "secret_base64"],
+)
+def test_failed_receipt_rejects_sensitive_error_without_api_db_audit_or_log_leakage(
+    settings, caplog, route_kind, sensitive_kind
+):
+    seed, client, batch_id, token, rows = setup_batch(settings)
+    secret = settings.RECEIPT_SECRET
+    assert secret is not None
+    sensitive_values = {
+        "token": token,
+        "token_case": token.swapcase(),
+        "token_base64": base64.urlsafe_b64encode(token.encode()).decode(),
+        "secret": secret,
+        "secret_case": secret.swapcase(),
+        "secret_base64": base64.urlsafe_b64encode(secret.encode()).decode(),
+    }
+    offending = sensitive_values[sensitive_kind]
+    failed = {
+        "candidate_id": rows[0]["candidate_id"],
+        "review_id": rows[0]["review_id"],
+        "review_version": int(rows[0]["review_version"]),
+        "status": "FAILED",
+        "error": f"download diagnostic: Authorization: Batch {offending}",
+    }
+    try:
+        if route_kind == "sync":
+            response = post_receipt(client, batch_id, token, [failed])
+        else:
+            response = client.post(
+                f"/v1/admin/exports/{batch_id}/receipt-file",
+                json={"batch_id": batch_id, "items": [failed]},
+                headers=mao_headers(seed, csrf=True),
+            )
+    finally:
+        close(client)
+
+    stored = asyncio.run(load_models(settings, ExportItem))[0]
+    audits = asyncio.run(load_models(settings, AuditEvent))
+    persisted = " ".join(
+        [str(stored.__dict__), *(str(event.__dict__) for event in audits)]
+    )
+    assert stored.status == "pending"
+    assert stored.error is None
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "RECEIPT_ERROR_SENSITIVE"
+    for value in (token, secret, offending):
+        assert value not in response.text
+        assert value not in persisted
+        assert value not in caplog.text
+
+
 @pytest.mark.parametrize(
     "mutator",
     [
@@ -202,17 +257,64 @@ def test_wrong_swapped_and_expired_batch_tokens_are_secret_free(settings):
     assert asyncio.run(load_models(settings, ExportItem))[0].status == "pending"
 
 
-def test_receipt_allows_only_controlled_decoded_extension_adjustment(settings):
+def test_decoded_extension_becomes_canonical_and_unchanged_export_is_no_work(settings):
     seed, client, batch_id, token, rows = setup_batch(settings)
     item = success_receipt(rows[0])
     item["relative_path"] = item["relative_path"].rsplit(".", 1)[0] + ".png"
     try:
         response = post_receipt(client, batch_id, token, [item])
+        unchanged = client.post(
+            "/v1/admin/exports", json={}, headers=mao_headers(seed, csrf=True)
+        )
     finally:
         close(client)
     assert response.status_code == 200
     stored = asyncio.run(load_models(settings, ExportItem))[0]
     assert stored.local_relative_path == item["relative_path"]
+    assert unchanged.status_code == 200
+    assert unchanged.json() == {"code": "NO_WORK", "created": False, "batch": None}
+
+
+def test_same_content_species_move_preserves_decoded_suffix_and_prior_csv_snapshot(settings):
+    seed, client, batch_id, token, rows = setup_batch(settings)
+    original_csv = client.get(
+        f"/v1/admin/exports/{batch_id}.csv", headers=mao_headers(seed)
+    ).content
+    decoded_path = rows[0]["target_relative_path"].rsplit(".", 1)[0] + ".png"
+    item = success_receipt(rows[0])
+    item["relative_path"] = decoded_path
+    try:
+        applied = post_receipt(client, batch_id, token, [item])
+        assert applied.status_code == 200
+        asyncio.run(
+            mutate(
+                settings,
+                Candidate,
+                seed.candidate_ids[0],
+                species_id=seed.species_ids[1],
+                version=2,
+            )
+        )
+        moved = client.post(
+            "/v1/admin/exports", json={}, headers=mao_headers(seed, csrf=True)
+        )
+        moved_csv = client.get(
+            f"/v1/admin/exports/{moved.json()['id']}.csv", headers=mao_headers(seed)
+        )
+        prior_csv = client.get(
+            f"/v1/admin/exports/{batch_id}.csv", headers=mao_headers(seed)
+        )
+    finally:
+        close(client)
+
+    assert moved.status_code == 201
+    moved_rows = csv_rows(moved_csv)
+    assert moved_rows[0]["action"] == "MOVE"
+    assert moved_rows[0]["previous_relative_path"] == decoded_path
+    assert moved_rows[0]["target_relative_path"] == (
+        f"images/SF002/{seed.candidate_ids[0]}.png"
+    )
+    assert prior_csv.content == original_csv
 
 
 def test_manual_receipt_file_requires_mao_csrf_bounds_batch_match_and_reuses_semantics(settings):
