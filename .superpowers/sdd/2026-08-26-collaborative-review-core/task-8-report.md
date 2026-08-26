@@ -20,10 +20,15 @@
 
 ### 第二次复审修复
 
-- FAILED receipt error 在持久化前统一经过敏感值检查。服务用 batch id 与配置 secret 重算 expected token，并拒绝包含 token、`RECEIPT_SECRET`、大小写变体，以及标准/URL-safe Base64（含去 padding）或 hex 显见编码的错误文本；固定返回 `RECEIPT_ERROR_SENSITIVE`，不回显命中值，整笔回滚。
-- sync 与 Mao 手工 JSON 两条路都显式把同一配置 secret 传入 `apply_receipt`；回归测试直接检查 `ExportItem.error`、AuditEvent、API response 与捕获日志，确认 token/secret/offending variant 均未出现。
+- 第二次复审曾采用“识别当前 token/secret 及编码变体后拒绝”的过滤方案；最终复审证明它无法覆盖其他批次或未来 token。该历史方案已由下节的固定 server-owned error 设计整体替代，相关敏感值枚举代码和 `apply_receipt` secret 参数均已删除。
 - 成功回执允许的 decoded extension 现在成为 canonical local path。original fingerprint 未变化时，同鱼种以实际 `local_relative_path` 比较，因此 unchanged 为 NO_WORK；跨鱼种 MOVE 只替换目标 species 目录并保留实际 filename/suffix。original 改变仍采用新 URL 推断 suffix，并在路径变化时保留 previous cleanup。
 - 下游本地同步计划明确服务器 `target_relative_path` 是 ADD/MOVE/REMOVE 唯一目标；composite ADD 必须先成功提交新 target 再清理旧路径，失败保留旧文件；REMOVE 不再自建 timestamp destination，receipt 报告实际服务器 target。仅更新契约与未来验收措辞，没有实现 Task 9 下载器。
+
+### 最终复审修复
+
+- 客户端 FAILED `error` 永不持久化、永不进入响应或 audit。所有通过 schema 长度/结构边界的 FAILED 项统一写入固定 server-owned 值 `LOCAL_DOWNLOAD_FAILED`，item 保持 pending，API 继续返回正常 200 partial/pending 语义。
+- 该设计不依赖秘密枚举，因此当前/其他批次/未来/轮换 token、secret、编码变体、NUL/ESC、URL 和 PII 都无法进入数据库；也避免 PostgreSQL 驱动因 NUL 拒绝字符串而产生 500。
+- `_safe_receipt_path` 现在按 action 校验：只有 ADD 可在相同安全 parent/stem 下调整为受控图片扩展；MOVE 和 REMOVE 在任何路径规范化前要求 receipt 字符串与服务器 `target_relative_path` 完全相等。既有 ADD decoded suffix canonical/NO_WORK/MOVE 行为保持不变。
 
 ## 数据库与迁移
 
@@ -46,7 +51,7 @@
 
 成功 ADD/MOVE/REMOVE 要求 64-hex SHA-256 和匹配 action/candidate stem 的安全相对路径。batch/token/expiry/item triple/version、重复项、越界项、path/hash 任一无效都会在写入前整批拒绝。失败项保持 pending；相同成功重试幂等，SHA/path 冲突返回 409。
 
-FAILED error 仍要求非空、去控制空白后不超过 2000 字符；若包含 batch token、配置 secret 或上述显见编码/大小写变体，则以固定 422 拒绝且不保存 error、不新增 receipt audit。合法失败文本仍保持 pending 并可供重试。
+FAILED error 由 schema 要求非空且不超过 2000 字符，但正文只用于确认客户端提供了失败原因，服务不保存或回显正文；数据库仅保存 `LOCAL_DOWNLOAD_FAILED`。首次 generic 状态变化可产生只含 candidate IDs/count/status 的 receipt audit，后续不同原文仍收敛到相同状态。
 
 生产 API 校验 `RECEIPT_SECRET`：缺失、过短、低熵或复用其他 secret 均拒绝启动。原报告曾把低熵 secret 测试描述为独立 RED，但该测试实际随实现提交 `2f79017` 加入；本报告纠正该历史，不把它计为严格 test-first 证据。
 
@@ -76,6 +81,14 @@ RFC 4180 现在实际断言逗号、双引号和换行的 round trip 及原始 q
 4. GREEN：同一命令 `14 passed, 12 deselected in 5.59s`；完整 exports/receipts `55 passed in 23.51s`。
 5. SQLite 全 API：`332 passed, 16 skipped in 176.65s`，16 项均为未提供 PostgreSQL URL 时的预期 integration skip。
 
+最终复审继续严格 test-first：
+
+1. `612f357 test(review): specify opaque failures and exact action paths`
+2. RED：`10 failed, 14 deselected in 6.87s`。sync/manual 均把普通文本、另一真实批次 token、NUL/ESC+URL/PII 原文写入 DB；sync/manual 的 MOVE/REMOVE 均错误接受 `.png` target 对应的 `.jpg` receipt。
+3. `e340bc5 fix(review): make receipt failures opaque and paths exact`
+4. GREEN：含 ADD decoded compatibility 的聚焦集 `11 passed, 13 deselected in 5.99s`；完整 exports/receipts `53 passed in 28.39s`。
+5. SQLite 全 API：`330 passed, 16 skipped in 161.60s`。
+
 ## 最终验证
 
 - SQLite 全 API：`319 passed, 16 skipped in 173.01s`；16 项全部是缺少显式 PostgreSQL URL 时预期跳过的 integration。
@@ -94,3 +107,10 @@ RFC 4180 现在实际断言逗号、双引号和换行的 round trip 及原始 q
 - 相同代码与容器完整重跑：`348 passed in 162.78s`，`0 skipped`。
 - Task 8 PostgreSQL race 单独复验：`2 passed in 1.87s`，simultaneous create 与 concurrent receipt 均收敛。
 - 原临时容器已按精确名称删除；最终 compileall、diff、secret scan 与 clean status 在本报告提交后再次执行。
+
+最终复审验证：
+
+- 唯一 PostgreSQL 16 容器 `sukaseafood-task8-final-e340bc5` 中 fresh→head、`alembic check`、05→04→05 与 offline DDL 全部成功；本轮没有迁移改动。
+- 全 API + integration：`346 passed in 172.46s`，`0 skipped`。
+- Task 8 PostgreSQL race：`2 passed in 1.52s`。
+- 容器已按精确名称删除并确认不存在；最终 compileall、diff、secret scan、提交范围与 clean status 在报告提交后复验。
