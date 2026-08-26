@@ -4,6 +4,7 @@ import csv
 from dataclasses import FrozenInstanceError
 import os
 from pathlib import Path, PurePosixPath
+import traceback
 from uuid import UUID, uuid4
 
 import pytest
@@ -45,6 +46,37 @@ def write_lexical_manifest(
         ).encode("utf-8")
     )
     return path
+
+
+def assert_secret_free_exception_chain(
+    error: BaseException,
+    secret: str = RECEIPT_TOKEN,
+) -> None:
+    pending = [error]
+    seen: set[int] = set()
+    chain: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        chain.append(current)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+    assert all(isinstance(item, ManifestError) for item in chain)
+    surfaces = [
+        *(str(item) for item in chain),
+        *(repr(item) for item in chain),
+        "".join(
+            traceback.format_exception(
+                type(error), error, error.__traceback__, chain=True
+            )
+        ),
+    ]
+    assert all(secret not in surface for surface in surfaces)
 
 
 def test_loads_exact_server_csv_with_bom_rfc_quotes_and_newlines() -> None:
@@ -187,6 +219,34 @@ def test_rejects_invalid_utf8_file_size_and_row_count(tmp_path: Path) -> None:
         load_manifest(too_many)
 
 
+def test_invalid_utf8_has_no_raw_or_secret_bearing_exception_chain(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "secret-invalid-utf8.csv"
+    path.write_bytes(RECEIPT_TOKEN.encode("ascii") + b"\xff")
+
+    with pytest.raises(ManifestError, match="UTF-8") as caught:
+        load_manifest(path)
+
+    assert_secret_free_exception_chain(caught.value)
+
+
+def test_csv_conversion_has_no_raw_or_secret_bearing_exception_chain(
+    tmp_path: Path,
+) -> None:
+    oversized_csv_field = RECEIPT_TOKEN + ("x" * (csv.field_size_limit() + 1))
+    path = write_manifest(
+        tmp_path,
+        rows=[valid_row(creator=oversized_csv_field)],
+        name="secret-csv-conversion.csv",
+    )
+
+    with pytest.raises(ManifestError, match="malformed CSV") as caught:
+        load_manifest(path)
+
+    assert_secret_free_exception_chain(caught.value)
+
+
 def test_manifest_is_opened_once_in_binary_mode(tmp_path: Path, monkeypatch) -> None:
     path = write_manifest(tmp_path)
     actual_open = Path.open
@@ -265,6 +325,21 @@ def test_rejects_invalid_scalar_fields_without_echoing_secret(
 
     assert field in str(caught.value)
     assert RECEIPT_TOKEN not in str(caught.value)
+
+
+def test_invalid_uuid_has_no_raw_or_secret_bearing_exception_chain(
+    tmp_path: Path,
+) -> None:
+    path = write_manifest(
+        tmp_path,
+        rows=[valid_row(candidate_id=RECEIPT_TOKEN)],
+        name="secret-uuid.csv",
+    )
+
+    with pytest.raises(ManifestError, match="candidate_id") as caught:
+        load_manifest(path)
+
+    assert_secret_free_exception_chain(caught.value)
 
 
 def test_rejects_nul_and_non_newline_controls_in_text(tmp_path: Path) -> None:
@@ -354,6 +429,18 @@ def test_rejects_non_absolute_or_unsafe_https_urls(
         load_manifest(path)
 
 
+def test_invalid_url_port_has_no_raw_or_secret_bearing_exception_chain(
+    tmp_path: Path,
+) -> None:
+    unsafe = f"https://example.test:{RECEIPT_TOKEN}/image.jpg"
+    path = write_manifest(tmp_path, rows=[valid_row(preview_url=unsafe)])
+
+    with pytest.raises(ManifestError, match="preview_url") as caught:
+        load_manifest(path)
+
+    assert_secret_free_exception_chain(caught.value)
+
+
 def test_license_url_is_optional_but_otherwise_uses_same_https_rules(
     tmp_path: Path,
 ) -> None:
@@ -408,6 +495,132 @@ def test_shared_path_validator_rejects_delete_control_character() -> None:
 def test_shared_path_validator_rejects_unicode_c1_control_character() -> None:
     with pytest.raises(ManifestError, match="control"):
         validate_relative_path("images/SF006/bad\u0085name.jpg")
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "COM¹",
+        "COM²",
+        "COM³",
+        "LPT¹",
+        "LPT²",
+        "LPT³",
+        "CONIN$",
+        "CONOUT$",
+        "CLOCK$",
+        "con.txt",
+        "prn.jpeg",
+        "aux.data",
+        "nul.jpg",
+        "com1.png",
+        "lpt9.image",
+    ],
+)
+@pytest.mark.parametrize(
+    "field_name", ["target_relative_path", "previous_relative_path"]
+)
+def test_rejects_complete_windows_device_aliases_in_manifest_paths(
+    tmp_path: Path, alias: str, field_name: str
+) -> None:
+    if field_name == "target_relative_path":
+        row = valid_row(
+            target_relative_path=f"images/{alias}/{CANDIDATE_ID}.jpg"
+        )
+    else:
+        row = valid_row(
+            action="MOVE",
+            previous_relative_path=f"images/SF005/{alias}",
+        )
+
+    with pytest.raises(ManifestError, match=field_name) as caught:
+        load_manifest(write_manifest(tmp_path, rows=[row]))
+
+    assert "reserved" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "component",
+    ["COM10", "LPT0", "CONIN", "CONOUT", "CLOCK", "COM⁴", "XCOM1", "CONSOLE"],
+)
+def test_allows_names_similar_to_windows_device_aliases(component: str) -> None:
+    raw = f"images/{component}/fish.jpg"
+
+    assert validate_relative_path(raw) == PurePosixPath(raw)
+
+
+def test_enforces_component_limit_in_utf16_code_units() -> None:
+    ascii_255 = "a" * 255
+    astral_255_units = ("🐟" * 127) + "a"
+
+    assert validate_relative_path(f"images/{ascii_255}/fish.jpg") == PurePosixPath(
+        f"images/{ascii_255}/fish.jpg"
+    )
+    assert validate_relative_path(
+        f"images/{astral_255_units}/fish.jpg"
+    ) == PurePosixPath(f"images/{astral_255_units}/fish.jpg")
+
+    for component in ("a" * 256, "🐟" * 128):
+        with pytest.raises(ManifestError, match="255 UTF-16"):
+            validate_relative_path(f"images/{component}/fish.jpg")
+
+
+@pytest.mark.parametrize(
+    "field_name", ["target_relative_path", "previous_relative_path"]
+)
+def test_manifest_paths_reject_components_over_255_utf16_units(
+    tmp_path: Path, field_name: str
+) -> None:
+    oversized = "🐟" * 128
+    overrides = {field_name: f"images/{oversized}/{CANDIDATE_ID}.jpg"}
+    if field_name == "previous_relative_path":
+        overrides["action"] = "MOVE"
+
+    with pytest.raises(ManifestError, match=field_name) as caught:
+        load_manifest(write_manifest(tmp_path, rows=[valid_row(**overrides)]))
+
+    assert "255 UTF-16" in str(caught.value)
+
+
+def test_resolve_inside_rejects_overlong_component_before_filesystem_use(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ManifestError, match="255 UTF-16"):
+        resolve_inside(tmp_path, f"images/{'a' * 256}/fish.jpg")
+
+
+def test_resolve_escape_has_no_raw_or_secret_bearing_exception_chain(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / RECEIPT_TOKEN
+    outside.mkdir()
+    link = root / "images"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(ManifestError, match="root") as caught:
+        resolve_inside(root, "images/fish.jpg")
+
+    assert_secret_free_exception_chain(caught.value)
+
+
+def test_invalid_text_has_no_raw_or_secret_bearing_exception_chain(
+    tmp_path: Path,
+) -> None:
+    path = write_manifest(
+        tmp_path,
+        rows=[valid_row(creator=f"{RECEIPT_TOKEN}\u009f")],
+        name="secret-text.csv",
+    )
+
+    with pytest.raises(ManifestError, match="creator") as caught:
+        load_manifest(path)
+
+    assert_secret_free_exception_chain(caught.value)
 
 
 @pytest.mark.parametrize(
