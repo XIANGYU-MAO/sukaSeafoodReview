@@ -38,6 +38,19 @@ class EqualToOne:
         return False
 
 
+class DerivedReceipt(Receipt):
+    pass
+
+
+class PathProbe:
+    def __init__(self) -> None:
+        self.accessed = False
+
+    def __fspath__(self) -> str:
+        self.accessed = True
+        raise AssertionError("invalid receipt must be rejected before path access")
+
+
 def row(
     candidate_id: UUID = CANDIDATE_ID,
     review_id: UUID = REVIEW_ID,
@@ -242,6 +255,32 @@ def direct_receipt(
     )
 
 
+def bypassed_receipt(field_name: str) -> Receipt:
+    receipt = direct_receipt()
+    replacements: dict[str, object] = {
+        "batch_id": RECEIPT_TOKEN,
+        "items": (
+            replace(item(), relative_path="https://secret.example.test/bypass.jpg"),
+        ),
+        "_item_actions": (
+            (str(CANDIDATE_ID), str(REVIEW_ID), 1, RECEIPT_TOKEN),
+        ),
+        "manifest_candidate_ids": (RECEIPT_TOKEN,),
+    }
+    object.__setattr__(receipt, field_name, replacements[field_name])
+    return receipt
+
+
+def subclass_receipt() -> Receipt:
+    valid = direct_receipt()
+    derived = object.__new__(DerivedReceipt)
+    object.__setattr__(derived, "batch_id", valid.batch_id)
+    object.__setattr__(derived, "items", valid.items)
+    object.__setattr__(derived, "_item_actions", valid._item_actions)
+    object.__setattr__(derived, "manifest_candidate_ids", valid.manifest_candidate_ids)
+    return derived
+
+
 def exception_graph(error: BaseException) -> str:
     graph: list[str] = []
     current: BaseException | None = error
@@ -258,6 +297,91 @@ def test_direct_receipt_constructor_preserves_safe_public_serializers() -> None:
         "batch_id": str(BATCH_ID),
         "items": [item_dict(item())],
     }
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["batch_id", "items", "_item_actions", "manifest_candidate_ids"],
+)
+@pytest.mark.parametrize("serializer_name", ["to_dict", "to_file_dict"])
+def test_serializers_revalidate_mutated_receipts_without_secret_graph(
+    field_name: str, serializer_name: str
+) -> None:
+    receipt = bypassed_receipt(field_name)
+    with pytest.raises(ReceiptError) as captured:
+        getattr(receipt, serializer_name)()
+    assert captured.value.code == "INVALID_RECEIPT"
+    exposed = exception_graph(captured.value)
+    assert RECEIPT_TOKEN not in exposed
+    assert "https://secret.example.test" not in exposed
+
+
+@pytest.mark.parametrize(
+    "receipt_factory",
+    [
+        lambda: bypassed_receipt("batch_id"),
+        lambda: bypassed_receipt("items"),
+        lambda: bypassed_receipt("_item_actions"),
+        lambda: bypassed_receipt("manifest_candidate_ids"),
+        subclass_receipt,
+    ],
+)
+def test_submit_revalidates_mutation_and_subclass_before_preparation(
+    receipt_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = False
+
+    def observe_prepare(_request: requests.Request) -> requests.PreparedRequest:
+        nonlocal prepared
+        prepared = True
+        raise AssertionError("invalid receipt must not reach request preparation")
+
+    monkeypatch.setattr(requests.Request, "prepare", observe_prepare)
+    session = FakeSession([])
+    result = submit_receipt(
+        receipt_factory(),
+        "https://api.example.test/sukaseafood/api/v1",
+        RECEIPT_TOKEN,
+        5,
+        session=session,
+    )
+    assert result.code == "INVALID_RECEIPT"
+    assert result.attempts == 0
+    assert not prepared
+    assert session.sent == []
+    assert RECEIPT_TOKEN not in repr(result)
+    assert "https://secret.example.test" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "receipt_factory",
+    [
+        lambda: bypassed_receipt("batch_id"),
+        lambda: bypassed_receipt("items"),
+        lambda: bypassed_receipt("_item_actions"),
+        lambda: bypassed_receipt("manifest_candidate_ids"),
+        subclass_receipt,
+    ],
+)
+def test_save_revalidates_mutation_and_subclass_before_path_or_file_access(
+    receipt_factory, tmp_path: Path
+) -> None:
+    probe = PathProbe()
+    with pytest.raises(ReceiptError) as captured:
+        save_receipt_file(receipt_factory(), probe)  # type: ignore[arg-type]
+    assert captured.value.code == "INVALID_RECEIPT"
+    assert not probe.accessed
+    assert list(tmp_path.iterdir()) == []
+    exposed = exception_graph(captured.value)
+    assert RECEIPT_TOKEN not in exposed
+    assert "https://secret.example.test" not in exposed
+
+
+@pytest.mark.parametrize("serializer_name", ["to_dict", "to_file_dict"])
+def test_serializers_reject_receipt_subclasses(serializer_name: str) -> None:
+    with pytest.raises(ReceiptError) as captured:
+        getattr(subclass_receipt(), serializer_name)()
+    assert captured.value.code == "INVALID_RECEIPT"
 
 
 def item_dict(receipt_item: ReceiptItem) -> dict[str, object]:

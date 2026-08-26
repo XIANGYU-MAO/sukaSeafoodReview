@@ -64,8 +64,7 @@ class Receipt:
     manifest_candidate_ids: tuple[str, ...] = field(repr=False)
 
     def __post_init__(self) -> None:
-        if not _valid_receipt(self):
-            raise ReceiptError("INVALID_RECEIPT")
+        _require_valid_receipt(self)
 
     @staticmethod
     def _serialize_item(item: ReceiptItem) -> dict[str, object]:
@@ -74,11 +73,13 @@ class Receipt:
     def to_dict(self) -> dict[str, object]:
         """Return the exact online request body (without batch ID)."""
 
+        _require_valid_receipt(self)
         return {"items": [self._serialize_item(item) for item in self.items]}
 
     def to_file_dict(self) -> dict[str, object]:
         """Return the exact offline/admin-upload receipt schema."""
 
+        _require_valid_receipt(self)
         return {"batch_id": str(self.batch_id), **self.to_dict()}
 
 
@@ -140,7 +141,9 @@ def _valid_item(item: object) -> bool:
     return False
 
 
-def _valid_receipt(receipt: Receipt) -> bool:
+def _valid_receipt(receipt: object) -> bool:
+    if type(receipt) is not Receipt:
+        return False
     if type(receipt.batch_id) is not UUID:
         return False
     if type(receipt.items) is not tuple or not 1 <= len(receipt.items) <= 10_000:
@@ -194,6 +197,12 @@ def _valid_receipt(receipt: Receipt) -> bool:
             return False
         seen_candidates.add(candidate_id)
     return tuple(item[0] for item in item_triples) == receipt.manifest_candidate_ids[: len(item_triples)]
+
+
+def _require_valid_receipt(receipt: object) -> Receipt:
+    if not _valid_receipt(receipt):
+        raise ReceiptError("INVALID_RECEIPT")
+    return receipt
 
 
 def build_receipt(manifest: ExportManifest, batch_result: BatchResult) -> Receipt:
@@ -490,7 +499,7 @@ def submit_receipt(
 ) -> SubmitResult:
     """Submit a receipt without merging origin session credentials or cookies."""
 
-    if not isinstance(receipt, Receipt):
+    if not _valid_receipt(receipt):
         return _safe_result("INVALID_RECEIPT", 0)
     base = _validated_api_base(api_base)
     if base is None:
@@ -649,8 +658,7 @@ def _safe_target(target: Path) -> bool:
 def save_receipt_file(receipt: Receipt, path: str | os.PathLike[str]) -> Path:
     """Atomically save the exact offline receipt schema to a safe JSON path."""
 
-    if not isinstance(receipt, Receipt):
-        raise ReceiptError("INVALID_RECEIPT")
+    _require_valid_receipt(receipt)
     invalid_path = False
     try:
         requested = Path(path)
