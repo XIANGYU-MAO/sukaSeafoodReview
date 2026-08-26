@@ -1,0 +1,93 @@
+services:
+  review-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: review
+      POSTGRES_DB: review
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+    volumes:
+      - review-postgres-data:/var/lib/postgresql/data
+      - review-backups:/backups
+    networks:
+      - review-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U review -d review"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  review-api:
+    build:
+      context: ./api
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://review:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@review-postgres:5432/review"
+      SESSION_COOKIE_NAME: review_session
+      SESSION_HOURS: "12"
+      SESSION_SECRET: "${SESSION_SECRET:?SESSION_SECRET is required}"
+      CSRF_SECRET: "${CSRF_SECRET:?CSRF_SECRET is required}"
+      RECEIPT_SECRET: "${RECEIPT_SECRET:?RECEIPT_SECRET is required}"
+      TRUSTED_PROXY_CIDRS: "${TRUSTED_PROXY_CIDRS:?TRUSTED_PROXY_CIDRS is required}"
+      IMAGE_ORIGIN_ALLOWLIST: "${IMAGE_ORIGIN_ALLOWLIST:?IMAGE_ORIGIN_ALLOWLIST is required}"
+      APP_ENV: production
+      SECURE_COOKIE: "true"
+    volumes:
+      - review-imports:/imports
+    depends_on:
+      review-postgres:
+        condition: service_healthy
+    networks:
+      - review-internal
+      - sukaseafood-edge
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8000/v1/health', timeout=2)) == {'status':'ok'}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+  review-web:
+    build:
+      context: ./web
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=32m,uid=101,gid=101
+    networks:
+      - sukaseafood-edge
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+networks:
+  review-internal:
+    internal: true
+  sukaseafood-edge:
+    external: true
+    name: sukaseafood-edge
+
+volumes:
+  review-postgres-data:
+    name: sukaseafood-review-postgres-data
+  review-backups:
+    name: sukaseafood-review-backups
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/sukaseafood-review/backups
+  review-imports:
+    name: sukaseafood-review-imports
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/sukaseafood-review/imports
