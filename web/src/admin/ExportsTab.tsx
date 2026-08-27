@@ -142,6 +142,54 @@ export function ExportsTab(props: AdminTabProps) {
     }
   }
 
+  async function recreate(batch: ExportBatch) {
+    if (pending || batches.unavailable || props.directoriesUnavailable) return;
+    setPending(true);
+    setNotice(null);
+    try {
+      const raw = await adminMutation<unknown>(
+        `/admin/exports/${batch.id}/recreate`,
+        { method: "POST", body: {}, csrfToken: props.csrfToken },
+        props.retryBootstrap,
+      );
+      const result = parseExportCreate(raw, batch.species_code);
+      setNotice(
+        result.kind === "no-work"
+          ? { kind: "success", text: "旧批次已废弃，目前没有待同步项目。" }
+          : { kind: "success", text: "已重新创建同步批次，只包含尚未完成的项目。" },
+      );
+      counts.reload();
+      batches.reload();
+    } catch (error) {
+      setNotice({ kind: "error", text: mutationMessage(error) });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function archive(batch: ExportBatch) {
+    if (pending || batches.unavailable || props.directoriesUnavailable) return;
+    setPending(true);
+    setNotice(null);
+    try {
+      await adminMutation<void>(
+        `/admin/exports/${batch.id}/archive`,
+        { method: "POST", body: {}, csrfToken: props.csrfToken },
+        props.retryBootstrap,
+      );
+      setNotice({
+        kind: "success",
+        text: "已从历史列表移除；已下载记录仍然保留并继续用于去重。",
+      });
+      counts.reload();
+      batches.reload();
+    } catch (error) {
+      setNotice({ kind: "error", text: mutationMessage(error) });
+    } finally {
+      setPending(false);
+    }
+  }
+
   const creationUnavailable =
     counts.unavailable || batches.unavailable || props.directoriesUnavailable;
 
@@ -161,6 +209,15 @@ export function ExportsTab(props: AdminTabProps) {
         <p>
           审核通过后，服务器只生成下载任务清单；原图由管理员自己的电脑直接从外部来源下载。
         </p>
+        <div className="export-tool-download">
+          <div>
+            <strong>本地工具只放在开发电脑</strong>
+            <p>
+              打开 <code>local_sync/dist/SukaSeafoodTrainingSync</code>，双击
+              SukaSeafoodTrainingSync.exe；线上网页不保存或分发这个 APP。
+            </p>
+          </div>
+        </div>
         <ol className="export-workflow__steps">
           <li>
             <h3>1. 下载任务 CSV</h3>
@@ -168,7 +225,7 @@ export function ExportsTab(props: AdminTabProps) {
           </li>
           <li>
             <h3>2. 在本地下载原图</h3>
-            <p>本地工具读取 CSV、下载新的审核通过原图，并生成 JSON 回执。</p>
+            <p>选择 CSV 和训练集保存目录，点击“开始同步”。工具只下载新的审核通过原图。</p>
           </li>
           <li>
             <div className="admin-field-label">
@@ -177,7 +234,7 @@ export function ExportsTab(props: AdminTabProps) {
                 上传回执是为了告诉服务器哪些原图已经在本地下载成功。网页不会上传图片；成功项目以后不会重复加入下载批次，失败项目仍可重试。
               </HelpHint>
             </div>
-            <p>把本地工具生成的 JSON 拖回对应批次，服务器才会记住下载结果。</p>
+            <p>工具会自动提交结果；只有自动提交失败时，才把生成的 JSON 拖回对应批次。</p>
           </li>
         </ol>
       </section>
@@ -233,7 +290,7 @@ export function ExportsTab(props: AdminTabProps) {
                 <div className="admin-card-grid export-batch-grid">
                   {data.items.map((batch) => {
                     const uploadDisabled =
-                      pending || unavailable || props.directoriesUnavailable;
+                      batch.status !== "pending" || pending || unavailable || props.directoriesUnavailable;
                     return (
                       <article className="export-batch-card" key={batch.id}>
                         <header className="export-batch-card__header">
@@ -248,7 +305,7 @@ export function ExportsTab(props: AdminTabProps) {
                               ? "待处理"
                               : batch.status === "completed"
                                 ? "已完成"
-                                : "已过期"}
+                                : "已作废"}
                           </span>
                         </header>
                         <dl className="export-batch-stats">
@@ -257,51 +314,80 @@ export function ExportsTab(props: AdminTabProps) {
                         </dl>
                         <p className="export-batch-dates">
                           创建：{new Date(batch.created_at).toLocaleString("zh-CN")}<br />
-                          过期：{new Date(batch.expires_at).toLocaleString("zh-CN")}
+                          {batch.status === "pending"
+                            ? `任务截止：${new Date(batch.expires_at).toLocaleString("zh-CN")}`
+                            : batch.completed_at
+                              ? `完成：${new Date(batch.completed_at).toLocaleString("zh-CN")}`
+                              : "旧任务 CSV 已失效，可重新创建。"}
                         </p>
-                        <a
-                          className="primary-button compact-button export-download-link"
-                          href={`${API_BASE}/admin/exports/${batch.id}.csv`}
-                          download={`sukaseafood-export-${batch.id}.csv`}
-                        >
-                          下载任务 CSV
-                        </a>
-                        <div
-                          className={`receipt-drop-zone${draggingBatchId === batch.id ? " receipt-drop-zone--active" : ""}`}
-                          onDragEnter={(event) => {
-                            event.preventDefault();
-                            if (!uploadDisabled) setDraggingBatchId(batch.id);
-                          }}
-                          onDragOver={(event) => event.preventDefault()}
-                          onDragLeave={() => setDraggingBatchId((current) =>
-                            current === batch.id ? null : current
-                          )}
-                          onDrop={(event) => {
-                            event.preventDefault();
-                            setDraggingBatchId(null);
-                            if (!uploadDisabled) {
-                              void receiptFile(batch, event.dataTransfer.files?.[0] ?? null);
-                            }
-                          }}
-                        >
-                          <strong>把 JSON 回执拖到这里</strong>
-                          <span>或</span>
-                          <label className="receipt-upload" htmlFor={`receipt-${batch.id}`}>
-                            选择 JSON 回执
-                          </label>
-                          <input
-                            id={`receipt-${batch.id}`}
-                            className="receipt-file-input"
-                            aria-label={`上传 ${batch.id} 回执`}
-                            type="file"
-                            accept=".json,application/json"
-                            disabled={uploadDisabled}
-                            onChange={(event) => {
-                              const file = event.target.files?.[0] ?? null;
-                              event.currentTarget.value = "";
-                              void receiptFile(batch, file);
+                        {batch.status !== "expired" ? (
+                          <a
+                            className="primary-button compact-button export-download-link"
+                            href={`${API_BASE}/admin/exports/${batch.id}.csv`}
+                            download={`sukaseafood-export-${batch.id}.csv`}
+                          >
+                            下载任务 CSV
+                          </a>
+                        ) : null}
+                        {batch.status === "pending" ? (
+                          <div
+                            className={`receipt-drop-zone${draggingBatchId === batch.id ? " receipt-drop-zone--active" : ""}`}
+                            onDragEnter={(event) => {
+                              event.preventDefault();
+                              if (!uploadDisabled) setDraggingBatchId(batch.id);
                             }}
-                          />
+                            onDragOver={(event) => event.preventDefault()}
+                            onDragLeave={() => setDraggingBatchId((current) =>
+                              current === batch.id ? null : current
+                            )}
+                            onDrop={(event) => {
+                              event.preventDefault();
+                              setDraggingBatchId(null);
+                              if (!uploadDisabled) {
+                                void receiptFile(batch, event.dataTransfer.files?.[0] ?? null);
+                              }
+                            }}
+                          >
+                            <strong>把 JSON 回执拖到这里</strong>
+                            <small>仅在自动提交失败时使用</small>
+                            <span>或</span>
+                            <label className="receipt-upload" htmlFor={`receipt-${batch.id}`}>
+                              选择 JSON 回执
+                            </label>
+                            <input
+                              id={`receipt-${batch.id}`}
+                              className="receipt-file-input"
+                              aria-label={`上传 ${batch.id} 回执`}
+                              type="file"
+                              accept=".json,application/json"
+                              disabled={uploadDisabled}
+                              onChange={(event) => {
+                                const file = event.target.files?.[0] ?? null;
+                                event.currentTarget.value = "";
+                                void receiptFile(batch, file);
+                              }}
+                            />
+                          </div>
+                        ) : null}
+                        <div className="export-batch-actions">
+                          {batch.status !== "completed" ? (
+                            <button
+                              className="secondary-button compact-button"
+                              type="button"
+                              disabled={pending || unavailable || props.directoriesUnavailable}
+                              onClick={() => void recreate(batch)}
+                            >
+                              {batch.status === "pending" ? "废弃并重新创建" : "重新创建"}
+                            </button>
+                          ) : null}
+                          <button
+                            className="text-button export-archive-button"
+                            type="button"
+                            disabled={pending || unavailable || props.directoriesUnavailable}
+                            onClick={() => void archive(batch)}
+                          >
+                            移除这条历史
+                          </button>
                         </div>
                       </article>
                     );

@@ -238,6 +238,22 @@ describe("HistoryPage links, privacy, and editing", () => {
     expect(screen.queryByRole("dialog", { name: "完整图片" })).not.toBeInTheDocument();
   });
 
+  it("packs source, timestamps, and actions into an equal-height desktop card", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(historyFixture)));
+    renderPage();
+
+    const card = await screen.findByRole("article");
+    expect(card.querySelector(".history-card__facts")).toBeInTheDocument();
+    expect(card.querySelector(".history-card__source")).toHaveTextContent(
+      "维基共享资源 · page:1:File:Fish.jpg",
+    );
+    expect(card.querySelector(".history-card__timestamps")).toHaveTextContent("创建时间");
+    expect(card.querySelector(".history-card__timestamps")).toHaveTextContent("更新时间");
+    expect(card.querySelector(".history-card__actions")).toContainElement(
+      within(card).getByRole("button", { name: "编辑" }),
+    );
+  });
+
   it("sends one versioned CSRF PATCH and claims success only after validation and refetch", async () => {
     const save = deferred<Response>();
     let getCalls = 0;

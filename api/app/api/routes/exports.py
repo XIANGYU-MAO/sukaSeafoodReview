@@ -23,10 +23,12 @@ from app.services.exports import (
     ExportNotFound,
     ReceiptRejected,
     apply_receipt,
+    archive_export_batch,
     batch_response,
     create_export_batch,
     list_batches,
     pending_counts,
+    recreate_export_batch,
     render_batch_csv,
 )
 
@@ -106,6 +108,47 @@ async def post_export(
         status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
     )
     return await batch_response(db, result.batch, created=result.created)
+
+
+@router.post("/{batch_id}/recreate")
+async def post_recreate_export(
+    batch_id: UUID,
+    response: Response,
+    auth: CurrentAuth = Depends(require_admin_csrf),
+    settings: Settings = Depends(get_runtime_settings),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        result = await recreate_export_batch(
+            db,
+            batch_id,
+            auth.user.id,
+            _receipt_secret(settings),
+            image_origin_allowlist=settings.IMAGE_ORIGIN_ALLOWLIST,
+        )
+    except (ExportNotFound, ExportConflict) as exc:
+        _raise_export_error(exc)
+    if result.no_work:
+        response.status_code = status.HTTP_200_OK
+        return {"code": "NO_WORK", "created": False, "batch": None}
+    assert result.batch is not None
+    response.status_code = (
+        status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
+    )
+    return await batch_response(db, result.batch, created=result.created)
+
+
+@router.post("/{batch_id}/archive", status_code=status.HTTP_204_NO_CONTENT)
+async def post_archive_export(
+    batch_id: UUID,
+    auth: CurrentAuth = Depends(require_admin_csrf),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    try:
+        await archive_export_batch(db, batch_id, auth.user.id)
+    except ExportNotFound as exc:
+        _raise_export_error(exc)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(

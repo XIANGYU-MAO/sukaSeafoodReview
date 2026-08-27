@@ -917,6 +917,7 @@ h1 {
 .history-card {
   display: grid;
   grid-template-columns: 11rem minmax(0, 1fr);
+  height: 13rem;
   overflow: hidden;
   border: 1px solid rgba(7, 59, 76, 0.14);
   border-radius: 1rem;
@@ -935,7 +936,7 @@ h1 {
   position: relative;
   display: block;
   min-width: 0;
-  height: 13rem;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   padding: 0;
@@ -1028,8 +1029,76 @@ h1 {
 }
 
 .history-card__body {
+  display: grid;
+  height: 100%;
   min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0.55rem;
   padding: 1rem;
+}
+
+.history-card:has(.history-editor) {
+  height: auto;
+  min-height: 13rem;
+}
+
+.history-card__facts {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(15rem, 0.9fr);
+  align-items: start;
+  gap: 0.75rem;
+}
+
+.history-card__origin,
+.history-card__timestamps {
+  min-width: 0;
+}
+
+.history-card__source,
+.history-card__timestamps p,
+.history-card__messages p {
+  margin: 0;
+}
+
+.history-card__source {
+  overflow: hidden;
+  margin-bottom: 0.45rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-card__timestamps {
+  display: grid;
+  gap: 0.3rem;
+  color: #355d65;
+  font-size: 0.86rem;
+}
+
+.history-card__timestamps p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-card__actions {
+  display: flex;
+  min-width: 0;
+  align-items: end;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.history-card__actions > .secondary-button {
+  min-height: 2.45rem;
+  flex: 0 0 auto;
+  padding-block: 0.45rem;
+}
+
+.history-card__messages {
+  min-width: 0;
+  font-size: 0.85rem;
 }
 
 .history-card h2 {
@@ -1420,6 +1489,21 @@ h1 {
   margin-top: 0;
 }
 
+.export-tool-download {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 1rem;
+  border-radius: 0.9rem;
+  background: #dff4f1;
+}
+
+.export-tool-download p {
+  margin: 0.35rem 0 0;
+}
+
 .export-workflow__steps {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1529,6 +1613,18 @@ h1 {
   margin-top: 0;
   text-align: center;
   text-decoration: none;
+}
+
+.export-batch-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.export-archive-button {
+  color: #762d28;
 }
 
 .receipt-drop-zone {
@@ -2093,6 +2189,7 @@ h1 {
   }
 
   .history-card {
+    height: auto;
     grid-template-columns: 1fr;
   }
 
@@ -2103,12 +2200,25 @@ h1 {
     grid-template-columns: 1fr;
   }
 
+  .export-tool-download {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .history-thumbnail {
     max-height: 16rem;
   }
 
   .history-thumbnail-viewer {
     height: 16rem;
+  }
+
+  .history-card__body {
+    height: auto;
+  }
+
+  .history-card__facts {
+    grid-template-columns: 1fr;
   }
 }
 

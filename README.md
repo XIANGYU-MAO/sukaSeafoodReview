@@ -130,7 +130,7 @@ The page has the generic title “管理后台” (Administration), while Mao re
 3. 鱼种管理 (Species management) — create, edit, deactivate, and reactivate species with immutable Windows-safe codes. The initial catalog is empty: before importing SF006 or any other current species, Mao adds its directory entry here under the safe-code rules.
 4. 审核历史 — cross-member filtering, version-protected corrections, and reopening for a specified active reviewer who has never reviewed the candidate.
 5. 采集与导入 — the four-step collector workflow with Windows or macOS/Linux commands, initial or `--resume` replenishment mode, per-source limits, CSV drag-and-drop, origin approval, automatic deduplication, and explicit blocker skipping.
-6. 训练集同步 — pending counts, immutable incremental batches, small CSV downloads, and JSON receipt-file upload.
+6. 训练集同步 — create incremental task CSVs, run the Windows sync tool kept only on the development computer, upload a JSON receipt only when automatic submission fails, recreate only unfinished work, and hide history without deleting successful deduplication state. The website does not distribute the executable.
 7. 账号 — the fixed directory and reviewer password reset; Mao is not reset through the Web UI.
 
 Browser-based admin mutations require Mao's session, CSRF, and the confirmations specified by each API. Only admin data operations whose request models include `reason`—such as candidate, species, review-history, and account changes—require and audit a reason. Import preview/commit, export batches, and receipts follow their own token, confirmation, and authentication contracts and do not invent `reason`. The interface does not render raw server errors, free-text failed-receipt content, import tokens, or dismissed one-time passwords.

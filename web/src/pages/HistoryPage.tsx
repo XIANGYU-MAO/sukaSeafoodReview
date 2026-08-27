@@ -389,19 +389,31 @@ export function HistoryPage({ csrfToken, reviewerId, retryBootstrap }: HistoryPa
                   {decisionLabel(locale, item.decision)}
                 </strong>
               </div>
-              <p>{sourceLabel(locale, item.source_dataset)} · {item.source_record_id}</p>
-              <div className="history-links">
-                <a href={item.source_url} target="_blank" rel="noopener noreferrer">{t("sourcePage")}</a>
-                <a href={item.original_url} target="_blank" rel="noopener noreferrer">{t("originalImage")}</a>
+              <div className="history-card__facts">
+                <div className="history-card__origin">
+                  <p className="history-card__source" title={`${sourceLabel(locale, item.source_dataset)} · ${item.source_record_id}`}>
+                    {sourceLabel(locale, item.source_dataset)} · {item.source_record_id}
+                  </p>
+                  <div className="history-links">
+                    <a href={item.source_url} target="_blank" rel="noopener noreferrer">{t("sourcePage")}</a>
+                    <a href={item.original_url} target="_blank" rel="noopener noreferrer">{t("originalImage")}</a>
+                  </div>
+                </div>
+                <div className="history-card__timestamps">
+                  <p><strong>{t("createdAt")}:</strong> <time dateTime={item.created_at}>{displayTimestamp(item.created_at)}</time></p>
+                  <p><strong>{t("updatedAt")}:</strong> <time dateTime={item.updated_at}>{displayTimestamp(item.updated_at)}</time></p>
+                </div>
               </div>
-              <p><strong>{t("createdAt")}:</strong> <time dateTime={item.created_at}>{displayTimestamp(item.created_at)}</time></p>
-              <p><strong>{t("updatedAt")}:</strong> <time dateTime={item.updated_at}>{displayTimestamp(item.updated_at)}</time></p>
-              {readOnlyNoticeId === item.id ? <p className="read-only-note">{t("noLongerCurrent")}</p> : null}
-              {item.read_only || !item.is_current ? <p className="read-only-note">{t("readOnlyExplanation")}</p> : null}
-              {savedId === item.id ? <div className="notice notice--success" role="status">{t("editSaved")}</div> : null}
-              {!item.read_only && item.is_current && editingId !== item.id ? (
-                <button className="secondary-button" type="button" onClick={() => beginEdit(item)}>{t("edit")}</button>
-              ) : null}
+              <div className="history-card__actions">
+                <div className="history-card__messages">
+                  {readOnlyNoticeId === item.id ? <p className="read-only-note">{t("noLongerCurrent")}</p> : null}
+                  {item.read_only || !item.is_current ? <p className="read-only-note">{t("readOnlyExplanation")}</p> : null}
+                  {savedId === item.id ? <div className="notice notice--success" role="status">{t("editSaved")}</div> : null}
+                </div>
+                {!item.read_only && item.is_current && editingId !== item.id ? (
+                  <button className="secondary-button" type="button" onClick={() => beginEdit(item)}>{t("edit")}</button>
+                ) : null}
+              </div>
               {editingId === item.id && editDraft ? (
                 <HistoryEditor
                   draft={editDraft}

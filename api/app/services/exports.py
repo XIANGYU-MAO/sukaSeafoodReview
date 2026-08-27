@@ -658,6 +658,86 @@ async def create_export_batch(
         await _end_creation_snapshot_lock(session, locked)
 
 
+async def recreate_export_batch(
+    session: AsyncSession,
+    batch_id: UUID,
+    actor_id: UUID,
+    receipt_secret: str,
+    *,
+    image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
+) -> BatchCreationResult:
+    batch = await session.scalar(
+        select(ExportBatch).where(ExportBatch.id == batch_id).with_for_update()
+    )
+    if batch is None:
+        raise ExportNotFound
+    species_code = None
+    if batch.species_id is not None:
+        species_code = await session.scalar(
+            select(Species.code).where(Species.id == batch.species_id)
+        )
+        if species_code is None:
+            raise ExportNotFound
+    if batch.status == "completed":
+        raise ExportConflict("EXPORT_BATCH_COMPLETED")
+    if batch.status == "pending":
+        now = utc_now()
+        batch.status = "expired"
+        batch.expired_at = now
+        session.add(
+            AuditEvent(
+                actor_id=actor_id,
+                action="EXPORT_BATCH_ABANDON",
+                object_type="ExportBatch",
+                object_id=str(batch.id),
+                reason="Administrator recreated local training-set export",
+                before_json={"status": "pending"},
+                after_json={"status": "expired"},
+            )
+        )
+    await session.commit()
+    return await create_export_batch(
+        session,
+        actor_id,
+        species_code,
+        receipt_secret,
+        image_origin_allowlist=image_origin_allowlist,
+    )
+
+
+async def archive_export_batch(
+    session: AsyncSession,
+    batch_id: UUID,
+    actor_id: UUID,
+) -> None:
+    batch = await session.scalar(
+        select(ExportBatch).where(ExportBatch.id == batch_id).with_for_update()
+    )
+    if batch is None:
+        raise ExportNotFound
+    if batch.archived_at is not None:
+        await session.commit()
+        return
+    now = utc_now()
+    before_status = batch.status
+    if batch.status == "pending":
+        batch.status = "expired"
+        batch.expired_at = now
+    batch.archived_at = now
+    session.add(
+        AuditEvent(
+            actor_id=actor_id,
+            action="EXPORT_BATCH_ARCHIVE",
+            object_type="ExportBatch",
+            object_id=str(batch.id),
+            reason="Administrator removed export batch from visible history",
+            before_json={"status": before_status, "archived": False},
+            after_json={"status": batch.status, "archived": True},
+        )
+    )
+    await session.commit()
+
+
 async def batch_response(
     session: AsyncSession, batch: ExportBatch, *, created: bool = False
 ) -> ExportBatchResponse:
@@ -694,11 +774,17 @@ async def batch_response(
 async def list_batches(
     session: AsyncSession, *, limit: int = 100, offset: int = 0
 ) -> tuple[int, list[ExportBatchResponse]]:
-    total = int(await session.scalar(select(func.count()).select_from(ExportBatch)) or 0)
+    visible = ExportBatch.archived_at.is_(None)
+    total = int(
+        await session.scalar(
+            select(func.count()).select_from(ExportBatch).where(visible)
+        )
+        or 0
+    )
     batches = list(
         (
             await session.scalars(
-                select(ExportBatch).order_by(
+                select(ExportBatch).where(visible).order_by(
                     ExportBatch.created_at.desc(), ExportBatch.id.desc()
                 ).limit(limit).offset(offset)
             )

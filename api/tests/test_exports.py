@@ -409,6 +409,69 @@ def test_admin_partial_receipt_accepts_one_success_and_reports_other_batch_item_
     }
 
 
+def test_admin_recreates_pending_batch_with_only_unfinished_items(settings):
+    seed = create_seed(settings, decisions=(Decision.APPROVED, Decision.APPROVED))
+    with TestClient(create_app(settings)) as client:
+        created = create_batch(client, seed)
+        _, rows = download(client, seed, created.json()["id"])
+        partial = client.post(
+            f"/v1/admin/exports/{created.json()['id']}/receipt-file",
+            json={"batch_id": created.json()["id"], "items": [success_receipt(rows[0])]},
+            headers=mao_headers(seed, csrf=True),
+        )
+        assert partial.status_code == 200
+
+        recreated = client.post(
+            f"/v1/admin/exports/{created.json()['id']}/recreate",
+            json={},
+            headers=mao_headers(seed, csrf=True),
+        )
+        assert recreated.status_code == 201
+        _, recreated_rows = download(client, seed, recreated.json()["id"])
+
+    assert recreated.json()["id"] != created.json()["id"]
+    assert [row["candidate_id"] for row in recreated_rows] == [rows[1]["candidate_id"]]
+    batches = asyncio.run(load_models(settings, ExportBatch))
+    assert {str(batch.id): batch.status for batch in batches} == {
+        created.json()["id"]: "expired",
+        recreated.json()["id"]: "pending",
+    }
+    succeeded = [
+        item for item in asyncio.run(load_models(settings, ExportItem))
+        if item.status == "succeeded"
+    ]
+    assert [item.candidate_id for item in succeeded] == [UUID(rows[0]["candidate_id"])]
+
+
+def test_admin_archives_completed_history_without_forgetting_download(settings):
+    seed, downloaded = _successful_initial_sync(settings)
+    batch = asyncio.run(load_models(settings, ExportBatch))[0]
+
+    with TestClient(create_app(settings)) as client:
+        archived = client.post(
+            f"/v1/admin/exports/{batch.id}/archive",
+            json={},
+            headers=mao_headers(seed, csrf=True),
+        )
+        history = client.get("/v1/admin/exports", headers=mao_headers(seed))
+        no_work = client.post(
+            "/v1/admin/exports",
+            json={},
+            headers=mao_headers(seed, csrf=True),
+        )
+
+    assert archived.status_code == 204
+    assert history.status_code == 200
+    assert history.json() == {"total": 0, "items": []}
+    assert no_work.status_code == 200
+    assert no_work.json() == {"code": "NO_WORK", "created": False, "batch": None}
+    stored_batches = asyncio.run(load_models(settings, ExportBatch))
+    stored_items = asyncio.run(load_models(settings, ExportItem))
+    assert stored_batches[0].archived_at is not None
+    assert stored_items[0].status == "succeeded"
+    assert stored_items[0].candidate_id == UUID(downloaded["candidate_id"])
+
+
 def test_same_scope_reuses_cross_scope_overlaps_no_work_and_expiry_regenerates(settings):
     seed = create_seed(settings, (Decision.APPROVED, Decision.REJECTED))
     with TestClient(create_app(settings)) as client:
@@ -1031,7 +1094,7 @@ def test_export_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(t
         return result
 
     current = asyncio.run(shape())
-    assert {"scope_key", "completed_at", "expired_at"} <= current["batch"]
+    assert {"scope_key", "completed_at", "expired_at", "archived_at"} <= current["batch"]
     assert {
         "candidate_version", "species_code", "preview_url", "original_url",
         "source_url", "creator", "license", "license_url", "attribution",
@@ -1039,6 +1102,11 @@ def test_export_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(t
     } <= current["item"]
     assert "ck_export_items_status" in current["checks"]
     assert "uq_export_batches_pending_scope" not in current["batch_indexes"]
+    assert "ix_export_batches_archived_at" in current["batch_indexes"]
+    command.downgrade(config, "20260827_08")
+    assert "archived_at" not in asyncio.run(shape())["batch"]
+    command.upgrade(config, "head")
+    assert "archived_at" in asyncio.run(shape())["batch"]
     command.downgrade(config, "20260826_05")
     assert "uq_export_batches_pending_scope" in asyncio.run(shape())["batch_indexes"]
     command.upgrade(config, "head")
@@ -1056,9 +1124,11 @@ def test_export_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(t
     ddl = output.getvalue()
     assert "20260827_06" in ddl
     assert "20260827_07" in ddl
+    assert "20260828_09" in ddl
     assert "CREATE UNIQUE INDEX uq_export_batches_pending_scope" in ddl
     assert "DROP INDEX uq_export_batches_pending_scope" in ddl
     assert "original_fingerprint" in ddl
+    assert "archived_at" in ddl
 
 
 def test_epoch_and_chunking_offline_ddl_emit_postgres_locks_and_integer_guards():

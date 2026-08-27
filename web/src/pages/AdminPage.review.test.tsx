@@ -442,6 +442,10 @@ it("explains the local export workflow and accepts a JSON receipt dropped onto i
   expect(screen.getByRole("heading", { name: "2. 在本地下载原图" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "3. 上传 JSON 回执" })).toBeInTheDocument();
   expect(screen.getByText(/CSV 只交给本地下载工具/)).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "下载 Windows 原图同步工具" })).not.toBeInTheDocument();
+  const localToolNotice = screen.getByText("本地工具只放在开发电脑").closest(".export-tool-download");
+  expect(localToolNotice).toHaveTextContent("local_sync/dist/SukaSeafoodTrainingSync");
+  expect(localToolNotice).toHaveTextContent("双击 SukaSeafoodTrainingSync.exe");
   expect(document.body).not.toHaveTextContent("Mao 的");
 
   await user.hover(screen.getByRole("button", { name: "操作说明：上传下载回执" }));
@@ -468,6 +472,34 @@ it("explains the local export workflow and accepts a JSON receipt dropped onto i
   expect(fetchMock.mock.calls.filter(([requestUrl]) =>
     String(requestUrl).endsWith(`/admin/exports/${IDS.batch}/receipt-file`),
   )).toHaveLength(1);
+});
+
+it("lets the administrator recreate unfinished work and remove history without a hard delete", async () => {
+  const fetchMock = mockAdmin((url, init) => {
+    if (url.endsWith(`/admin/exports/${IDS.batch}/recreate`) && init?.method === "POST") {
+      return jsonResponse({ ...exportBatch, id: IDS.review, created: true }, 201);
+    }
+    if (url.endsWith(`/admin/exports/${IDS.batch}/archive`) && init?.method === "POST") {
+      return new Response(null, { status: 204 });
+    }
+  });
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("训练集同步");
+
+  await user.click(await screen.findByRole("button", { name: "废弃并重新创建" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("只包含尚未完成的项目");
+  await user.click(screen.getByRole("button", { name: "移除这条历史" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("已从历史列表移除");
+
+  const recreate = fetchMock.mock.calls.find(([input]) =>
+    String(input).endsWith(`/admin/exports/${IDS.batch}/recreate`),
+  );
+  const archive = fetchMock.mock.calls.find(([input]) =>
+    String(input).endsWith(`/admin/exports/${IDS.batch}/archive`),
+  );
+  expect(JSON.parse(String(recreate?.[1]?.body))).toEqual({});
+  expect(JSON.parse(String(archive?.[1]?.body))).toEqual({});
 });
 
 it("paginates export history and accepts a partial success with another batch item pending", async () => {
