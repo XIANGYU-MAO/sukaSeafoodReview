@@ -16,6 +16,7 @@
 - Collection runs only on Mao's Windows computer, one process at a time.
 - Do not add multi-process file races, exact crash timing, malicious file replacement, cross-root mutation, or live schema-upgrade race tests.
 - Species are not limited to SF001–SF005; a fresh deployment starts with an empty species table.
+- The application has never been deployed: do not add backward-compatible database migrations, legacy config readers, legacy CSV paths, or fallback behavior for old releases.
 - Inactive species remain queryable for history but are excluded from collector configuration.
 - Source overrides are optional; scientific-name resolution is the normal path.
 - The legacy 1,221-row CSV and all legacy `output/` data are intentionally deleted, not archived.
@@ -280,7 +281,7 @@ git commit -m "feat(collector): support dynamic fish catalogs"
 ### Task 2: Persist optional source overrides on species
 
 **Files:**
-- Create: `api/alembic/versions/20260827_08_species_collector_overrides.py`
+- Modify: `api/alembic/versions/20260826_01_initial.py`
 - Modify: `api/app/models/catalog.py`
 - Modify: `api/app/schemas/admin.py`
 - Modify: `api/app/services/admin.py`
@@ -288,7 +289,7 @@ git commit -m "feat(collector): support dynamic fish catalogs"
 - Modify: `api/tests/test_model_constraints.py`
 
 **Interfaces:**
-- Consumes: existing `SpeciesCreateRequest`, `SpeciesPatchRequest`, `SpeciesResponse`, and audited species mutations.
+- Consumes: the fresh-deployment initial schema plus existing `SpeciesCreateRequest`, `SpeciesPatchRequest`, `SpeciesResponse`, and audited species mutations. There is no deployed database to upgrade.
 - Produces: nullable `inat_taxon_id: int | None`, `gbif_taxon_key: int | None`, `commons_category: str | None`, and `fish_vista_filter: str | None` on the model and admin API.
 
 - [ ] **Step 1: Write failing API contract tests**
@@ -331,21 +332,26 @@ Set-Location ..
 
 Expected: FAIL because the model and request/response schemas do not contain source overrides.
 
-- [ ] **Step 3: Add the Alembic revision and SQLAlchemy fields**
+- [ ] **Step 3: Add the fields directly to the initial schema and SQLAlchemy model**
 
-Create revision `20260827_08` with `down_revision = "20260827_07"`. `upgrade()` adds:
+Extend the `species` table definition inside `20260826_01_initial.py` with:
 
 ```python
-with op.batch_alter_table("species") as batch:
-    batch.add_column(sa.Column("inat_taxon_id", sa.BigInteger(), nullable=True))
-    batch.add_column(sa.Column("gbif_taxon_key", sa.BigInteger(), nullable=True))
-    batch.add_column(sa.Column("commons_category", sa.String(length=512), nullable=True))
-    batch.add_column(sa.Column("fish_vista_filter", sa.String(length=255), nullable=True))
-    batch.create_check_constraint("ck_species_inat_taxon_positive", "inat_taxon_id IS NULL OR inat_taxon_id > 0")
-    batch.create_check_constraint("ck_species_gbif_taxon_positive", "gbif_taxon_key IS NULL OR gbif_taxon_key > 0")
+sa.Column("inat_taxon_id", sa.BigInteger(), nullable=True),
+sa.Column("gbif_taxon_key", sa.BigInteger(), nullable=True),
+sa.Column("commons_category", sa.String(length=512), nullable=True),
+sa.Column("fish_vista_filter", sa.String(length=255), nullable=True),
+sa.CheckConstraint(
+    "inat_taxon_id IS NULL OR inat_taxon_id > 0",
+    name="ck_species_inat_taxon_positive",
+),
+sa.CheckConstraint(
+    "gbif_taxon_key IS NULL OR gbif_taxon_key > 0",
+    name="ck_species_gbif_taxon_positive",
+),
 ```
 
-`downgrade()` drops both checks and all four columns in reverse order. Mirror the same nullable fields and check constraints on `Species`.
+Mirror the same nullable fields and check constraints on `Species`. Do not create revision 08 and do not support upgrading an already-created revision-07 database; the production database does not exist yet.
 
 - [ ] **Step 4: Extend Pydantic requests and audited service responses**
 
@@ -366,18 +372,26 @@ Run:
 ```powershell
 Set-Location api
 python -m pytest tests/test_admin_catalog.py tests/test_model_constraints.py -q
-python -m alembic upgrade head
-python -m alembic check
+$freshDatabase = Join-Path ([IO.Path]::GetTempPath()) ("sukaseafood-fresh-" + [guid]::NewGuid().ToString("N") + ".db")
+$env:DATABASE_URL = "sqlite+aiosqlite:///$($freshDatabase -replace '\\','/')"
+try {
+    python -m alembic upgrade head
+    python -m alembic check
+}
+finally {
+    Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $freshDatabase -Force -ErrorAction SilentlyContinue
+}
 python -m compileall -q app tests alembic
 Set-Location ..
 ```
 
-Expected: all selected tests PASS; Alembic reaches `20260827_08`; no model drift is reported.
+Expected: all selected tests PASS; a brand-new database reaches the existing head `20260827_07` with the new species fields; no model drift is reported.
 
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add api/alembic/versions/20260827_08_species_collector_overrides.py api/app/models/catalog.py api/app/schemas/admin.py api/app/services/admin.py api/tests/test_admin_catalog.py api/tests/test_model_constraints.py
+git add api/alembic/versions/20260826_01_initial.py api/app/models/catalog.py api/app/schemas/admin.py api/app/services/admin.py api/tests/test_admin_catalog.py api/tests/test_model_constraints.py
 git commit -m "feat(api): store collector source overrides"
 ```
 
@@ -842,7 +856,7 @@ git commit -m "docs(deploy): retire the fixed five-species import"
 **Files:**
 - Create: `api/tests/fixtures/collector_dynamic_candidates.csv`
 - Create: `api/tests/test_collector_import_contract.py`
-- Modify: `collector/tests/test_collect_fish_images.py` only if the generated fixture reveals a real CSV contract mismatch
+- Modify: `collector/tests/test_collect_fish_images.py` only if the generated fixture reveals a real current component-contract mismatch
 - Regenerate: `web/public/downloads/sukaseafood-collector.zip` if Task 7 changes a packaged file
 - Delete outside Git after verification: `C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector`
 
@@ -909,9 +923,9 @@ python -m pytest tests/test_collector_import_contract.py -q
 Set-Location ..
 ```
 
-Expected: initially FAIL if the migrated collector emits a field/value not accepted by the importer. If it passes immediately, record it as characterization evidence and do not invent a failure.
+Expected: initially FAIL if the new collector emits a field/value not accepted by the new importer. If it passes immediately, record it as characterization evidence and do not invent a failure.
 
-- [ ] **Step 3: Apply only a real manifest compatibility fix if the test found one**
+- [ ] **Step 3: Align only the current manifest contract if the test found a mismatch**
 
 Allowed corrections are limited to the collector's existing manifest mapping: supported uppercase source names, required URL fields, license normalization, UTF-8 BOM CSV output, and safe bounded text. Do not weaken the API import validator. Re-run the test until PASS.
 
@@ -944,7 +958,7 @@ git status --short
 
 Expected: all suites PASS except previously documented platform skips unrelated to this feature; package check, TypeScript, Vite build, compile, Alembic, and diff checks pass. Do not add new extreme concurrency or crash tests to make this matrix larger.
 
-- [ ] **Step 5: Regenerate, verify, and commit any final compatibility artifact**
+- [ ] **Step 5: Regenerate, verify, and commit any final contract artifact**
 
 If a packaged runtime file changed:
 
@@ -953,7 +967,7 @@ python collector/build_package.py
 python collector/build_package.py --check
 ```
 
-Commit only the fixture/test and any real compatibility correction:
+Commit only the fixture/test and any real current-contract correction:
 
 ```powershell
 git add api/tests/fixtures/collector_dynamic_candidates.csv api/tests/test_collector_import_contract.py collector/collect_fish_images.py collector/tests/test_collect_fish_images.py web/public/downloads/sukaseafood-collector.zip
