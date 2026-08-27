@@ -14,12 +14,19 @@ Species parsing now requires and validates all four nullable source overrides. T
 - `npm test -- --run src/pages/AdminPage.test.tsx src/pages/AdminPage.review.test.tsx src/admin/types.review.test.ts src/deployment.test.ts` — 4 files, 56 tests passed
 - `npm run typecheck` — passed
 - `git diff --check` — passed
+- Full web RED after Task 7: 210 passed, 1 failed because `App.integration.test.tsx` still expected the retired `导入` tab label
+- `npm test -- --run src/App.integration.test.tsx` — 1 file, 5 tests passed
+- `npm test` — 21 files, 211 tests passed
+- `npm run typecheck` — passed
+- `git diff --check` — passed
 
 ## Commit
 
 `feat(web): guide dynamic candidate collection`
 
 Follow-up fix: `fix(web): gate collector config on active species`
+
+Follow-up test alignment: `test(web): align collector tab expectation`
 
 ## Concerns
 
