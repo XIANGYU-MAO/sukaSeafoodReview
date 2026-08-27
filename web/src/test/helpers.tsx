@@ -3,6 +3,7 @@ import { render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { AuthProvider } from "../auth/AuthProvider";
+import { I18nProvider } from "../i18n/I18nProvider";
 
 export const authState = {
   id: "8de1871b-677f-4ea8-8e11-1f4d49a88c86",
@@ -22,7 +23,9 @@ export function jsonResponse(body: unknown, status = 200): Response {
 export function renderWithAuth(ui: ReactNode, initialEntry = "/") {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
-      <AuthProvider>{ui}</AuthProvider>
+      <I18nProvider>
+        <AuthProvider>{ui}</AuthProvider>
+      </I18nProvider>
     </MemoryRouter>,
   );
 }
@@ -31,7 +34,9 @@ export function renderWithStrictAuth(ui: ReactNode, initialEntry = "/") {
   return render(
     <StrictMode>
       <MemoryRouter initialEntries={[initialEntry]}>
-        <AuthProvider>{ui}</AuthProvider>
+        <I18nProvider>
+          <AuthProvider>{ui}</AuthProvider>
+        </I18nProvider>
       </MemoryRouter>
     </StrictMode>,
   );

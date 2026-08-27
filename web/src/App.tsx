@@ -7,7 +7,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { ReviewPage } from "./pages/ReviewPage";
 import { AdminPage } from "./pages/AdminPage";
-import { I18nProvider, useI18n } from "./i18n/I18nProvider";
+import { useI18n } from "./i18n/I18nProvider";
 
 export const APP_PATHS = ["/", "/history", "/admin"] as const;
 
@@ -49,8 +49,7 @@ export function App() {
   const authenticatedUser = auth.user;
 
   return (
-    <I18nProvider>
-      <Routes>
+    <Routes>
         <Route
           path="/"
           element={
@@ -100,8 +99,7 @@ export function App() {
           }
         />
         <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </I18nProvider>
+    </Routes>
   );
 }
 

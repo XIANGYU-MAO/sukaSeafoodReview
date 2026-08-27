@@ -16,13 +16,14 @@ import {
   type LoginPayload,
   parseAuthState,
 } from "../api/types";
+import type { MessageKey } from "../i18n/catalog";
 
 type AuthStatus = "booting" | "anonymous" | "authenticated" | "service-error";
 
 interface AuthContextValue {
   status: AuthStatus;
   user: AuthState | null;
-  successMessage: string | null;
+  successMessageKey: MessageKey | null;
   retryBootstrap: () => Promise<void>;
   login: (payload: LoginPayload) => Promise<void>;
   logout: () => Promise<void>;
@@ -34,7 +35,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>("booting");
   const [user, setUser] = useState<AuthState | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [successMessageKey, setSuccessMessageKey] = useState<MessageKey | null>(null);
   const authGeneration = useRef(0);
   const bootstrapController = useRef<AbortController | null>(null);
 
@@ -86,7 +87,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
     const authenticated = parseAuthState(response);
     if (generation !== authGeneration.current) return;
-    setSuccessMessage(null);
+    setSuccessMessageKey(null);
     setUser(authenticated);
     setStatus("authenticated");
   }, [invalidateBootstrap]);
@@ -106,7 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     if (generation !== authGeneration.current) return;
     setUser(null);
-    setSuccessMessage(null);
+    setSuccessMessageKey(null);
     setStatus("anonymous");
   }, [invalidateBootstrap, user]);
 
@@ -121,7 +122,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       if (generation !== authGeneration.current) return;
       setUser(null);
-      setSuccessMessage("密码已修改，请重新登录。");
+      setSuccessMessageKey("passwordChangedLoginAgain");
       setStatus("anonymous");
     },
     [invalidateBootstrap, user],
@@ -131,13 +132,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       status,
       user,
-      successMessage,
+      successMessageKey,
       retryBootstrap: bootstrap,
       login,
       logout,
       changePassword,
     }),
-    [bootstrap, changePassword, login, logout, status, successMessage, user],
+    [bootstrap, changePassword, login, logout, status, successMessageKey, user],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

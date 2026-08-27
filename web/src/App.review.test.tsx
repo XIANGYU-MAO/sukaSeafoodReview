@@ -19,7 +19,8 @@ describe("authenticated review integration", () => {
     renderWithAuth(<App />);
 
     expect(await screen.findByRole("heading", { name: "图片审核" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "修改密码 / Change password" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "修改密码" })).toBeInTheDocument();
+    expect(screen.queryByText("Change password")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "退出登录" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "English" }));
     expect(screen.getByRole("heading", { name: "Image review" })).toBeInTheDocument();

@@ -9,9 +9,13 @@ import {
   rejectionReasonLabel,
   sourceLabel,
   statusLabel,
+  messages,
 } from "./catalog";
 
 describe("bilingual stable-code catalog", () => {
+  it("keeps the Chinese and English message catalogs structurally identical", () => {
+    expect(Object.keys(messages.en).sort()).toEqual(Object.keys(messages.zh).sort());
+  });
   it("translates every known decision, status, source, and rejection reason in both locales", () => {
     for (const locale of ["zh", "en"] as const) {
       for (const code of DECISIONS) expect(decisionLabel(locale, code)).not.toBe(code);

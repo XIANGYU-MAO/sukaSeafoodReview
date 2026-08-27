@@ -8,17 +8,20 @@ import {
 } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { PillChoiceGroup } from "../components/PillChoiceGroup";
+import type { MessageKey } from "../i18n/catalog";
+import { useI18n } from "../i18n/I18nProvider";
 
 export { FIXED_NAMES } from "../api/types";
 
 export function LoginPage() {
-  const { login, successMessage } = useAuth();
+  const { login, successMessageKey } = useAuth();
+  const { locale, t, toggleLocale } = useI18n();
   const [availableNames, setAvailableNames] = useState<readonly FixedName[] | null>(null);
   const [namesError, setNamesError] = useState(false);
   const [selectedName, setSelectedName] = useState<FixedName | null>(null);
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [errorKey, setErrorKey] = useState<MessageKey | null>(null);
   const namesGeneration = useRef(0);
   const namesController = useRef<AbortController | null>(null);
 
@@ -53,21 +56,21 @@ export function LoginPage() {
     event.preventDefault();
     if (pending) return;
     if (!selectedName || !password) {
-      setError("请选择姓名并输入密码。");
+      setErrorKey("loginMissingFields");
       return;
     }
     setPending(true);
-    setError(null);
+    setErrorKey(null);
     try {
       await login({ name: selectedName, password });
       setPassword("");
     } catch (failure) {
       if (failure instanceof ApiError && failure.status === 401) {
-        setError("姓名或密码不正确。");
+        setErrorKey("loginUnauthorized");
       } else if (failure instanceof ApiError && failure.status === 429) {
-        setError("登录暂时不可用，请稍后再试。");
+        setErrorKey("loginRateLimited");
       } else {
-        setError("服务暂时不可用，请重试。");
+        setErrorKey("loginServiceUnavailable");
       }
     } finally {
       setPending(false);
@@ -77,25 +80,30 @@ export function LoginPage() {
   return (
     <main className="auth-layout">
       <section className="auth-card" aria-labelledby="login-title">
+        <div className="auth-card-toolbar">
+          <button className="secondary-button language-toggle" type="button" onClick={toggleLocale}>
+            {locale === "zh" ? "English" : "中文"}
+          </button>
+        </div>
         <div className="brand-mark" aria-hidden="true">海</div>
-        <p className="eyebrow">SukaSeafood · Collaborative Review</p>
-        <h1 id="login-title">登录审核平台</h1>
-        <p className="auth-intro">选择你的固定账号，继续协作审核。</p>
+        <p className="eyebrow">{t("loginEyebrow")}</p>
+        <h1 id="login-title">{t("loginTitle")}</h1>
+        <p className="auth-intro">{t("loginIntro")}</p>
 
-        {successMessage ? <p className="notice notice--success">{successMessage}</p> : null}
+        {successMessageKey ? <p className="notice notice--success">{t(successMessageKey)}</p> : null}
         {namesError ? (
           <div className="notice notice--error" role="alert">
-            <p>无法载入成员名单</p>
+            <p>{t("namesLoadError")}</p>
             <button className="text-button" type="button" onClick={() => void loadNames()}>
-              重试载入名单
+              {t("retryNames")}
             </button>
           </div>
         ) : availableNames ? (
           <form onSubmit={handleSubmit} noValidate>
             <fieldset className="field-group" disabled={pending}>
-              <legend>选择姓名 <span lang="en">/ Choose your name</span></legend>
+              <legend>{t("chooseName")}</legend>
               <PillChoiceGroup
-                label="选择姓名"
+                label={t("chooseName")}
                 options={availableNames}
                 value={selectedName}
                 onChange={setSelectedName}
@@ -103,7 +111,7 @@ export function LoginPage() {
               />
             </fieldset>
 
-            <label className="input-label" htmlFor="password">密码</label>
+            <label className="input-label" htmlFor="password">{t("password")}</label>
             <input
               id="password"
               className="text-input"
@@ -113,13 +121,13 @@ export function LoginPage() {
               disabled={pending}
               onChange={(event) => setPassword(event.target.value)}
             />
-            {error ? <p className="notice notice--error" role="alert">{error}</p> : null}
+            {errorKey ? <p className="notice notice--error" role="alert">{t(errorKey)}</p> : null}
             <button className="primary-button" type="submit" disabled={pending}>
-              {pending ? "正在登录…" : "登录"}
+              {pending ? t("loggingIn") : t("login")}
             </button>
           </form>
         ) : (
-          <p className="inline-loading" role="status">正在载入成员名单…</p>
+          <p className="inline-loading" role="status">{t("loadingNames")}</p>
         )}
       </section>
     </main>

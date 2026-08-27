@@ -106,7 +106,8 @@ describe("login page", () => {
     );
     expect(new Headers(loginCalls[0][1]?.headers).has("X-CSRF-Token")).toBe(false);
     resolveLogin(jsonResponse({ ...authState, name: "Mao", role: "admin" }));
-    expect(await screen.findByRole("button", { name: "修改密码 / Change password" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "修改密码" })).toBeInTheDocument();
+    expect(screen.queryByText("Change password")).not.toBeInTheDocument();
   });
 
   it.each([
@@ -179,7 +180,7 @@ describe("login page", () => {
     await user.click(await screen.findByRole("radio", { name: "Hassan" }));
     await user.type(screen.getByLabelText("密码"), "storage-secret-password");
     await user.click(screen.getByRole("button", { name: "登录" }));
-    await screen.findByRole("button", { name: "修改密码 / Change password" });
+    await screen.findByRole("button", { name: "修改密码" });
 
     expect(localSpy).not.toHaveBeenCalled();
     expect(localStorage).toHaveLength(0);
@@ -206,7 +207,7 @@ describe("login page", () => {
     await user.click(screen.getByRole("button", { name: "登录" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("服务暂时不可用，请重试。");
-    expect(screen.queryByRole("button", { name: "修改密码 / Change password" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "修改密码" })).not.toBeInTheDocument();
   });
 
   it("aborts replayed and unmounted names loads without showing a stale error", async () => {
@@ -243,5 +244,70 @@ describe("login page", () => {
 
     view.unmount();
     expect(nameSignals[1].aborted).toBe(true);
+  });
+
+  it("switches login copy and a visible error to English without clearing the form", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
+        if (url.endsWith("/auth/names")) return jsonResponse(serverNames.map((name) => ({ name })));
+        if (url.endsWith("/auth/login")) return jsonResponse({}, 401);
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithAuth(<App />);
+
+    const mao = await screen.findByRole("radio", { name: "Mao" });
+    await user.click(mao);
+    await user.type(screen.getByLabelText("密码"), "kept-password");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("姓名或密码不正确。");
+
+    await user.click(screen.getByRole("button", { name: "English" }));
+
+    expect(screen.getByRole("heading", { name: "Sign in to review" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Mao" })).toBeChecked();
+    expect(screen.getByLabelText("Password")).toHaveValue("kept-password");
+    expect(screen.getByRole("alert")).toHaveTextContent("Incorrect name or password.");
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("keeps the selected login locale after authentication", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
+        if (url.endsWith("/auth/names")) return jsonResponse(serverNames.map((name) => ({ name })));
+        if (url.endsWith("/auth/login")) return jsonResponse(authState);
+        if (url.endsWith("/reviews/current")) return new Response(null, { status: 204 });
+        if (url.endsWith("/progress")) return jsonResponse({
+          total_candidates: 0,
+          reviewed: 0,
+          pending: 0,
+          current: 0,
+          completion_percent: 0,
+          decisions: { APPROVED: 0, REJECTED: 0, UNSURE: 0 },
+          today_reviewed: 0,
+          reviewers: [],
+        });
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithAuth(<App />);
+
+    await screen.findAllByRole("radio");
+    await user.click(screen.getByRole("button", { name: "English" }));
+    await user.click(screen.getByRole("radio", { name: "Hassan" }));
+    await user.type(screen.getByLabelText("Password"), "temporary-password");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByRole("link", { name: "Review" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "History" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Change password" })).toBeInTheDocument();
   });
 });

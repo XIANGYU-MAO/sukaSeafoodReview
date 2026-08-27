@@ -60,6 +60,12 @@ a:focus-visible {
   box-shadow: 0 1.4rem 4rem rgba(7, 59, 76, 0.13);
 }
 
+.auth-card-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.75rem;
+}
+
 .brand-mark {
   display: grid;
   width: 3.25rem;

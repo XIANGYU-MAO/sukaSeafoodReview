@@ -25,7 +25,7 @@ describe("authenticated password and logout flows", () => {
     renderWithAuth(<App />);
 
     expect(await screen.findByRole("heading", { name: "首次登录，请修改密码" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "修改密码 / Change password" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "审核" })).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("当前密码"), "current-password");
     await user.type(screen.getByLabelText("新密码"), "a-long-new-password");
     await user.type(screen.getByLabelText("确认新密码"), "a-long-new-password");
@@ -91,7 +91,7 @@ describe("authenticated password and logout flows", () => {
     const user = userEvent.setup();
     renderWithAuth(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "修改密码 / Change password" }));
+    await user.click(await screen.findByRole("button", { name: "修改密码" }));
     expect(screen.getByRole("heading", { name: "修改密码" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "返回审核工作区" })).toBeInTheDocument();
   });
@@ -115,7 +115,7 @@ describe("authenticated password and logout flows", () => {
     renderWithAuth(<App />);
     await user.click(await screen.findByRole("button", { name: "退出登录" }));
 
-    expect(screen.getByRole("button", { name: "修改密码 / Change password" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "修改密码" })).toBeInTheDocument();
     const logoutCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/auth/logout"));
     expect(logoutCall?.[1]).toEqual(expect.objectContaining({ method: "POST", credentials: "include" }));
     expect(new Headers(logoutCall?.[1]?.headers).get("X-CSRF-Token")).toBe("test-csrf-token");
@@ -164,7 +164,7 @@ describe("authenticated password and logout flows", () => {
     await user.click(await screen.findByRole("button", { name: "退出登录" }));
 
     expect(await screen.findByText("退出失败，请重试。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "修改密码 / Change password" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "修改密码" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重试退出" }));
     expect(await screen.findByRole("heading", { name: "登录审核平台" })).toBeInTheDocument();
   });
@@ -196,7 +196,7 @@ describe("authenticated password and logout flows", () => {
 
     await act(async () => staleBootstrap.resolve(jsonResponse(authState)));
     expect(screen.getByRole("heading", { name: "登录审核平台" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "修改密码 / Change password" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "修改密码" })).not.toBeInTheDocument();
   });
 
   it("clears voluntary password navigation across password change and the next login", async () => {
@@ -214,7 +214,7 @@ describe("authenticated password and logout flows", () => {
     const user = userEvent.setup();
     renderWithAuth(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "修改密码 / Change password" }));
+    await user.click(await screen.findByRole("button", { name: "修改密码" }));
     await user.type(screen.getByLabelText("当前密码"), "current-password");
     await user.type(screen.getByLabelText("新密码"), "a-long-new-password");
     await user.type(screen.getByLabelText("确认新密码"), "a-long-new-password");
@@ -225,7 +225,7 @@ describe("authenticated password and logout flows", () => {
     await user.type(screen.getByLabelText("密码"), "a-long-new-password");
     await user.click(screen.getByRole("button", { name: "登录" }));
 
-    expect(await screen.findByRole("button", { name: "修改密码 / Change password" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "修改密码" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "修改密码" })).not.toBeInTheDocument();
   });
 });
