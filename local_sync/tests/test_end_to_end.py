@@ -11,6 +11,7 @@ from uuid import UUID
 
 import imagehash
 from PIL import Image
+import pytest
 import responses
 
 from conftest import BATCH_ID, RECEIPT_TOKEN, valid_row, write_manifest
@@ -390,3 +391,128 @@ def test_real_adds_preserve_server_jpeg_and_uppercase_webp_paths_in_canonical(
     assert canonical[webp_id]["relative_path"] == webp_target
     assert root.joinpath(*jpeg_target.split("/")).is_file()
     assert root.joinpath(*webp_target.split("/")).is_file()
+
+
+def test_replacement_crash_recovery_and_pre_epoch_stale_replay_converge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Skipping startup recovery can publish old canonical state after a new swap."""
+
+    root = tmp_path / "training"
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir()
+    candidate_id = _uuid(80)
+    generation_5_review = _uuid(805)
+    generation_9_review = _uuid(809)
+    generation_5_batch = _uuid(5005)
+    generation_9_batch = _uuid(5009)
+    relative_path = f"images/SF006/{candidate_id}.jpg"
+    old_url = "https://replacement.e2e.test/generation-5.jpg"
+    new_url = "https://replacement.e2e.test/generation-9.jpg"
+    old_jpg = _image_bytes("JPEG", (25, 70, 115))
+    new_jpg = _image_bytes("JPEG", (190, 45, 20))
+    old_sha = hashlib.sha256(old_jpg).hexdigest()
+    new_sha = hashlib.sha256(new_jpg).hexdigest()
+    generation_5_row = valid_row(
+        batch_id=generation_5_batch,
+        candidate_id=candidate_id,
+        review_id=generation_5_review,
+        review_version=5,
+        target_relative_path=relative_path,
+        original_url=old_url,
+        source_url="https://replacement.e2e.test/record/80",
+    )
+    generation_9_row = valid_row(
+        batch_id=generation_9_batch,
+        candidate_id=candidate_id,
+        review_id=generation_9_review,
+        review_version=9,
+        target_relative_path=relative_path,
+        previous_relative_path=relative_path,
+        original_url=new_url,
+        source_url="https://replacement.e2e.test/record/80",
+    )
+    generation_5_manifest = write_manifest(
+        manifest_dir, rows=[generation_5_row], name="generation-5.csv"
+    )
+    generation_9_manifest = write_manifest(
+        manifest_dir, rows=[generation_9_row], name="generation-9.csv"
+    )
+
+    with responses.RequestsMock() as http:
+        http.add(responses.GET, old_url, body=old_jpg, status=200)
+        seeded = run_sync(
+            SyncRequest(generation_5_manifest, root, submit=False), Event()
+        )
+    assert dict(seeded.counts) == {"succeeded": 1, "failed": 0, "skipped": 0}
+
+    original_record_success = SyncIndex.record_success
+    injected = False
+
+    def crash_after_new_target(self: SyncIndex, result: SyncResult):
+        nonlocal injected
+        if result.review_version == 9 and not injected:
+            injected = True
+            raise RuntimeError("simulated process death before index commit")
+        return original_record_success(self, result)
+
+    monkeypatch.setattr(SyncIndex, "record_success", crash_after_new_target)
+    with responses.RequestsMock() as http:
+        http.add(responses.GET, new_url, body=new_jpg, status=200)
+        interrupted = run_sync(
+            SyncRequest(generation_9_manifest, root, submit=False), Event()
+        )
+
+    target = root.joinpath(*relative_path.split("/"))
+    assert injected
+    assert dict(interrupted.counts) == {"succeeded": 0, "failed": 1, "skipped": 0}
+    assert interrupted.offline_receipt_path is not None
+    interrupted_receipt = json.loads(
+        interrupted.offline_receipt_path.read_text("utf-8")
+    )
+    assert interrupted_receipt["items"][0]["status"] == "FAILED"
+    assert interrupted_receipt["items"][0]["error"] == "INDEX_ERROR"
+    assert target.read_bytes() == new_jpg
+    assert SyncIndex(root).max_generation(candidate_id) == 5
+    with (root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        interrupted_canonical = list(csv.DictReader(stream))
+    assert interrupted_canonical[0]["review_version"] == "5"
+    assert interrupted_canonical[0]["sha256"] == old_sha
+
+    with responses.RequestsMock() as http:
+        recovered = run_sync(
+            SyncRequest(generation_9_manifest, root, submit=False), Event()
+        )
+        assert len(http.calls) == 0
+
+    assert dict(recovered.counts) == {"succeeded": 1, "failed": 0, "skipped": 0}
+    assert target.read_bytes() == new_jpg
+    with (root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        canonical = list(csv.DictReader(stream))
+    assert canonical[0]["review_version"] == "9"
+    assert canonical[0]["sha256"] == new_sha
+    assert SyncIndex(root).max_generation(candidate_id) == 9
+
+    with responses.RequestsMock() as http:
+        stale = run_sync(
+            SyncRequest(generation_5_manifest, root, submit=False), Event()
+        )
+        assert len(http.calls) == 0
+
+    assert dict(stale.counts) == {"succeeded": 0, "failed": 1, "skipped": 0}
+    assert stale.offline_receipt_path is not None
+    old_receipt = json.loads(stale.offline_receipt_path.read_text("utf-8"))
+    assert old_receipt["items"][0]["status"] == "FAILED"
+    assert old_receipt["items"][0]["error"] == "STALE_GENERATION"
+    assert target.read_bytes() == new_jpg
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == new_sha
+    assert old_sha != new_sha
+    with (root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        after_replay = list(csv.DictReader(stream))
+    assert after_replay == canonical

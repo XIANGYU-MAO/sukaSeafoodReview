@@ -794,14 +794,14 @@ def _validated_download(
     return actual_relative, expected_staging, result.sha256, result.phash, staging_metadata
 
 
-def _apply_managed_replacement(
+def _managed_replacement_evidence(
     root: Path,
     row: ManifestRow,
     result: SyncResult,
-    staging: Path,
-    staging_metadata: os.stat_result,
     index: SyncIndex,
-) -> None:
+) -> tuple[SyncRecord, Path, os.stat_result, PurePosixPath, Path]:
+    """Prove the old managed target before persisting replacement intent."""
+
     prior = _latest(index, row)
     if prior is None or not prior.present or prior.relative_path != result.relative_path:
         raise OperationError("SOURCE_STATE_MISMATCH")
@@ -815,6 +815,20 @@ def _apply_managed_replacement(
         "_removed", str(row.batch_id), result.relative_path.name
     )
     backup = _ensure_parents(root, backup_relative)
+    return prior, target, target_owned, backup_relative, backup
+
+
+def _apply_managed_replacement(
+    root: Path,
+    row: ManifestRow,
+    result: SyncResult,
+    staging: Path,
+    staging_metadata: os.stat_result,
+    index: SyncIndex,
+) -> None:
+    prior, target, target_owned, backup_relative, backup = (
+        _managed_replacement_evidence(root, row, result, index)
+    )
     _record_replacement_intent(index, row, result, prior, backup_relative)
     _link_no_clobber(target, target_owned, backup, prior.sha256)
     _unlink_owned(target, target_owned, "FILESYSTEM_OPERATION_FAILED")
@@ -1392,17 +1406,21 @@ def prepare_add_intent(
     actual_relative, _staging, sha256, phash, _owned = _validated_download(
         safe_root, row, target_relative, download_result
     )
+    result = _desired_result(row, actual_relative, sha256, phash)
     if row.previous_relative_path is not None and _same_windows_path(
         row.previous_relative_path, actual_relative
     ):
-        raise OperationError("ADD_TARGET_COLLIDES_PREVIOUS")
+        prior, _target, _target_owned, backup_relative, _backup = (
+            _managed_replacement_evidence(safe_root, row, result, index)
+        )
+        _record_replacement_intent(index, row, result, prior, backup_relative)
+        return
     target = _ensure_parents(safe_root, actual_relative)
     target_metadata = _lstat(target, "TARGET_UNSAFE")
     if target_metadata is not None and (
         not _regular(target_metadata) or stat.S_ISLNK(target_metadata.st_mode)
     ):
         raise OperationError("TARGET_UNSAFE")
-    result = _desired_result(row, actual_relative, sha256, phash)
     _record_add_intent(index, result, target_relative)
 
 

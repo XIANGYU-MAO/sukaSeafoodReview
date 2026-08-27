@@ -723,11 +723,6 @@ def test_invalid_text_has_no_raw_or_secret_bearing_exception_chain(
             "",
         ),
         (
-            "ADD",
-            f"images/SF006/{CANDIDATE_ID}.jpg",
-            f"images/SF006/{CANDIDATE_ID}.jpg",
-        ),
-        (
             "MOVE",
             f"images/SF006/{CANDIDATE_ID}.png",
             "",
@@ -781,6 +776,30 @@ def test_accepts_server_supported_suffixes(tmp_path: Path, suffix: str) -> None:
     )
 
     assert str(manifest.rows[0].target_relative_path) == target
+
+
+def test_accepts_managed_same_path_replacement_add_shape(tmp_path: Path) -> None:
+    """Restoring the blanket same-path ban would reject the server replacement wire row."""
+
+    relative = f"images/SF006/{CANDIDATE_ID}.jpg"
+
+    manifest = load_manifest(
+        write_manifest(
+            tmp_path,
+            rows=[
+                valid_row(
+                    action="ADD",
+                    review_version=9,
+                    target_relative_path=relative,
+                    previous_relative_path=relative,
+                )
+            ],
+        )
+    )
+
+    assert manifest.rows[0].action == "ADD"
+    assert manifest.rows[0].target_relative_path == PurePosixPath(relative)
+    assert manifest.rows[0].previous_relative_path == PurePosixPath(relative)
 
 
 def test_accepts_move_remove_and_composite_add_exact_shapes(tmp_path: Path) -> None:

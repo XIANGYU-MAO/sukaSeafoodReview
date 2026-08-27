@@ -308,7 +308,11 @@ def _validate_action_shape(row: ManifestRow) -> None:
                 "must exactly match _removed/{batch_id}/{candidate_id}.<supported suffix>",
             )
         _validate_previous(previous, previous_field)
-    if previous is not None and previous.as_posix().casefold() == target.as_posix().casefold():
+    if (
+        row.action != "ADD"
+        and previous is not None
+        and previous.as_posix().casefold() == target.as_posix().casefold()
+    ):
         raise _error(previous_field, "must be different from target_relative_path")
 
 

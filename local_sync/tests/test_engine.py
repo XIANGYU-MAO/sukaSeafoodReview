@@ -17,6 +17,7 @@ from PIL import Image
 import pytest
 
 from conftest import BATCH_ID, RECEIPT_TOKEN
+from sukaseafood_sync import operations
 from sukaseafood_sync.downloader import DownloadCancelled, DownloadError, DownloadResult
 from sukaseafood_sync.engine import (
     BatchResult,
@@ -86,6 +87,17 @@ JPEG, PHASH = jpeg()
 SHA256 = hashlib.sha256(JPEG).hexdigest()
 
 
+def jpeg_variant(
+    size: tuple[int, int], color: tuple[int, int, int]
+) -> tuple[bytes, str, str]:
+    stream = BytesIO()
+    Image.new("RGB", size, color=color).save(stream, "JPEG")
+    content = stream.getvalue()
+    with Image.open(BytesIO(content)) as decoded:
+        phash = str(imagehash.phash(decoded.convert("RGB"))).lower()
+    return content, phash, hashlib.sha256(content).hexdigest()
+
+
 def local(root: Path, relative: PurePosixPath) -> Path:
     return root.joinpath(*relative.parts)
 
@@ -150,6 +162,159 @@ class Session:
 
     def close(self) -> None:
         self.closed = True
+
+
+def test_replacement_cancellation_before_swap_recovers_without_network(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing replacement preparation makes a downloaded cancellation unrecoverable."""
+
+    sync_root.mkdir()
+    generation_5 = replace(row(64), review_version=5)
+    generation_9 = replace(
+        generation_5,
+        review_id=candidate(6409),
+        review_version=9,
+        previous_relative_path=generation_5.target_relative_path,
+        original_url="https://images.example.test/64/replacement.jpg",
+    )
+    old_jpg, old_phash, old_sha = jpeg_variant((13, 9), (30, 70, 110))
+    new_jpg, new_phash, new_sha = jpeg_variant((19, 11), (180, 40, 25))
+
+    def download_bytes(content: bytes, phash: str, sha256: str, *, cancel=None):
+        def download(session, item, destination, policy, progress, cancelled):
+            del session, item, policy, progress, cancelled
+            staging = Path(destination).with_name(Path(destination).name + ".part")
+            staging.write_bytes(content)
+            if cancel is not None:
+                cancel.set()
+            with Image.open(BytesIO(content)) as decoded:
+                width, height = decoded.size
+            return DownloadResult(
+                staging, sha256, phash, len(content), "JPEG", ".jpg", width, height
+            )
+
+        return download
+
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image",
+        download_bytes(old_jpg, old_phash, old_sha),
+    )
+    seeded = SyncEngine(session=Session()).run(
+        manifest(generation_5), sync_root, SyncCallbacks(), threading.Event()
+    )
+    assert seeded.counts == {"succeeded": 1, "failed": 0, "skipped": 0}
+
+    cancel_event = threading.Event()
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image",
+        download_bytes(new_jpg, new_phash, new_sha, cancel=cancel_event),
+    )
+    cancelled = SyncEngine(session=Session()).run(
+        manifest(generation_9), sync_root, SyncCallbacks(), cancel_event
+    )
+
+    target = local(sync_root, generation_9.target_relative_path)
+    pending = SyncIndex(sync_root).get_add_intent(
+        generation_9.candidate_id,
+        generation_9.review_id,
+        generation_9.review_version,
+        "ADD",
+    )
+    assert cancelled.cancelled
+    assert cancelled.receipt_items == ()
+    assert pending is not None and pending.prior_sha256 == old_sha
+    assert target.read_bytes() == old_jpg
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("replacement recovery must precede network access")
+
+    monkeypatch.setattr("sukaseafood_sync.engine.download_image", no_network)
+    resumed = SyncEngine(session=Session()).run(
+        manifest(generation_9), sync_root, SyncCallbacks(), threading.Event()
+    )
+
+    assert resumed.counts == {"succeeded": 1, "failed": 0, "skipped": 0}
+    assert resumed.receipt_items[0].sha256 == new_sha
+    assert target.read_bytes() == new_jpg
+    with (sync_root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        canonical = list(csv.DictReader(stream))
+    assert canonical[0]["review_version"] == "9"
+    assert canonical[0]["sha256"] == new_sha
+    assert SyncIndex(sync_root).max_generation(generation_9.candidate_id) == 9
+
+
+def test_replacement_cancellation_after_backup_keeps_success_canonical(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancellation observed after the swap boundary must not hide durable success."""
+
+    sync_root.mkdir()
+    generation_5 = replace(row(65), review_version=5)
+    generation_9 = replace(
+        generation_5,
+        review_id=candidate(6509),
+        review_version=9,
+        previous_relative_path=generation_5.target_relative_path,
+        original_url="https://images.example.test/65/replacement.jpg",
+    )
+    old_jpg, old_phash, old_sha = jpeg_variant((13, 9), (20, 60, 100))
+    new_jpg, new_phash, new_sha = jpeg_variant((21, 15), (170, 45, 30))
+
+    def download_bytes(content: bytes, phash: str, sha256: str):
+        def download(session, item, destination, policy, progress, cancelled):
+            del session, item, policy, progress, cancelled
+            staging = Path(destination).with_name(Path(destination).name + ".part")
+            staging.write_bytes(content)
+            with Image.open(BytesIO(content)) as decoded:
+                width, height = decoded.size
+            return DownloadResult(
+                staging, sha256, phash, len(content), "JPEG", ".jpg", width, height
+            )
+
+        return download
+
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image",
+        download_bytes(old_jpg, old_phash, old_sha),
+    )
+    SyncEngine(session=Session()).run(
+        manifest(generation_5), sync_root, SyncCallbacks(), threading.Event()
+    )
+
+    cancel_event = threading.Event()
+    original_link = operations._link_no_clobber
+
+    def cancel_after_backup(source, source_owned, target, expected_sha256):
+        linked = original_link(source, source_owned, target, expected_sha256)
+        if "_removed" in Path(target).parts:
+            cancel_event.set()
+        return linked
+
+    monkeypatch.setattr(operations, "_link_no_clobber", cancel_after_backup)
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image",
+        download_bytes(new_jpg, new_phash, new_sha),
+    )
+    result = SyncEngine(session=Session()).run(
+        manifest(generation_9), sync_root, SyncCallbacks(), cancel_event
+    )
+
+    target = local(sync_root, generation_9.target_relative_path)
+    assert cancel_event.is_set()
+    assert result.cancelled
+    assert result.receipt_items[0].status == "SUCCEEDED"
+    assert result.receipt_items[0].sha256 == new_sha
+    assert target.read_bytes() == new_jpg
+    with (sync_root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        canonical = list(csv.DictReader(stream))
+    assert canonical[0]["review_version"] == "9"
+    assert canonical[0]["sha256"] == new_sha
+    assert SyncIndex(sync_root).max_generation(generation_9.candidate_id) == 9
 
 
 def test_engine_processes_mixed_batch_and_keeps_failure_pending(

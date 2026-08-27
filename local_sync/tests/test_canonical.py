@@ -202,6 +202,78 @@ def test_older_direct_merge_cannot_replace_or_remove_newer_canonical_state(
     assert target.read_bytes() == original
 
 
+def test_same_path_replacement_canonical_cannot_regress_on_stale_replay(
+    tmp_path: Path,
+) -> None:
+    """Dropping the generation guard would let a pre-epoch replay restore old bytes."""
+
+    root = tmp_path / "same-path-replacement"
+    root.mkdir()
+    candidate_id = UUID(CANDIDATE_ID)
+    relative = PurePosixPath(f"images/FUTURE_42/{candidate_id}.jpg")
+    generation_5 = ManifestRow(
+        batch_id=BATCH_ID,
+        action="ADD",
+        candidate_id=candidate_id,
+        review_id=UUID("55555555-5555-4555-8555-555555555555"),
+        review_version=5,
+        species_code="FUTURE_42",
+        target_relative_path=relative,
+        previous_relative_path=None,
+        preview_url="https://images.example.test/preview-5.jpg",
+        original_url="https://images.example.test/original-5.jpg",
+        source_url="https://catalog.example.test/record/1",
+        creator="Researcher",
+        license="CC BY 4.0",
+        license_url="https://creativecommons.org/licenses/by/4.0/",
+        attribution="Researcher / Catalog",
+    )
+    generation_9 = ManifestRow(
+        batch_id=BATCH_ID,
+        action="ADD",
+        candidate_id=candidate_id,
+        review_id=UUID("99999999-9999-4999-8999-999999999999"),
+        review_version=9,
+        species_code="FUTURE_42",
+        target_relative_path=relative,
+        previous_relative_path=relative,
+        preview_url="https://images.example.test/preview-9.jpg",
+        original_url="https://images.example.test/original-9.jpg",
+        source_url="https://catalog.example.test/record/1",
+        creator="Researcher",
+        license="CC BY 4.0",
+        license_url="https://creativecommons.org/licenses/by/4.0/",
+        attribution="Researcher / Catalog",
+    )
+    old_receipt = ReceiptItem(
+        str(candidate_id), str(generation_5.review_id), 5, "SUCCEEDED", "5" * 64,
+        relative.as_posix(), None,
+    )
+    new_receipt = ReceiptItem(
+        str(candidate_id), str(generation_9.review_id), 9, "SUCCEEDED", "9" * 64,
+        relative.as_posix(), None,
+    )
+
+    write_canonical_manifest(
+        root, ExportManifest((generation_5,), BATCH_ID, RECEIPT_TOKEN), (old_receipt,)
+    )
+    write_canonical_manifest(
+        root, ExportManifest((generation_9,), BATCH_ID, RECEIPT_TOKEN), (new_receipt,)
+    )
+    generation_9_bytes = (root / "canonical_manifest.csv").read_bytes()
+    write_canonical_manifest(
+        root, ExportManifest((generation_5,), BATCH_ID, RECEIPT_TOKEN), (old_receipt,)
+    )
+
+    assert (root / "canonical_manifest.csv").read_bytes() == generation_9_bytes
+    with (root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        row = next(csv.DictReader(stream))
+    assert row["review_version"] == "9"
+    assert row["sha256"] == "9" * 64
+
+
 def test_two_real_process_writers_preserve_both_successful_rows(tmp_path: Path) -> None:
     """The complete read/merge/replace sequence must be serialized across processes."""
 

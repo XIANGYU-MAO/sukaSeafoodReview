@@ -736,6 +736,16 @@ class SyncEngine:
                 self._emit(
                     callbacks, current=current, total=total, row=row, phase=terminal
                 )
+                if cancel_event.is_set():
+                    cancelled = True
+                    self._emit(
+                        callbacks,
+                        current=current,
+                        total=total,
+                        row=row,
+                        phase="CANCELLED",
+                    )
+                    break
         finally:
             if owned_session:
                 try:
