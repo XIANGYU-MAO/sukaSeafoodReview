@@ -2,7 +2,12 @@ FROM node:22-alpine AS build
 
 WORKDIR /web
 COPY package.json package-lock.json ./
-RUN npm ci
+ARG SUKASEAFOOD_NPM_REGISTRY=https://registry.npmmirror.com
+RUN sed -i \
+      -e "s#https://registry.npmjs.org#${SUKASEAFOOD_NPM_REGISTRY%/}#g" \
+      -e "s#https://registry.npmmirror.com#${SUKASEAFOOD_NPM_REGISTRY%/}#g" \
+      package-lock.json \
+    && npm ci --registry="${SUKASEAFOOD_NPM_REGISTRY}"
 COPY . .
 RUN npm run typecheck && npm test && npm run build
 

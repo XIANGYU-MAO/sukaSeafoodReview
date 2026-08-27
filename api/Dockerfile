@@ -9,8 +9,10 @@ RUN groupadd --system review \
 
 WORKDIR /app
 COPY requirements.txt ./requirements.txt
-RUN python -m pip install --upgrade pip \
-    && python -m pip install --requirement requirements.txt
+ARG SUKASEAFOOD_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+RUN python -m pip install --disable-pip-version-check --no-cache-dir \
+    --index-url "${SUKASEAFOOD_PIP_INDEX_URL}" \
+    --requirement requirements.txt
 
 COPY --chown=review:review alembic.ini ./alembic.ini
 COPY --chown=review:review alembic ./alembic

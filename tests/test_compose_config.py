@@ -93,6 +93,15 @@ def test_api_and_web_images_are_minimal_non_root_and_image_byte_free():
             assert pattern in ignored
 
 
+def test_container_dependency_installs_use_the_ygf_china_mirrors():
+    api = (ROOT / "api/Dockerfile").read_text("utf-8")
+    web = (ROOT / "web/Dockerfile").read_text("utf-8")
+    assert "https://pypi.tuna.tsinghua.edu.cn/simple" in api
+    assert "--index-url" in api
+    assert "https://registry.npmmirror.com" in web
+    assert 'npm ci --registry="${SUKASEAFOOD_NPM_REGISTRY}"' in web
+
+
 def test_nginx_spa_health_body_limit_and_image_csp_match_origin_policy():
     nginx = (ROOT / "web/nginx.conf").read_text("utf-8")
     assert "listen 8080" in nginx
