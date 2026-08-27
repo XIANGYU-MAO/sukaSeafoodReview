@@ -333,6 +333,155 @@ def test_replacement_death_after_staging_promotion_recovers_without_network(
     assert not list(sync_root.rglob("*.sync-download"))
 
 
+@pytest.mark.parametrize(
+    "newer_corruption",
+    (None, "target", "canonical"),
+    ids=("valid", "tampered-target", "missing-canonical"),
+)
+def test_terminal_barrier_preserves_superseded_receipt_for_consistent_newer_state(
+    sync_root: Path, newer_corruption: str | None
+) -> None:
+    """A newer canonical success must not invalidate an older truthful receipt."""
+
+    sync_root.mkdir()
+    batch_5 = candidate(9505)
+    batch_9 = candidate(9509)
+    batch_10 = candidate(9510)
+    generation_5 = replace(row(67), batch_id=batch_5, review_version=5)
+    generation_9 = replace(
+        generation_5,
+        batch_id=batch_9,
+        review_id=candidate(6709),
+        review_version=9,
+        previous_relative_path=generation_5.target_relative_path,
+        original_url="https://images.example.test/67/generation-9.jpg",
+    )
+    generation_10 = replace(
+        generation_9,
+        batch_id=batch_10,
+        review_id=candidate(6710),
+        review_version=10,
+        original_url="https://images.example.test/67/generation-10.jpg",
+    )
+    old_jpg, old_phash, old_sha = jpeg_variant((13, 9), (30, 70, 110))
+    generation_9_jpg, generation_9_phash, generation_9_sha = jpeg_variant(
+        (19, 13), (175, 45, 25)
+    )
+    generation_10_jpg, generation_10_phash, generation_10_sha = jpeg_variant(
+        (23, 17), (20, 155, 65)
+    )
+    images = {
+        5: (old_jpg, old_phash, old_sha),
+        9: (generation_9_jpg, generation_9_phash, generation_9_sha),
+        10: (generation_10_jpg, generation_10_phash, generation_10_sha),
+    }
+
+    def download(session, item, destination, policy, progress, cancelled):
+        del session, policy, progress, cancelled
+        content, phash, sha256 = images[item.review_version]
+        staging = Path(destination).with_name(Path(destination).name + ".part")
+        staging.write_bytes(content)
+        with Image.open(BytesIO(content)) as decoded:
+            width, height = decoded.size
+        return DownloadResult(
+            staging, sha256, phash, len(content), "JPEG", ".jpg", width, height
+        )
+
+    def export(item: ManifestRow) -> ExportManifest:
+        return ExportManifest((item,), item.batch_id, RECEIPT_TOKEN)
+
+    SyncEngine(session=Session(), downloader=download).run(
+        export(generation_5), sync_root, SyncCallbacks(), threading.Event()
+    )
+
+    generation_10_result: BatchResult | None = None
+    superseded = False
+
+    def supersede_before_barrier(event: ProgressEvent) -> None:
+        nonlocal generation_10_result, superseded
+        if event.phase != "SUCCEEDED" or superseded:
+            return
+        superseded = True
+        generation_10_result = SyncEngine(
+            session=Session(), downloader=download
+        ).run(
+            export(generation_10),
+            sync_root,
+            SyncCallbacks(),
+            threading.Event(),
+        )
+        if newer_corruption == "target":
+            local(sync_root, generation_10.target_relative_path).write_bytes(old_jpg)
+        elif newer_corruption == "canonical":
+            (sync_root / "canonical_manifest.csv").unlink()
+
+    generation_9_engine = SyncEngine(session=Session(), downloader=download)
+    generation_9_callbacks = SyncCallbacks(progress=supersede_before_barrier)
+    if newer_corruption is None:
+        generation_9_result = generation_9_engine.run(
+            export(generation_9),
+            sync_root,
+            generation_9_callbacks,
+            threading.Event(),
+        )
+    else:
+        with pytest.raises(SyncEngineError, match="RECOVERY_BARRIER_FAILED"):
+            generation_9_engine.run(
+                export(generation_9),
+                sync_root,
+                generation_9_callbacks,
+                threading.Event(),
+            )
+        generation_9_result = None
+
+    assert superseded
+    assert generation_10_result is not None
+    assert generation_10_result.counts == {
+        "succeeded": 1,
+        "failed": 0,
+        "skipped": 0,
+    }
+    assert generation_10_result.receipt_items[0].status == "SUCCEEDED"
+    assert generation_10_result.receipt_items[0].sha256 == generation_10_sha
+
+    index = SyncIndex(sync_root)
+    exact_9 = index.get_completed(
+        generation_9.candidate_id,
+        generation_9.review_id,
+        generation_9.review_version,
+        "ADD",
+    )
+    latest = index.latest_for_candidate(generation_10.candidate_id)
+    assert exact_9 is not None and exact_9.sha256 == generation_9_sha
+    assert latest is not None and latest.review_version == 10
+    assert latest.sha256 == generation_10_sha
+    target = local(sync_root, generation_10.target_relative_path)
+    if newer_corruption == "target":
+        assert target.read_bytes() == old_jpg
+        return
+    assert target.read_bytes() == generation_10_jpg
+    if newer_corruption == "canonical":
+        assert not (sync_root / "canonical_manifest.csv").exists()
+        return
+    assert generation_9_result is not None
+    assert generation_9_result.counts == {
+        "succeeded": 1,
+        "failed": 0,
+        "skipped": 0,
+    }
+    assert generation_9_result.receipt_items[0].status == "SUCCEEDED"
+    assert generation_9_result.receipt_items[0].sha256 == generation_9_sha
+    with (sync_root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        canonical = list(csv.DictReader(stream))
+    assert len(canonical) == 1
+    assert canonical[0]["review_version"] == "10"
+    assert canonical[0]["sha256"] == generation_10_sha
+    assert not list(sync_root.rglob("*.part"))
+    assert not list(sync_root.rglob("*.sync-download"))
+
+
 def test_replacement_cancellation_after_backup_keeps_success_canonical(
     sync_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

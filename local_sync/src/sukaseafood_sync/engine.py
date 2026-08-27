@@ -19,12 +19,14 @@ from .downloader import (
     DownloadResult,
     download_image,
 )
-from .index import SyncIndex, SyncIndexError, SyncResult
+from .index import SyncIndex, SyncIndexError, SyncRecord, SyncResult
 from .manifest import ExportManifest, ManifestRow
 from .operations import (
     OperationError,
     OperationLogger,
     _ensure_parents,
+    _hash_regular,
+    _resolved_path,
     apply_add,
     apply_move,
     apply_remove,
@@ -455,6 +457,54 @@ class SyncEngine:
         ):
             raise StaleGenerationError
 
+    @staticmethod
+    def _exact_success_is_superseded(
+        row: ManifestRow,
+        receipt: ReceiptItem,
+        exact: SyncRecord | None,
+        latest: SyncRecord | None,
+    ) -> bool:
+        if exact is None or latest is None:
+            return False
+        return (
+            exact.candidate_id == row.candidate_id
+            and exact.review_id == row.review_id
+            and exact.review_version == row.review_version
+            and exact.action == row.action
+            and exact.batch_id == row.batch_id
+            and receipt.candidate_id == str(exact.candidate_id)
+            and receipt.review_id == str(exact.review_id)
+            and receipt.review_version == exact.review_version
+            and receipt.sha256 == exact.sha256
+            and receipt.relative_path == exact.relative_path.as_posix()
+            and latest.candidate_id == exact.candidate_id
+            and latest.review_version > exact.review_version
+        )
+
+    @staticmethod
+    def _latest_state_is_consistent(
+        root: Path,
+        latest: SyncRecord,
+        canonical_rows: dict[str, dict[str, str]],
+    ) -> bool:
+        latest_path = _resolved_path(root, latest.relative_path)
+        latest_sha, _latest_size, _latest_owned = _hash_regular(
+            latest_path, "TARGET_UNSAFE"
+        )
+        if latest_sha != latest.sha256:
+            return False
+        canonical_row = canonical_rows.get(str(latest.candidate_id))
+        if not latest.present:
+            return canonical_row is None
+        return (
+            canonical_row is not None
+            and canonical_row["review_id"] == str(latest.review_id)
+            and canonical_row["review_version"] == str(latest.review_version)
+            and canonical_row["relative_path"]
+            == latest.relative_path.as_posix()
+            and canonical_row["sha256"] == latest.sha256
+        )
+
     def run(
         self,
         manifest: ExportManifest,
@@ -483,6 +533,7 @@ class SyncEngine:
         assert logger is not None
         from .canonical import (
             CanonicalManifestError,
+            _read_existing,
             root_state_lock,
             write_canonical_manifest_locked,
         )
@@ -796,6 +847,25 @@ class SyncEngine:
                     )
                     if receipt.status != "SUCCEEDED" and not replacement_pending:
                         continue
+                    if receipt.status == "SUCCEEDED":
+                        exact = index.get_completed(
+                            row.candidate_id,
+                            row.review_id,
+                            row.review_version,
+                            row.action,
+                        )
+                        latest = index.latest_for_candidate(row.candidate_id)
+                        if self._exact_success_is_superseded(
+                            row, receipt, exact, latest
+                        ):
+                            assert latest is not None
+                            canonical_rows = _read_existing(
+                                safe_root / "canonical_manifest.csv"
+                            )
+                            if self._latest_state_is_consistent(
+                                safe_root, latest, canonical_rows
+                            ):
+                                continue
                     recovered = recover_add(
                         safe_root, row, index, operation_log=logger
                     )
