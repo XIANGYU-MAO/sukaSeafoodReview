@@ -6,7 +6,7 @@
 
 This repository implements the complete SukaSeafood collaborative-review Web/API and Windows local-sync tool. Six fixed accounts—Hassan, Mao, Xinhui, Wahid, Sharmaa, and Yiming—share one review pool; Mao is the sole administrator. There are no per-person quotas, and a candidate is never assigned to someone who has already reviewed it. Each KEEP, REJECT, or UNSURE choice is written immediately, and the next candidate is requested only after the database confirms the result.
 
-Reviewers can view and edit only their own current history, while everyone can see aggregate progress. Mao has a Chinese-only, seven-tab area titled “管理后台” for progress, candidates, dynamic species, review history, CSV imports, training-sync batches, and accounts. The server stores structured candidate metadata, external URLs, review results, bounded CSV files, and receipts. It never stores, caches, proxies, or downloads original image bytes. The Windows local-sync tool is implemented and has Mao's computer contact approved external sources directly; see [`local_sync/README_ZH.md`](local_sync/README_ZH.md).
+Reviewers can view and edit only their own current history. A top-level Team progress page shows everyone aggregate counts without exposing another member's review details. The login page and authenticated interface switch between Chinese and English; in Chinese, the password action is only “修改密码”. The first visit to review after each successful explicit login shows bilingual review guidelines once, and confirmation suppresses them across refreshes and in-app navigation for that login. Mao has a Chinese-only, seven-tab area titled “管理后台” for progress, candidates, dynamic species, review history, CSV imports, training-sync batches, and accounts. The server stores structured candidate metadata, external URLs, review results, bounded CSV files, and receipts. It never stores, caches, proxies, or downloads original image bytes. The Windows local-sync tool is implemented and has Mao's computer contact approved external sources directly; see [`local_sync/README_ZH.md`](local_sync/README_ZH.md).
 
 ## Repository and current development context
 
@@ -31,7 +31,7 @@ Run local commands from the cloned repository root. A `.worktrees` directory is 
 - Development browser entry: `http://localhost:5173/sukaseafood/review/`. Vite rewrites only `/sukaseafood/api` to the local FastAPI root, so the Web app continues to use `/sukaseafood/api/v1`.
 - Production entry: `https://findai.top/sukaseafood/review/`; the external API prefix is fixed at `/sukaseafood/api/v1`.
 - The browser obtains candidate metadata from the API and loads an image directly from its external HTTPS URL. Image bytes neither pass through the China server nor enter its database or filesystem.
-- Review submissions carry CSRF and an Idempotency-Key. The API returns a receipt after the database transaction commits; the Web app validates that receipt before refreshing progress and requesting the next candidate.
+- Review submissions carry CSRF and an Idempotency-Key. The API returns a receipt after the database transaction commits; the Web app validates that receipt before requesting the next candidate. The independent Team progress page reads the latest aggregate when opened.
 
 The system exposes no image-upload, original-image proxy, or original-image download API. The YGF gateway now returns 404 for `/project`, `/project/*`, and `/project-assets/*` while preserving its other pages and routing `/sukaseafood` to this review system.
 
@@ -91,6 +91,8 @@ The public name order is fixed: Hassan, Mao, Xinhui, Wahid, Sharmaa, Yiming. Mao
 
 Sessions are stored in the database. The browser receives only an HttpOnly, SameSite=Lax cookie with `Path=/sukaseafood`. A refresh restores the session through `/sukaseafood/api/v1/auth/me`. Production must use `SECURE_COOKIE=true` over HTTPS; production configuration rejects `SECURE_COOKIE=false`. In this flow, login is the unauthenticated entry point. After login, browser-authenticated state mutations use the session and its derived CSRF value, and each concrete review submission also needs its own Idempotency-Key. The local-sync tool submits `/v1/sync/batches/{batch_id}/receipt` with a batch token, not a browser session or CSRF.
 
+The login page uses six pill buttons for the fixed names and can switch directly between Chinese and English. The selected name, password entry, and visible error survive a language switch, and the chosen locale continues after authentication. A successful explicit login starts a new guideline cycle for that reviewer. After the reviewer confirms the Review guidelines on the first visit to review, refreshes and navigation through History or Team progress do not show them again. Restoring an existing cookie session does not reset that marker.
+
 Temporary and reset passwords are shown once. Never put passwords, session cookies, CSRF values, receipt secrets, database URLs, or SSH credentials in Git, screenshots, logs, or issue reports.
 
 ## Collection and import
@@ -108,13 +110,14 @@ The CLI dry-run writes no candidates and creates no committable preview token. I
 
 ## Reviewer workflow
 
-1. Select a fixed name and log in; change the temporary password on first login.
-2. The home page restores or obtains one candidate from the shared pool that this reviewer has not reviewed before.
-3. A spinner remains visible while the image loads. A failure becomes a finite error state with retry and “image URL unavailable” actions.
-4. Inspect bilingual species names, scientific name, source, source record, licence, and safe external links. The application hands URLs to the browser; it does not fetch images.
-5. Choose KEEP, REJECT, or UNSURE. REJECT requires a pill-shaped reason, and “Other” requires notes. K/R/U shortcuts do not capture input controls.
-6. The Web app submits immediately and waits for a database receipt. Only a receipt with the correct identity, content, and version triggers a progress refresh and the next candidate. There is no separate Save button.
-7. History requests only the signed-in reviewer's rows and never sends a reviewer query parameter. Only the current version is editable; older attempts are read-only, and a 409 conflict never overwrites silently.
+1. Select a fixed name with a pill button and log in. The login page can switch between Chinese and English; change the temporary password on first login.
+2. The first visit to review after each successful login shows Review guidelines once. Approve when the species can be confirmed and the fish or identifying features are clear; clean museum specimens, real fish on ice or at a market, and clear multiple fish of one species are acceptable. Reject an unconfirmed species, tiny or heavily overlapping schools, mixed species with no clear target, severe blur or occlusion, cuts, cooked fish, artwork, and duplicates. Confirmation suppresses the dialog for the rest of that login.
+3. The home page restores or obtains one candidate from the shared pool that this reviewer has not reviewed before.
+4. A spinner remains visible while the image loads. A failure becomes a finite error state with retry and “image URL unavailable” actions.
+5. Inspect bilingual species names, scientific name, source, source record, licence, and safe external links. The application hands URLs to the browser; it does not fetch images.
+6. Choose KEEP, REJECT, or UNSURE. REJECT requires a pill-shaped reason, and “Other” requires notes. K/R/U shortcuts do not capture input controls.
+7. The Web app submits immediately and waits for a database receipt. Only a receipt with the correct identity, content, and version triggers the next candidate. There is no separate Save button.
+8. The top-level History page requests only the signed-in reviewer's rows, while the adjacent Team progress page requests aggregates only. History never sends a reviewer query parameter. Only the current version is editable; older attempts are read-only, and a 409 conflict never overwrites silently.
 
 Aggregate progress contains only counts and six member aggregates—no notes, image URLs, candidate IDs, review IDs, or personal history items. Member work totals count all submitted attempts, while the overall total describes the active dataset; after Mao reopens an item, those totals can legitimately differ.
 
