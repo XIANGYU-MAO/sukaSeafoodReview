@@ -41,6 +41,10 @@ export const speciesItems = [
     name_zh: "测试鱼",
     name_en: "Test fish",
     scientific_name: "Piscis probatio",
+    inat_taxon_id: null,
+    gbif_taxon_key: null,
+    commons_category: null,
+    fish_vista_filter: null,
     active: true,
     sort_order: 10,
     candidate_count: 2,
@@ -51,6 +55,10 @@ export const speciesItems = [
     name_zh: "其他鱼",
     name_en: "Other fish",
     scientific_name: "Piscis alter",
+    inat_taxon_id: null,
+    gbif_taxon_key: null,
+    commons_category: null,
+    fish_vista_filter: null,
     active: true,
     sort_order: 20,
     candidate_count: 1,
@@ -59,6 +67,10 @@ export const speciesItems = [
 
 export const speciesFixture = { total: 2, items: speciesItems };
 export const sourcesFixture = { sources: ["GBIF", "INATURALIST", "WIKIMEDIA_COMMONS"] };
+
+function speciesSummary(item: typeof speciesItems[number]) {
+  return { id: item.id, code: item.code, name_zh: item.name_zh, name_en: item.name_en, scientific_name: item.scientific_name, active: item.active };
+}
 
 export const progressFixture = {
   total: 3,
@@ -93,14 +105,11 @@ export const currentFixture = {
   total: 1,
   items: [{
     candidate: candidateSummary,
-    species: { ...speciesItems[0], candidate_count: undefined },
+    species: speciesSummary(speciesItems[0]),
     reviewer: { id: IDS.hassan, display_name: "Hassan", active: true },
     current_started_at: "2026-08-26T02:00:00Z",
   }],
 };
-delete (currentFixture.items[0].species as Record<string, unknown>).candidate_count;
-delete (currentFixture.items[0].species as Record<string, unknown>).sort_order;
-
 export const candidateFixture = {
   ...candidateSummary,
   species: { ...currentFixture.items[0].species },

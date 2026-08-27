@@ -21,20 +21,6 @@ import {
   usersFixture,
 } from "../test/task12Fixtures";
 
-const SOURCE_OVERRIDES = {
-  inat_taxon_id: null,
-  gbif_taxon_key: null,
-  commons_category: null,
-  fish_vista_filter: null,
-};
-
-for (const species of [
-  ...speciesFixture.items,
-  ...currentFixture.items.map((item) => item.species),
-  candidateFixture.species,
-  reviewItem.species,
-]) Object.assign(species, SOURCE_OVERRIDES);
-
 function mockAdmin(overrides?: (url: string, init?: RequestInit) => Response | Promise<Response> | undefined) {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);

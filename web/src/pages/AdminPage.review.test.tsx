@@ -17,19 +17,6 @@ import {
   speciesItems,
 } from "../test/task12Fixtures";
 
-const SOURCE_OVERRIDES = {
-  inat_taxon_id: null,
-  gbif_taxon_key: null,
-  commons_category: null,
-  fish_vista_filter: null,
-};
-
-for (const species of [
-  ...speciesFixture.items,
-  ...currentFixture.items.map((item) => item.species),
-  candidateFixture.species,
-]) Object.assign(species, SOURCE_OVERRIDES);
-
 function mockAdmin(overrides: (url: string, init?: RequestInit) => Response | Promise<Response> | undefined) {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -56,6 +43,7 @@ it("guides collection through four steps with current downloads, copy, and speci
   }
   expect(screen.getByRole("link", { name: "下载采集器 ZIP" })).toHaveAttribute("href", "/sukaseafood/review/downloads/sukaseafood-collector.zip");
   expect(screen.getByRole("link", { name: "下载最新鱼种配置" })).toHaveAttribute("href", "/sukaseafood/api/v1/admin/collector/config");
+  expect(screen.getByRole("list", { name: "当前启用鱼种" })).toHaveTextContent("SF001 · 测试鱼");
   await user.click(screen.getByRole("button", { name: "复制命令" }));
   expect(await screen.findByRole("status")).toHaveTextContent("命令已复制。");
   await user.click(screen.getByRole("button", { name: "前往鱼种管理" }));

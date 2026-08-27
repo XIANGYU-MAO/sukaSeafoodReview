@@ -1,20 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { IDS, candidateFixture, currentFixture, exportBatch, speciesFixture } from "../test/task12Fixtures";
-import { parseCandidateReceipt, parseExportCreate, parseReceiptResponse, parseReviewReceipt, parseSpeciesList, parseSpeciesReceipt } from "./types";
-
-const SOURCE_OVERRIDES = {
-  inat_taxon_id: null,
-  gbif_taxon_key: null,
-  commons_category: null,
-  fish_vista_filter: null,
-};
-
-for (const species of [...speciesFixture.items, ...currentFixture.items.map((item) => item.species), candidateFixture.species]) {
-  Object.assign(species, SOURCE_OVERRIDES);
-}
+import { IDS, candidateFixture, candidatesFixture, currentFixture, exportBatch, reviewsFixture, speciesFixture } from "../test/task12Fixtures";
+import { parseAdminReviewList, parseCandidateList, parseCandidateReceipt, parseCurrentList, parseExportCreate, parseReceiptResponse, parseReviewReceipt, parseSpeciesList, parseSpeciesReceipt } from "./types";
 
 describe("Task 12 review runtime mutation contracts", () => {
+  it("accepts API-shaped six-field species summaries in candidates, current work, and reviews", () => {
+    const expected = { id: IDS.species1, code: "SF001", name_zh: "测试鱼", name_en: "Test fish", scientific_name: "Piscis probatio", active: true };
+    expect(parseCandidateList(candidatesFixture).items[0].species).toEqual(expected);
+    expect(parseCurrentList(currentFixture).items[0].species).toEqual(expected);
+    expect(parseAdminReviewList(reviewsFixture).items[0].species).toEqual(expected);
+  });
+
   it("requires every bounded nullable source override in species responses", () => {
     const species = {
       ...speciesFixture.items[0],
