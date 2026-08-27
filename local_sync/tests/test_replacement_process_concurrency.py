@@ -8,6 +8,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 import sys
+import threading
 from uuid import UUID
 
 import imagehash
@@ -15,7 +16,8 @@ from PIL import Image
 
 from conftest import RECEIPT_TOKEN
 from sukaseafood_sync.canonical import write_canonical_manifest
-from sukaseafood_sync.engine import ReceiptItem
+from sukaseafood_sync.downloader import DownloadResult
+from sukaseafood_sync.engine import ReceiptItem, SyncCallbacks, SyncEngine
 from sukaseafood_sync.index import SyncIndex, SyncResult
 from sukaseafood_sync.manifest import ExportManifest, ManifestRow
 
@@ -55,6 +57,189 @@ def _row(
         license_url="https://creativecommons.org/licenses/by/4.0/",
         attribution="Researcher / Catalog",
     )
+
+
+def test_newer_generation_reconciles_older_intent_after_real_process_death(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "training"
+    root.mkdir()
+    relative = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    target = root.joinpath(*relative.parts)
+    target.parent.mkdir(parents=True)
+    old_jpg, old_phash = _jpeg((13, 9), (25, 65, 105))
+    generation_9_jpg, _generation_9_phash = _jpeg((19, 11), (150, 60, 20))
+    generation_10_jpg, generation_10_phash = _jpeg((23, 17), (20, 155, 65))
+    target.write_bytes(old_jpg)
+    SyncIndex(root).record_success(
+        SyncResult(
+            candidate_id=CANDIDATE_ID,
+            review_id=OLD_REVIEW_ID,
+            review_version=5,
+            action="ADD",
+            batch_id=OLD_BATCH_ID,
+            relative_path=relative,
+            sha256=hashlib.sha256(old_jpg).hexdigest(),
+            perceptual_hash=old_phash,
+        )
+    )
+    generation_5 = _row(
+        batch_id=OLD_BATCH_ID, review_id=OLD_REVIEW_ID, review_version=5
+    )
+    write_canonical_manifest(
+        root,
+        ExportManifest((generation_5,), OLD_BATCH_ID, RECEIPT_TOKEN),
+        (
+            ReceiptItem(
+                str(CANDIDATE_ID),
+                str(OLD_REVIEW_ID),
+                5,
+                "SUCCEEDED",
+                hashlib.sha256(old_jpg).hexdigest(),
+                relative.as_posix(),
+                None,
+            ),
+        ),
+    )
+
+    source_9 = tmp_path / "generation-9.jpg"
+    source_9.write_bytes(generation_9_jpg)
+    batch_9 = UUID("50000000-0000-4000-8000-000000000009")
+    review_9 = UUID("60000000-0000-4000-8000-000000000009")
+    worker = r'''
+import hashlib
+from io import BytesIO
+import os
+from pathlib import Path, PurePosixPath
+import sys
+import threading
+from uuid import UUID
+
+import imagehash
+from PIL import Image
+
+from sukaseafood_sync.downloader import DownloadResult
+import sukaseafood_sync.engine as engine_module
+from sukaseafood_sync.engine import SyncCallbacks, SyncEngine
+from sukaseafood_sync.manifest import ExportManifest, ManifestRow
+
+root = Path(sys.argv[1])
+candidate = UUID(sys.argv[2])
+batch = UUID(sys.argv[3])
+review = UUID(sys.argv[4])
+source = Path(sys.argv[5])
+relative = PurePosixPath(f"images/SF006/{candidate}.jpg")
+row = ManifestRow(
+    batch_id=batch,
+    action="ADD",
+    candidate_id=candidate,
+    review_id=review,
+    review_version=9,
+    species_code="SF006",
+    target_relative_path=relative,
+    previous_relative_path=relative,
+    preview_url="https://images.example.test/9/preview.jpg",
+    original_url="https://images.example.test/9/original.jpg",
+    source_url="https://catalog.example.test/record/888",
+    creator="Researcher",
+    license="CC BY 4.0",
+    license_url="https://creativecommons.org/licenses/by/4.0/",
+    attribution="Researcher / Catalog",
+)
+
+def download(session, manifest_row, destination, policy, progress, cancelled):
+    del session, manifest_row, policy, progress, cancelled
+    content = source.read_bytes()
+    staging = Path(destination).with_name(Path(destination).name + ".part")
+    staging.write_bytes(content)
+    with Image.open(BytesIO(content)) as decoded:
+        width, height = decoded.size
+        phash = str(imagehash.phash(decoded.convert("RGB"))).lower()
+    return DownloadResult(
+        staging, hashlib.sha256(content).hexdigest(), phash, len(content),
+        "JPEG", ".jpg", width, height,
+    )
+
+original_promote = engine_module._promote_isolated_staging
+def die_after_promotion(*args, **kwargs):
+    original_promote(*args, **kwargs)
+    os._exit(91)
+engine_module._promote_isolated_staging = die_after_promotion
+SyncEngine(downloader=download).run(
+    ExportManifest((row,), batch, "A" * 20),
+    root,
+    SyncCallbacks(),
+    threading.Event(),
+)
+'''
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            worker,
+            str(root),
+            str(CANDIDATE_ID),
+            str(batch_9),
+            str(review_9),
+            str(source_9),
+        ],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert process.returncode == 91, (process.stdout, process.stderr)
+    assert SyncIndex(root).get_add_intent(CANDIDATE_ID, review_9, 9, "ADD") is not None
+
+    batch_10 = UUID("50000000-0000-4000-8000-000000000010")
+    review_10 = UUID("60000000-0000-4000-8000-000000000010")
+    generation_10 = _row(
+        batch_id=batch_10, review_id=review_10, review_version=10
+    )
+
+    def download_10(session, manifest_row, destination, policy, progress, cancelled):
+        del session, manifest_row, policy, progress, cancelled
+        staging = Path(destination).with_name(Path(destination).name + ".part")
+        staging.write_bytes(generation_10_jpg)
+        with Image.open(BytesIO(generation_10_jpg)) as decoded:
+            width, height = decoded.size
+        return DownloadResult(
+            staging,
+            hashlib.sha256(generation_10_jpg).hexdigest(),
+            generation_10_phash,
+            len(generation_10_jpg),
+            "JPEG",
+            ".jpg",
+            width,
+            height,
+        )
+
+    outcome = SyncEngine(downloader=download_10).run(
+        ExportManifest((generation_10,), batch_10, RECEIPT_TOKEN),
+        root,
+        SyncCallbacks(),
+        threading.Event(),
+    )
+
+    index = SyncIndex(root)
+    latest = index.latest_for_candidate(CANDIDATE_ID)
+    assert outcome.counts == {"succeeded": 1, "failed": 0, "skipped": 0}, (
+        outcome.receipt_items
+    )
+    assert latest is not None and latest.review_version == 10
+    assert target.read_bytes() == generation_10_jpg
+    assert index.get_add_intent(CANDIDATE_ID, review_9, 9, "ADD") is None
+    assert not list(root.rglob("*.part"))
+    assert not list(root.rglob("*.sync-download"))
+    with (root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        canonical = list(csv.DictReader(stream))
+    assert canonical[0]["review_version"] == "10"
 
 
 def test_two_real_process_replacements_converge_to_highest_generation(

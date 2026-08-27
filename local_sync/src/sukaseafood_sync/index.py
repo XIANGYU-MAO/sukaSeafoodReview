@@ -874,12 +874,14 @@ class SyncIndex:
 
     @staticmethod
     def _same_result(existing: SyncRecord, desired: SyncRecord) -> bool:
+        # batch_id is a transport envelope, not part of the operation key or
+        # the durable filesystem result.  The API may truthfully reissue an
+        # exact operation in a later batch after an expired receipt window.
         return (
             existing.candidate_id == desired.candidate_id
             and existing.review_id == desired.review_id
             and existing.review_version == desired.review_version
             and existing.action == desired.action
-            and existing.batch_id == desired.batch_id
             and existing.relative_path == desired.relative_path
             and existing.sha256 == desired.sha256
             and existing.perceptual_hash == desired.perceptual_hash
@@ -945,6 +947,22 @@ class SyncIndex:
                 key,
             ).fetchone()
         return self._from_intent_row(row) if row is not None else None
+
+    def list_add_intents_for_candidate(
+        self, candidate_id: UUID | str
+    ) -> tuple[AddIntent, ...]:
+        """Return every durable ADD intent for one candidate, oldest first."""
+
+        candidate = str(_uuid(candidate_id, "candidate_id"))
+        with self.connect() as connection:
+            rows = list(
+                connection.execute(
+                    "SELECT * FROM pending_adds WHERE candidate_id = ? "
+                    "ORDER BY review_version, review_id, rowid",
+                    (candidate,),
+                )
+            )
+        return tuple(self._from_intent_row(row) for row in rows)
 
     def record_add_intent(
         self,

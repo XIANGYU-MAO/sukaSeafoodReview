@@ -164,6 +164,83 @@ class Session:
         self.closed = True
 
 
+def test_same_path_identical_bytes_advance_generation_without_replacing_file(
+    sync_root: Path,
+) -> None:
+    sync_root.mkdir()
+    generation_9 = replace(
+        row(69),
+        review_id=candidate(6909),
+        review_version=9,
+    )
+    generation_9 = replace(
+        generation_9,
+        previous_relative_path=generation_9.target_relative_path,
+        original_url="https://images.example.test/69/changed-url.jpg",
+    )
+    seed_prior(sync_root, SyncIndex(sync_root), generation_9)
+    target = local(sync_root, generation_9.target_relative_path)
+    before = target.stat()
+    calls: list[UUID] = []
+
+    outcome = SyncEngine(
+        session=Session(), downloader=fake_download(sync_root, calls)
+    ).run(
+        ExportManifest((generation_9,), generation_9.batch_id, RECEIPT_TOKEN),
+        sync_root,
+        SyncCallbacks(),
+        threading.Event(),
+    )
+
+    after = target.stat()
+    latest = SyncIndex(sync_root).latest_for_candidate(generation_9.candidate_id)
+    assert calls == [generation_9.candidate_id]
+    assert outcome.counts == {"succeeded": 1, "failed": 0, "skipped": 0}
+    assert latest is not None and latest.review_version == 9
+    assert latest.sha256 == SHA256 and latest.perceptual_hash == PHASH
+    assert (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+    assert target.read_bytes() == JPEG
+    assert not (sync_root / "_removed" / str(generation_9.batch_id)).exists()
+    assert not list(sync_root.rglob("*.part"))
+    assert not list(sync_root.rglob("*.sync-download"))
+
+
+def test_completed_operation_reissued_in_new_batch_returns_new_truthful_receipt(
+    sync_root: Path,
+) -> None:
+    sync_root.mkdir()
+    original = row(70)
+    first_calls: list[UUID] = []
+    first = SyncEngine(
+        session=Session(), downloader=fake_download(sync_root, first_calls)
+    ).run(
+        ExportManifest((original,), original.batch_id, RECEIPT_TOKEN),
+        sync_root,
+        SyncCallbacks(),
+        threading.Event(),
+    )
+    new_batch = candidate(7099)
+    reissued = replace(original, batch_id=new_batch)
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("exact completed operation must not download again")
+
+    second = SyncEngine(session=Session(), downloader=no_network).run(
+        ExportManifest((reissued,), new_batch, RECEIPT_TOKEN),
+        sync_root,
+        SyncCallbacks(),
+        threading.Event(),
+    )
+
+    assert first.counts == {"succeeded": 1, "failed": 0, "skipped": 0}
+    assert second.batch_id == str(new_batch)
+    assert second.counts == {"succeeded": 0, "failed": 0, "skipped": 1}
+    assert second.receipt_items == first.receipt_items
+    assert second.receipt_items[0].status == "SUCCEEDED"
+    assert second.receipt_items[0].sha256 == SHA256
+    assert second.receipt_items[0].relative_path == original.target_relative_path.as_posix()
+
+
 def test_replacement_cancellation_before_swap_recovers_without_network(
     sync_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

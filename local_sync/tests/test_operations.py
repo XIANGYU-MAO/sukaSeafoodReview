@@ -467,6 +467,249 @@ def test_same_path_replacement_installs_new_managed_jpg_generation(
     assert not verified.staging_path.exists()
 
 
+def test_reissued_replacement_cleans_only_old_batch_owned_intent(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    managed = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    old_batch = BATCH_ID
+    new_batch = UUID("77777777-7777-4777-8777-777777777777")
+    replacement_row = row(
+        review_version=9,
+        target_relative_path=managed,
+        previous_relative_path=managed,
+    )
+    old_jpg, old_phash = encoded_image("JPEG", (13, 9))
+    new_jpg, new_phash = encoded_image("JPEG", (19, 11))
+    old_sha = hashlib.sha256(old_jpg).hexdigest()
+    new_sha = hashlib.sha256(new_jpg).hexdigest()
+    target = write_file(sync_root, managed, new_jpg)
+    prior = SyncResult(
+        candidate_id=CANDIDATE_ID,
+        review_id=OLD_REVIEW_ID,
+        review_version=5,
+        action="ADD",
+        batch_id=old_batch,
+        relative_path=managed,
+        sha256=old_sha,
+        perceptual_hash=old_phash,
+    )
+    completed = SyncResult(
+        candidate_id=CANDIDATE_ID,
+        review_id=REVIEW_ID,
+        review_version=9,
+        action="ADD",
+        batch_id=old_batch,
+        relative_path=managed,
+        sha256=new_sha,
+        perceptual_hash=new_phash,
+    )
+    index.record_success(prior)
+    index.record_success(completed)
+    backup_relative = PurePosixPath("_removed", str(old_batch), managed.name)
+    backup = write_file(sync_root, backup_relative, old_jpg)
+    index.record_add_intent(
+        completed,
+        managed,
+        prior_relative_path=managed,
+        prior_sha256=old_sha,
+        backup_relative_path=backup_relative,
+    )
+    reissued = replace(replacement_row, batch_id=new_batch)
+
+    result = recover_add(sync_root, reissued, index)
+
+    assert result is not None and result.status == "SKIPPED_ALREADY_COMPLETED"
+    assert target.read_bytes() == new_jpg
+    assert backup.read_bytes() == old_jpg
+    assert not (sync_root / "_removed" / str(new_batch)).exists()
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 9, "ADD") is None
+
+
+def test_isolated_stage_promotion_never_clobbers_unowned_shared_stage(
+    sync_root: Path,
+) -> None:
+    manifest_row = row()
+    content, phash = encoded_image("JPEG", (17, 11))
+    destination = local_path(sync_root, manifest_row.target_relative_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    download_destination = destination.with_name(
+        f".{destination.name}.{'a' * 32}.sync-download"
+    )
+    private_stage = download_destination.with_name(download_destination.name + ".part")
+    verified = download(
+        sync_root,
+        manifest_row,
+        content=content,
+        phash=phash,
+        width=17,
+        height=11,
+        staging_path=private_stage,
+    )
+    shared_stage = destination.with_name(destination.name + ".part")
+    unowned = b"do-not-clobber"
+    shared_stage.write_bytes(unowned)
+
+    with pytest.raises(OperationError, match="TARGET_UNSAFE|TARGET_CONFLICT"):
+        operations.promote_isolated_staging(
+            sync_root,
+            manifest_row,
+            destination,
+            download_destination,
+            verified,
+        )
+
+    assert shared_stage.read_bytes() == unowned
+    assert private_stage.read_bytes() == content
+
+
+def test_missing_isolated_stage_outside_root_cannot_bypass_containment(
+    sync_root: Path,
+) -> None:
+    sync_root.mkdir()
+    manifest_row = row()
+    outside_destination = sync_root.parent / (
+        f".{manifest_row.target_relative_path.name}.{'d' * 32}.sync-download"
+    )
+    outside_stage = outside_destination.with_name(outside_destination.name + ".part")
+    downloaded = DownloadResult(
+        staging_path=outside_stage,
+        sha256="a" * 64,
+        phash=PHASH,
+        byte_count=1,
+        format="JPEG",
+        suffix=".jpg",
+        width=1,
+        height=1,
+    )
+
+    with pytest.raises(OperationError, match="STAGING_PATH_INVALID"):
+        operations.discard_isolated_staging(
+            sync_root,
+            manifest_row,
+            downloaded,
+            outside_destination,
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction/rename protection")
+def test_isolated_stage_promotion_pins_parent_against_reparse_swap(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_row = row()
+    content, phash = encoded_image("JPEG", (17, 11))
+    destination = local_path(sync_root, manifest_row.target_relative_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    download_destination = destination.with_name(
+        f".{destination.name}.{'b' * 32}.sync-download"
+    )
+    private_stage = download_destination.with_name(download_destination.name + ".part")
+    verified = download(
+        sync_root,
+        manifest_row,
+        content=content,
+        phash=phash,
+        width=17,
+        height=11,
+        staging_path=private_stage,
+    )
+    outside = sync_root.parent / "outside-promotion"
+    outside.mkdir()
+    replacement_link = sync_root / "prepared-promotion-link"
+    try:
+        os.symlink(outside, replacement_link, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink unavailable: {error}")
+
+    original_link = operations.os.link
+    attempted = False
+    blocked = False
+
+    def swap_parent_then_link(source, target, *args, **kwargs):
+        nonlocal attempted, blocked
+        if not attempted:
+            attempted = True
+            parked = destination.parent.with_name(destination.parent.name + ".parked")
+            try:
+                destination.parent.rename(parked)
+                replacement_link.rename(destination.parent)
+            except OSError:
+                blocked = True
+        return original_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(operations.os, "link", swap_parent_then_link)
+    promoted = operations.promote_isolated_staging(
+        sync_root,
+        manifest_row,
+        destination,
+        download_destination,
+        verified,
+    )
+
+    assert attempted and blocked
+    assert promoted.staging_path.read_bytes() == content
+    assert not private_stage.exists()
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction/rename protection")
+def test_isolated_stage_discard_pins_parent_against_reparse_swap(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_row = row()
+    content, phash = encoded_image("JPEG", (17, 11))
+    destination = local_path(sync_root, manifest_row.target_relative_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    download_destination = destination.with_name(
+        f".{destination.name}.{'c' * 32}.sync-download"
+    )
+    private_stage = download_destination.with_name(download_destination.name + ".part")
+    verified = download(
+        sync_root,
+        manifest_row,
+        content=content,
+        phash=phash,
+        width=17,
+        height=11,
+        staging_path=private_stage,
+    )
+    outside = sync_root.parent / "outside-discard"
+    outside.mkdir()
+    replacement_link = sync_root / "prepared-discard-link"
+    try:
+        os.symlink(outside, replacement_link, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink unavailable: {error}")
+
+    original_unlink = operations.Path.unlink
+    attempted = False
+    blocked = False
+
+    def swap_parent_then_unlink(path, *args, **kwargs):
+        nonlocal attempted, blocked
+        if Path(path) == private_stage and not attempted:
+            attempted = True
+            parked = destination.parent.with_name(destination.parent.name + ".parked")
+            try:
+                destination.parent.rename(parked)
+                replacement_link.rename(destination.parent)
+            except OSError:
+                blocked = True
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(operations.Path, "unlink", swap_parent_then_unlink)
+    operations.discard_isolated_staging(
+        sync_root,
+        manifest_row,
+        verified,
+        download_destination,
+    )
+
+    assert attempted and blocked
+    assert not private_stage.exists()
+    assert list(outside.iterdir()) == []
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction/rename protection")
 def test_replacement_backup_parent_swap_cannot_escape_sync_root(
     sync_root: Path, monkeypatch: pytest.MonkeyPatch

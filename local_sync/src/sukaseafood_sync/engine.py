@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import stat
@@ -30,7 +30,10 @@ from .operations import (
     apply_add,
     apply_move,
     apply_remove,
+    discard_isolated_staging as _discard_isolated_staging,
     prepare_add_intent,
+    promote_isolated_staging as _promote_isolated_staging,
+    reconcile_older_add_intents,
     recover_add,
 )
 
@@ -66,96 +69,12 @@ class StaleGenerationError(RuntimeError):
     """A manifest row predates durable state for the same candidate."""
 
 
-def _regular_non_reparse(metadata: os.stat_result) -> bool:
-    attributes = getattr(metadata, "st_file_attributes", 0)
-    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return (
-        stat.S_ISREG(metadata.st_mode)
-        and not stat.S_ISLNK(metadata.st_mode)
-        and not bool(attributes & reparse)
-    )
-
-
 def _isolated_download_destination(destination: Path) -> Path:
     """Give concurrent runs distinct verified staging names in one safe parent."""
 
     return destination.with_name(
         f".{destination.name}.{uuid4().hex}.sync-download"
     )
-
-
-def _expected_download_staging(download_destination: Path) -> Path:
-    return download_destination.with_name(download_destination.name + ".part")
-
-
-def _discard_isolated_staging(
-    downloaded: DownloadResult, download_destination: Path
-) -> None:
-    expected = _expected_download_staging(download_destination)
-    if downloaded.staging_path != expected:
-        raise OperationError("STAGING_FILE_UNSAFE")
-    try:
-        metadata = expected.lstat()
-    except FileNotFoundError:
-        return
-    except OSError:
-        raise OperationError("STAGING_FILE_UNSAFE") from None
-    if not _regular_non_reparse(metadata):
-        raise OperationError("STAGING_FILE_UNSAFE")
-    try:
-        expected.unlink()
-    except FileNotFoundError:
-        return
-    except OSError:
-        raise OperationError("FILESYSTEM_OPERATION_FAILED") from None
-
-
-def _promote_isolated_staging(
-    root: Path,
-    row: ManifestRow,
-    destination: Path,
-    download_destination: Path,
-    downloaded: DownloadResult,
-) -> DownloadResult:
-    """Atomically hand one private download to the existing intent/apply path."""
-
-    if _ensure_parents(root, row.target_relative_path) != destination:
-        raise OperationError("PATH_UNSAFE")
-    source = _expected_download_staging(download_destination)
-    if downloaded.staging_path != source:
-        raise OperationError("STAGING_FILE_UNSAFE")
-    try:
-        source_metadata = source.lstat()
-    except OSError:
-        raise OperationError("STAGING_FILE_UNSAFE") from None
-    if not _regular_non_reparse(source_metadata):
-        raise OperationError("STAGING_FILE_UNSAFE")
-
-    staging = destination.with_name(destination.name + ".part")
-    try:
-        existing = staging.lstat()
-    except FileNotFoundError:
-        existing = None
-    except OSError:
-        raise OperationError("STAGING_FILE_UNSAFE") from None
-    if existing is not None:
-        if not _regular_non_reparse(existing):
-            raise OperationError("STAGING_FILE_UNSAFE")
-        try:
-            staging.unlink()
-        except OSError:
-            raise OperationError("FILESYSTEM_OPERATION_FAILED") from None
-    try:
-        os.replace(source, staging)
-        promoted = staging.lstat()
-    except OSError:
-        raise OperationError("FILESYSTEM_OPERATION_FAILED") from None
-    if (
-        not _regular_non_reparse(promoted)
-        or not os.path.samestat(source_metadata, promoted)
-    ):
-        raise OperationError("STAGING_FILE_UNSAFE")
-    return replace(downloaded, staging_path=staging)
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,7 +390,6 @@ class SyncEngine:
             and exact.review_id == row.review_id
             and exact.review_version == row.review_version
             and exact.action == row.action
-            and exact.batch_id == row.batch_id
             and receipt.candidate_id == str(exact.candidate_id)
             and receipt.review_id == str(exact.review_id)
             and receipt.review_version == exact.review_version
@@ -577,6 +495,7 @@ class SyncEngine:
                             phase="RECOVERING",
                         )
                         with root_state_lock(safe_root):
+                            reconcile_older_add_intents(safe_root, row, index)
                             self._require_current_generation(index, row)
                             operation_started = True
                             result = recover_add(
@@ -665,10 +584,16 @@ class SyncEngine:
                                 last_activity[bucket] = self._monotonic()
                             with root_state_lock(safe_root):
                                 try:
+                                    reconcile_older_add_intents(
+                                        safe_root, row, index
+                                    )
                                     self._require_current_generation(index, row)
                                 except StaleGenerationError:
                                     _discard_isolated_staging(
-                                        downloaded, download_destination
+                                        safe_root,
+                                        row,
+                                        downloaded,
+                                        download_destination,
                                     )
                                     raise
                                 operation_started = True
@@ -678,7 +603,10 @@ class SyncEngine:
                                 operation_started = False
                                 if result is not None:
                                     _discard_isolated_staging(
-                                        downloaded, download_destination
+                                        safe_root,
+                                        row,
+                                        downloaded,
+                                        download_destination,
                                     )
                                     write_canonical_manifest_locked(
                                         safe_root,
@@ -686,50 +614,71 @@ class SyncEngine:
                                         (self._receipt(row, result),),
                                     )
                                 else:
-                                    prepare_add_intent(
+                                    prepared = prepare_add_intent(
                                         safe_root,
                                         row,
                                         downloaded,
                                         index,
                                         isolated_staging_path=downloaded.staging_path,
                                     )
-                                    downloaded = _promote_isolated_staging(
-                                        safe_root,
-                                        row,
-                                        destination,
-                                        download_destination,
-                                        downloaded,
-                                    )
-                                    if cancel_event.is_set():
-                                        cancelled = True
+                                    if prepared is not None:
+                                        try:
+                                            _discard_isolated_staging(
+                                                safe_root,
+                                                row,
+                                                downloaded,
+                                                download_destination,
+                                            )
+                                        except OperationError:
+                                            # The managed target and durable
+                                            # generation are already exact;
+                                            # never mutate an unowned private
+                                            # path just to make cleanup fatal.
+                                            pass
+                                        result = prepared
+                                        write_canonical_manifest_locked(
+                                            safe_root,
+                                            manifest,
+                                            (self._receipt(row, result),),
+                                        )
+                                    else:
+                                        downloaded = _promote_isolated_staging(
+                                            safe_root,
+                                            row,
+                                            destination,
+                                            download_destination,
+                                            downloaded,
+                                        )
+                                        if cancel_event.is_set():
+                                            cancelled = True
+                                            self._emit(
+                                                callbacks,
+                                                current=current,
+                                                total=total,
+                                                row=row,
+                                                phase="CANCELLED",
+                                            )
+                                            break
                                         self._emit(
                                             callbacks,
                                             current=current,
                                             total=total,
                                             row=row,
-                                            phase="CANCELLED",
+                                            phase="APPLYING",
                                         )
-                                        break
-                                    self._emit(
-                                        callbacks,
-                                        current=current,
-                                        total=total,
-                                        row=row,
-                                        phase="APPLYING",
-                                    )
-                                    operation_started = True
-                                    result = apply_add(
-                                        safe_root,
-                                        row,
-                                        downloaded,
-                                        index,
-                                        logger=logger,
-                                    )
-                                    write_canonical_manifest_locked(
-                                        safe_root,
-                                        manifest,
-                                        (self._receipt(row, result),),
-                                    )
+                                        operation_started = True
+                                        result = apply_add(
+                                            safe_root,
+                                            row,
+                                            downloaded,
+                                            index,
+                                            logger=logger,
+                                        )
+                                        write_canonical_manifest_locked(
+                                            safe_root,
+                                            manifest,
+                                            (self._receipt(row, result),),
+                                        )
                     elif row.action == "MOVE":
                         self._emit(
                             callbacks,
