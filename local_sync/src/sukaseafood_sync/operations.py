@@ -890,12 +890,103 @@ def _apply_add(
     return result
 
 
-def _clear_replacement_intent(index: SyncIndex, row: ManifestRow, intent: AddIntent) -> None:
-    if _clear_add_intent(index, intent):
-        return
+def _clear_replacement_intent(
+    root: Path,
+    row: ManifestRow,
+    index: SyncIndex,
+    intent: AddIntent,
+    prior: SyncRecord | None,
+) -> SyncResult | None:
+    _clear_add_intent(index, intent)
     current = _add_intent(index, row)
+    stored = _index_exact(index, row)
+    latest = _latest(index, row)
     if current is not None:
-        raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+        raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+
+    prior_relative = intent.prior_relative_path
+    prior_sha = intent.prior_sha256
+    backup_relative = intent.backup_relative_path
+    if prior_relative is None or prior_sha is None or backup_relative is None:
+        raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+
+    try:
+        target_lexical = root.joinpath(*intent.actual_relative_path.parts)
+        target_metadata = _lstat(target_lexical, "ADD_RECOVERY_STATE_CHANGED")
+        target: Path | None = None
+        target_sha: str | None = None
+        if target_metadata is not None:
+            target = _resolved_path(root, intent.actual_relative_path)
+            target_sha, _target_size, target_metadata = _hash_regular(
+                target, "ADD_RECOVERY_STATE_CHANGED"
+            )
+
+        backup_lexical = root.joinpath(*backup_relative.parts)
+        backup_metadata = _lstat(backup_lexical, "ADD_RECOVERY_STATE_CHANGED")
+        backup_sha: str | None = None
+        if backup_metadata is not None:
+            backup = _resolved_path(root, backup_relative)
+            backup_sha, _backup_size, backup_metadata = _hash_regular(
+                backup, "ADD_RECOVERY_STATE_CHANGED"
+            )
+
+        staging_relative = intent.target_relative_path.with_name(
+            intent.target_relative_path.name + ".part"
+        )
+        staging_lexical = root.joinpath(*staging_relative.parts)
+        staging_metadata = _lstat(staging_lexical, "ADD_RECOVERY_STATE_CHANGED")
+        staging: Path | None = None
+        staging_image: tuple[str, str, int, int, int, str, os.stat_result] | None = (
+            None
+        )
+        if staging_metadata is not None:
+            staging = _resolved_path(root, staging_relative)
+            staging_image = _read_recovery_image(staging, None)
+    except OperationError:
+        raise OperationError("ADD_RECOVERY_STATE_CHANGED") from None
+
+    if stored is None:
+        if (
+            prior is not None
+            and latest == prior
+            and target_sha == prior_sha
+            and backup_sha == prior_sha
+            and staging_metadata is None
+        ):
+            return None
+        raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+
+    if (
+        stored.batch_id != intent.batch_id
+        or stored.relative_path != intent.actual_relative_path
+        or stored.sha256 != intent.sha256
+        or stored.perceptual_hash != intent.perceptual_hash
+        or target is None
+        or target_sha != stored.sha256
+        or backup_sha != prior_sha
+    ):
+        raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+    try:
+        target_image = _read_recovery_image(target, stored.relative_path)
+    except OperationError:
+        raise OperationError("ADD_RECOVERY_STATE_CHANGED") from None
+    if (
+        target_image[0] != stored.sha256
+        or target_image[1] != stored.perceptual_hash
+        or _decoded_relative(intent.target_relative_path, target_image[5])
+        != stored.relative_path
+    ):
+        raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+    if staging is not None and staging_image is not None:
+        if (
+            staging_image[0] != stored.sha256
+            or staging_image[1] != stored.perceptual_hash
+            or _decoded_relative(intent.target_relative_path, staging_image[5])
+            != stored.relative_path
+        ):
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+        _unlink_owned(staging, staging_image[6], "ADD_RECOVERY_STATE_CHANGED")
+    return _skipped_result(stored)
 
 
 def _recover_managed_replacement(
@@ -933,8 +1024,7 @@ def _recover_managed_replacement(
         )
         if target_sha != stored.sha256:
             raise OperationError("COMPLETED_STATE_STALE")
-        _clear_replacement_intent(index, row, intent)
-        return _skipped_result(stored)
+        return _clear_replacement_intent(root, row, index, intent, None)
 
     prior = _latest(index, row)
     if prior is None:
@@ -997,8 +1087,7 @@ def _recover_managed_replacement(
             )
             backup_sha = prior_sha
         if staging is None or staging_image is None:
-            _clear_replacement_intent(index, row, intent)
-            return None
+            return _clear_replacement_intent(root, row, index, intent, prior)
         _unlink_owned(target, target_owned, "FILESYSTEM_OPERATION_FAILED")
         _link_no_clobber(staging, staging_image[6], target, intent.sha256)
     elif target_sha is None:
@@ -1011,8 +1100,7 @@ def _recover_managed_replacement(
             )
             if restored_sha != prior_sha:
                 raise OperationError("SOURCE_STATE_MISMATCH")
-            _clear_replacement_intent(index, row, intent)
-            return None
+            return _clear_replacement_intent(root, row, index, intent, prior)
         _link_no_clobber(staging, staging_image[6], target, intent.sha256)
     else:
         raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
@@ -1050,7 +1138,9 @@ def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult |
     exact_metadata = _lstat(root.joinpath(*target_relative.parts), "TARGET_UNSAFE")
     staging: Path | None = None
     staging_image: tuple[str, str, int, int, int, str, os.stat_result] | None = None
-    if staging_metadata is not None and (intent is not None or exact_metadata is not None):
+    if staging_metadata is not None and (
+        intent is not None or exact_metadata is not None or stored is not None
+    ):
         staging = _resolved_path(root, staging_relative)
         staging_image = _read_recovery_image(staging, None)
 
@@ -1130,12 +1220,21 @@ def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult |
         or intent.perceptual_hash != phash
     ):
         raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
-    if stored is not None and (
-        stored.relative_path != actual_relative
-        or stored.sha256 != sha256
-        or stored.perceptual_hash != phash
-    ):
-        raise OperationError("COMPLETED_STATE_STALE")
+    cleanup_staging = stored is None
+    if stored is not None:
+        if (
+            stored.batch_id != row.batch_id
+            or stored.relative_path != actual_relative
+            or stored.sha256 != sha256
+            or stored.perceptual_hash != phash
+        ):
+            raise OperationError("COMPLETED_STATE_STALE")
+        cleanup_staging = staging_image is not None and (
+            staging_image[0] == stored.sha256
+            and staging_image[1] == stored.perceptual_hash
+            and _decoded_relative(target_relative, staging_image[5])
+            == stored.relative_path
+        )
     if stored is None:
         result = _desired_result(row, actual_relative, sha256, phash)
     else:
@@ -1143,7 +1242,7 @@ def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult |
     _cleanup_composite_previous(root, row, actual_relative, index)
     if stored is None:
         _record(index, result)
-    if staging is not None and staging_image is not None:
+    if staging is not None and staging_image is not None and cleanup_staging:
         try:
             _unlink_owned(
                 staging, staging_image[6], "FILESYSTEM_OPERATION_FAILED"
