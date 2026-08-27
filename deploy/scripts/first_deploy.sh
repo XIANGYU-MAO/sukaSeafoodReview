@@ -44,7 +44,7 @@ if [ ! -f "$ENV_FILE" ]; then
         printf 'CSRF_SECRET=%s\n' "$csrf_secret"
         printf 'RECEIPT_SECRET=%s\n' "$receipt_secret"
         printf 'TRUSTED_PROXY_CIDRS=%s\n' "$edge_subnet"
-        printf '%s\n' 'IMAGE_ORIGIN_ALLOWLIST=.inaturalist.org,inaturalist-open-data.s3.amazonaws.com,caos.boldsystems.org,cdn.floridamuseum.ufl.edu,collections.nmnh.si.edu,huggingface.co,pictures.snsb.info,specify.saiab.ac.za,www.morphosource.org,.wikimedia.org,.wikimediausercontent.com,.gbif.org,.fishair.org,.fish-vista.org,.fishvista.org'
+        printf '%s\n' 'IMAGE_ORIGIN_ALLOWLIST=.inaturalist.org,inaturalist-open-data.s3.amazonaws.com,caos.boldsystems.org,cdn.floridamuseum.ufl.edu,collections.nmnh.si.edu,data.nhm.ac.uk,huggingface.co,pictures.snsb.info,specify.saiab.ac.za,www.morphosource.org,.wikimedia.org,.wikimediausercontent.com,.gbif.org,.fishair.org,.fish-vista.org,.fishvista.org'
     } > "$ENV_FILE"
     unset postgres_password session_secret csrf_secret receipt_secret
 fi

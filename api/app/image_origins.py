@@ -13,6 +13,7 @@ DEFAULT_IMAGE_ORIGIN_ALLOWLIST = (
     "caos.boldsystems.org",
     "cdn.floridamuseum.ufl.edu",
     "collections.nmnh.si.edu",
+    "data.nhm.ac.uk",
     "huggingface.co",
     "pictures.snsb.info",
     "specify.saiab.ac.za",
@@ -70,6 +71,14 @@ def normalize_image_origin_allowlist(values: tuple[str, ...]) -> tuple[str, ...]
     if not normalized:
         raise ImageOriginError("image-origin allowlist must not be empty")
     return tuple(dict.fromkeys(normalized))
+
+
+def normalize_exact_image_hostname(value: str) -> str:
+    hostname = value.strip().rstrip(".").lower()
+    pattern = normalize_image_origin_pattern(hostname)
+    if pattern.startswith("."):
+        raise ImageOriginError("image-origin approval must be an exact hostname")
+    return pattern
 
 
 def image_host_allowed(hostname: str, allowlist: tuple[str, ...]) -> bool:

@@ -111,15 +111,9 @@ def test_nginx_spa_health_body_limit_and_image_csp_match_origin_policy():
     assert "client_max_body_size 20m" in nginx
     assert "proxy_pass" not in nginx
     csp = next(line for line in nginx.splitlines() if "Content-Security-Policy" in line)
-    # Every default API/local image origin must be represented in Web CSP.
-    api_policy = (ROOT / "api/app/image_origins.py").read_text("utf-8")
-    block = api_policy.split("DEFAULT_IMAGE_ORIGIN_ALLOWLIST = (", 1)[1].split(")", 1)[0]
-    origins = re.findall(r'"([^"]+)"', block)
-    for origin in origins:
-        host = origin.removeprefix(".")
-        assert f"https://{host}" in csp
-        if origin.startswith("."):
-            assert f"https://*.{host}" in csp
+    # Exact image hosts can be approved at runtime, while API validation remains
+    # the authority deciding which HTTPS URLs may enter the candidate catalog.
+    assert "img-src 'self' data: https:" in csp
 
 
 def test_batch_and_receipt_envelope_constants_agree_across_layers():

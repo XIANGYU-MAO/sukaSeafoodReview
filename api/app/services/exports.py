@@ -34,6 +34,7 @@ from app.image_origins import (
 )
 from app.schemas.exports import ExportBatchResponse, ReceiptItem, ReceiptResponse
 from app.services.auth import as_utc, utc_now
+from app.services.origins import effective_image_origin_allowlist
 from app.services.sync_generation import acquire_sync_generation_lock
 from app.species_codes import is_safe_species_code
 
@@ -55,6 +56,7 @@ EXPORT_COLUMNS = [
     "license",
     "license_url",
     "attribution",
+    "image_origin_allowlist",
 ]
 EXPORT_TTL = timedelta(days=7)
 EXPORT_MAX_ROWS = 10_000
@@ -182,6 +184,17 @@ def _desired_path(candidate: Candidate, species: Species) -> str:
     if not is_safe_species_code(species.code):
         raise ExportConflict("UNSAFE_SPECIES_CODE")
     return f"images/{species.code}/{candidate.id}{_known_suffix(candidate.original_url)}"
+
+
+def _used_image_origins(*urls: str) -> str:
+    hosts = sorted(
+        {
+            (urlsplit(url).hostname or "").rstrip(".").lower()
+            for url in urls
+            if url
+        }
+    )
+    return json.dumps([host for host in hosts if host], separators=(",", ":"))
 
 
 def _same_content_path(previous_path: str, species: Species) -> str:
@@ -395,7 +408,7 @@ def _delta_csv_row(
         "action": delta.action.value,
         "candidate_id": str(candidate.id),
         "review_id": str(delta.review.id),
-        # The fixed 16-column wire contract uses this field as the monotonic
+        # The fixed wire contract uses this field as the monotonic
         # candidate sync generation.  Every export-relevant mutation advances
         # Candidate.version, including same-review corrections.
         "review_version": candidate.version,
@@ -409,6 +422,9 @@ def _delta_csv_row(
         "license": candidate.license,
         "license_url": candidate.license_url or "",
         "attribution": candidate.attribution,
+        "image_origin_allowlist": _used_image_origins(
+            candidate.preview_url, candidate.original_url
+        ),
     }
 
 
@@ -433,6 +449,9 @@ def _item_csv_row(
         "license": item.license,
         "license_url": item.license_url or "",
         "attribution": item.attribution,
+        "image_origin_allowlist": _used_image_origins(
+            item.preview_url, item.original_url
+        ),
     }
 
 
@@ -488,6 +507,9 @@ async def create_export_batch(
         # expire and inspect batches. Export creation never locks
         # candidate/review rows, so it cannot invert writer row-lock order.
         locked = await _begin_creation_snapshot(session)
+        effective_allowlist = await effective_image_origin_allowlist(
+            session, image_origin_allowlist
+        )
         await _expire_batches(session)
         species = None
         if species_code is not None:
@@ -508,10 +530,10 @@ async def create_export_batch(
         try:
             for delta in deltas:
                 require_approved_image_url(
-                    delta.candidate.preview_url, image_origin_allowlist
+                    delta.candidate.preview_url, effective_allowlist
                 )
                 require_approved_image_url(
-                    delta.candidate.original_url, image_origin_allowlist
+                    delta.candidate.original_url, effective_allowlist
                 )
         except ImageOriginError as exc:
             raise ExportConflict("IMAGE_ORIGIN_NOT_ALLOWED") from exc
@@ -743,10 +765,13 @@ async def render_batch_csv(
             )
         ).all()
     )
+    effective_allowlist = await effective_image_origin_allowlist(
+        session, image_origin_allowlist
+    )
     try:
         for item in items:
-            require_approved_image_url(item.preview_url, image_origin_allowlist)
-            require_approved_image_url(item.original_url, image_origin_allowlist)
+            require_approved_image_url(item.preview_url, effective_allowlist)
+            require_approved_image_url(item.original_url, effective_allowlist)
     except ImageOriginError as exc:
         raise ReceiptRejected("IMAGE_ORIGIN_NOT_ALLOWED", 409) from exc
     content = _encode_csv_rows(

@@ -106,7 +106,7 @@ Set-Location .\api
 .\.venv\Scripts\python.exe -m app.commands.import_candidates 'C:\Users\86166\Desktop\sukaSeafoodReview\collector\output\candidates.csv' --dry-run
 ```
 
-dry-run 不写候选、不生成可提交预览令牌。它必须报告零个 blocking error 且 `can_commit=true`，Mao 才能显式提交。确认报告后，Mao 可以在中文后台“采集与导入”标签先预检查再显式确认 commit；生产帮助脚本同样先 dry-run，再以 `--commit` 事务性复核并写入，随后把返回的 `file_sha256` 与本机 CSV 核对，并打印 `total`、`inserted`、`skipped_exact` 和 `possible_url_duplicates`。CLI 精确重复导入是幂等的。网页预览令牌仅保存在当前页面内存并有过期时间；新文件、终端冲突或成功提交会使旧令牌失效。
+dry-run 不写候选、不生成可提交预览令牌。CLI 和生产帮助脚本仍要求零个 blocking error 且 `can_commit=true`，然后以 `--commit` 事务性复核并写入，打印 `total`、`inserted`、`skipped_exact`、`skipped_url_duplicates` 和 `skipped_blocking`。中文后台支持把 CSV 拖入页面预检查：同鱼种的相同原图地址会自动跳过，同一原图被分到不同鱼种会阻断。有效的未知 HTTPS 图片主机按精确域名汇总，Mao 可在当前预检查中批准一次并自动重新预检查；localhost、IP、含凭据地址和其他本质不安全地址不能批准。若剩余阻断行不值得修正，Mao 可二次确认，只导入其余有效行。网页预览令牌仅保存在当前页面内存并有过期时间；新文件、终端冲突或成功提交会使旧令牌失效。
 
 ## 审核成员工作流
 
@@ -129,7 +129,7 @@ dry-run 不写候选、不生成可提交预览令牌。它必须报告零个 bl
 2. 候选图片：筛选、修正安全元数据、释放或转交尚未提交的当前图片。
 3. 鱼种管理：新增、编辑、停用和重新启用 Windows 安全的不可变鱼种代码。初始目录为空；导入 SF006 或任何其他当前鱼种的行之前，Mao 应先在此添加符合安全代码规则的目录项。
 4. 审核历史：跨成员筛选、受版本保护的修正，以及指定从未审核该候选的活跃成员重新审核。
-5. 采集与导入：四步采集器流程、CSV 预检查与原子 commit。
+5. 采集与导入：四步采集器流程；可切换 Windows 或 macOS/Linux 命令格式、首次采集或带 `--resume` 的补采模式及每来源数量参数；支持拖入 CSV、来源批准、自动去重和显式跳过阻断行。
 6. 训练集同步：查看待处理数、创建不可变增量批次、下载小型 CSV、上传 JSON 回执文件。
 7. 账号：查看固定目录并重置普通成员密码；不在网页重置 Mao。
 
@@ -137,11 +137,11 @@ dry-run 不写候选、不生成可提交预览令牌。它必须报告零个 bl
 
 ## 增量 CSV 与本地下载边界
 
-服务器按一个统一封套生成增量批次：每批最多 10,000 行，精确 16 列 CSV 序列化后最多 20 MiB，在线回执与离线回执上传也最多 20 MiB。超过 10,000 个待处理项会被拆成互不重叠的后续批次；任意一行本身导致超限时会在持久化批次前失败。CSV 按同一 PostgreSQL 快照产生 ADD、REMOVE 或 MOVE，并携带服务器决定的精确目标相对路径和单调的**候选图片同步代次**。为兼容现有格式，CSV 固定列名仍为 `review_version`；它表示候选图片同步代次，不是审核成员的编辑次数。CSV 下载是同源认证、`no-store` 的附件响应；回执是有界 `application/json` POST。
+服务器按一个统一封套生成增量批次：每批最多 10,000 行，精确 17 列 CSV 序列化后最多 20 MiB，在线回执与离线回执上传也最多 20 MiB。超过 10,000 个待处理项会被拆成互不重叠的后续批次；任意一行本身导致超限时会在持久化批次前失败。CSV 按同一 PostgreSQL 快照产生 ADD、REMOVE 或 MOVE，并携带服务器决定的精确目标相对路径、单调的**候选图片同步代次**和本批实际使用的已批准图片主机。为兼容现有格式，CSV 固定列名仍为 `review_version`；它表示候选图片同步代次，不是审核成员的编辑次数。CSV 下载是同源认证、`no-store` 的附件响应；回执是有界 `application/json` POST。
 
 Alembic 修订 `20260827_07` 在创建导出所使用的同一 PostgreSQL 串行化边界内开启新的同步纪元。它把每个候选的代次提高到大于该候选当前值以及审核、审核修订和导出项中的全部历史值；整数空间耗尽时拒绝迁移，并使所有修订前的待处理批次过期，避免同一批次混用新旧语义。已有本地训练集无需破坏性重置：升级后的第一个代次自然大于任何合法的升级前本地值。
 
-独立 `local_sync` 包、CLI/Tkinter 和 Windows 可执行文件已经实现。工具在 Mao 的电脑上直接访问每个获准的 `original_url`，验证每次重定向、图片内容和哈希，使用 `.part` 加原子改名幂等续跑，并把 REMOVE 移到可恢复 `_removed` 路径。只允许配置的精确主机/域名后缀；可用 `IMAGE_ORIGIN_ALLOWLIST` 配置服务器，用 `SUKASEAFOOD_IMAGE_ORIGIN_ALLOWLIST` 配置本机同步器。禁止 localhost、IP 字面量和未批准来源。配置代理只代表信任该代理去连接经过批准的主机名；工具不会把 Cookie 或凭据发送到图片来源。中国服务器从不向图片来源发起 HEAD/GET，也没有图片缓存或代理。
+独立 `local_sync` 包、CLI/Tkinter 和 Windows 可执行文件已经实现。工具在 Mao 的电脑上直接访问每个获准的 `original_url`，验证每次重定向、图片内容和哈希，使用 `.part` 加原子改名幂等续跑，并把 REMOVE 移到可恢复 `_removed` 路径。导出 CSV 的 `image_origin_allowlist` 列会携带该批实际使用且由服务器批准的精确主机，因此后台批准新来源后不需要升级本地工具或手工改环境变量；`IMAGE_ORIGIN_ALLOWLIST` 和 `SUKASEAFOOD_IMAGE_ORIGIN_ALLOWLIST` 仍可用于部署级目录扩展。禁止 localhost、IP 字面量和未批准来源。配置代理只代表信任该代理去连接经过批准的主机名；工具不会把 Cookie 或凭据发送到图片来源。中国服务器从不向图片来源发起 HEAD/GET，也没有图片缓存或代理。
 
 取消或网络中断时，已经安全完成的操作会留在本地索引；工具保存 `download_receipt-{batch_id}.json` 离线回执，网络恢复后可重传。较旧的候选图片同步代次重放不能覆盖较新的图片、索引行或规范清单行。本地 SQLite schema v3 只记录同步代次、哈希、路径和有界的替换恢复意图。同路径替换只有在 SQLite 证明候选拥有该精确路径、且磁盘 SHA-256 仍与上一代次一致时才允许；否则工具保持文件不变并报告冲突。中断后，工具会利用已验证的暂存图片和 `_removed/{batch_id}/` 备份继续恢复；新暂存不可用时则恢复经过验证的旧图片。具体操作和安全恢复流程见 [`local_sync/README_ZH.md`](local_sync/README_ZH.md)。不要手工伪造成功回执。
 

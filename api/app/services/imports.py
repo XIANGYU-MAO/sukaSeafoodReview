@@ -22,6 +22,7 @@ from app.models import (
     AuditEvent,
     Candidate,
     CandidateImportPreview,
+    ImageOriginApproval,
     Session,
     Species,
     User,
@@ -29,10 +30,19 @@ from app.models import (
 from app.image_origins import (
     DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
     ImageOriginError,
+    normalize_exact_image_hostname,
     require_approved_image_url,
 )
-from app.schemas.imports import ImportIssue, ImportPreview, ImportResult, NormalizedCandidate
+from app.schemas.imports import (
+    ImportIssue,
+    ImportIssueGroup,
+    ImportOriginApprovalReceipt,
+    ImportPreview,
+    ImportResult,
+    NormalizedCandidate,
+)
 from app.services.auth import as_utc
+from app.services.origins import effective_image_origin_allowlist
 from app.services.sync_generation import acquire_sync_generation_lock
 from app.species_codes import is_safe_species_code
 
@@ -138,6 +148,7 @@ class RowProblem(ValueError):
     code: str
     category: str
     message: str
+    host: str | None = None
 
 
 def _now() -> datetime:
@@ -190,10 +201,45 @@ def _bounded_issue(
     code: str,
     message: str,
     blocking: bool = True,
+    host: str | None = None,
 ) -> None:
+    group = next(
+        (
+            item
+            for item in report.issue_groups
+            if (
+                item.code,
+                item.message,
+                item.blocking,
+                item.host,
+            )
+            == (code, message, blocking, host)
+        ),
+        None,
+    )
+    if group is None:
+        group = ImportIssueGroup(
+            code=code,
+            message=message,
+            blocking=blocking,
+            host=host,
+        )
+        report.issue_groups.append(group)
+    group.count += 1
+    if row is not None and len(group.sample_rows) < 10:
+        group.sample_rows.append(row)
+    elif row is not None:
+        group.omitted_rows += 1
+
     if len(report.issues) < MAX_ISSUE_DETAILS:
         report.issues.append(
-            ImportIssue(row=row, code=code, message=message, blocking=blocking)
+            ImportIssue(
+                row=row,
+                code=code,
+                message=message,
+                blocking=blocking,
+                host=host,
+            )
         )
         return
     report.issues_truncated = True
@@ -202,7 +248,11 @@ def _bounded_issue(
         for index in range(len(report.issues) - 1, -1, -1):
             if not report.issues[index].blocking:
                 report.issues[index] = ImportIssue(
-                    row=row, code=code, message=message, blocking=True
+                    row=row,
+                    code=code,
+                    message=message,
+                    blocking=True,
+                    host=host,
                 )
                 break
 
@@ -269,6 +319,10 @@ def _normalize_url(value: str | None, *, optional: bool = False) -> str | None:
             )
         ):
             raise RowProblem("UNSAFE_URL", "missing_urls", "URL host is malformed")
+        if ascii_host.endswith(".invalid"):
+            raise RowProblem(
+                "UNSAFE_URL", "missing_urls", "Reserved invalid URL hosts are forbidden"
+            )
         hostname = ascii_host
     host = hostname.lower()
     if ":" in host:
@@ -420,13 +474,20 @@ def normalize_legacy_row(
     else:
         preview_url = original_url = image_url
 
-    try:
-        require_approved_image_url(preview_url, image_origin_allowlist)
-        require_approved_image_url(original_url, image_origin_allowlist)
-    except ImageOriginError as exc:
-        raise RowProblem(
-            "UNSAFE_URL", "missing_urls", "Image origin is not approved"
-        ) from exc
+    for candidate_url in (preview_url, original_url):
+        try:
+            require_approved_image_url(candidate_url, image_origin_allowlist)
+        except ImageOriginError as exc:
+            message = str(exc)
+            if message == "image origin is not approved":
+                hostname = (urlsplit(candidate_url).hostname or "").rstrip(".").lower()
+                raise RowProblem(
+                    "UNAPPROVED_IMAGE_HOST",
+                    "missing_urls",
+                    "Image origin is not approved",
+                    hostname,
+                ) from exc
+            raise RowProblem("UNSAFE_URL", "missing_urls", message) from exc
 
     creator = _normalize_human_text(row.get("creator"), "creator") or None
     license_value = _normalize_license(row.get("license"))
@@ -511,15 +572,16 @@ def normalize_legacy_row(
 
 
 def _file_error(content: bytes, code: str, message: str) -> ImportPreview:
-    return ImportPreview(
+    report = ImportPreview(
         file_sha256=_digest(content),
         parse_errors=1,
         blocking_errors=1,
         can_commit=False,
         source_counts={source: 0 for source in SUPPORTED_SOURCES},
-        issues=[ImportIssue(code=code, message=message)],
         fatal_file_code=code,
     )
+    _bounded_issue(report, row=None, code=code, message=message)
+    return report
 
 
 def _parse_candidate_csv(
@@ -607,6 +669,7 @@ def _parse_candidate_csv(
                     row=row_number,
                     code=exc.code,
                     message=exc.message,
+                    host=exc.host,
                 )
     except csv.Error:
         report.fatal_file_code = "CSV_MALFORMED"
@@ -658,7 +721,7 @@ def _classify(
     existing: list[tuple[Candidate, str]] | None = None,
 ) -> ImportPreview:
     identity_rows: dict[tuple[str, str], NormalizedCandidate] = {}
-    url_identities: dict[str, set[tuple[str, str]]] = {}
+    url_rows: dict[str, list[tuple[tuple[str, str], str]]] = {}
     existing_identity: dict[tuple[str, str], NormalizedCandidate] = {}
     relevant_state: list[dict[str, Any]] = []
 
@@ -702,7 +765,7 @@ def _classify(
             active=candidate.active,
         )
         existing_identity[identity] = normalized
-        url_identities.setdefault(canonical_existing_url, set()).add(identity)
+        url_rows.setdefault(canonical_existing_url, []).append((identity, species_code))
         relevant_state.append({"candidate": _material(normalized)})
 
     for index, row in enumerate(report.normalized_rows, start=2):
@@ -745,20 +808,6 @@ def _classify(
             continue
         identity_rows[identity] = row
 
-        canonical = _canonical_url(row.original_url)
-        other_identities = url_identities.get(canonical, set()).difference({identity})
-        if other_identities:
-            report.possible_url_duplicates += 1
-            report.warnings += 1
-            _bounded_issue(
-                report,
-                row=source_row,
-                code="POSSIBLE_URL_DUPLICATE",
-                message="Original URL is already associated with another source identity",
-                blocking=False,
-            )
-        url_identities.setdefault(canonical, set()).add(identity)
-
         if database_row is not None:
             if _material(database_row) == _material(row):
                 report.exact_duplicates += 1
@@ -779,6 +828,35 @@ def _classify(
                     message="Source identity conflicts with an existing candidate",
                 )
             continue
+
+        canonical = _canonical_url(row.original_url)
+        other_rows = [
+            (other_identity, other_species)
+            for other_identity, other_species in url_rows.get(canonical, [])
+            if other_identity != identity
+        ]
+        if any(other_species != row.species_code for _, other_species in other_rows):
+            report.conflicting_identities += 1
+            report.blocking_errors += 1
+            _bounded_issue(
+                report,
+                row=source_row,
+                code="CONFLICTING_IMAGE_SPECIES",
+                message="Original URL is already assigned to a different species",
+            )
+            continue
+        if other_rows:
+            report.url_duplicates += 1
+            report.warnings += 1
+            _bounded_issue(
+                report,
+                row=source_row,
+                code="DUPLICATE_IMAGE_URL",
+                message="Original URL is already queued for the same species and will be skipped",
+                blocking=False,
+            )
+            continue
+        url_rows.setdefault(canonical, []).append((identity, row.species_code))
         report.new_normalized_rows.append(row)
 
     report.new_rows = len(report.new_normalized_rows)
@@ -818,6 +896,9 @@ async def _db_preview(
     lock: bool = False,
     image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
 ) -> ImportPreview:
+    image_origin_allowlist = await effective_image_origin_allowlist(
+        session, image_origin_allowlist
+    )
     report = _parse_candidate_csv(
         content, image_origin_allowlist=image_origin_allowlist
     )
@@ -900,7 +981,8 @@ async def commit_candidate_csv_from_cli(
             total=report.total,
             inserted=len(records),
             skipped_exact=report.exact_duplicates,
-            possible_url_duplicates=report.possible_url_duplicates,
+            skipped_url_duplicates=report.url_duplicates,
+            skipped_blocking=0,
             file_sha256=report.file_sha256,
         )
         if records:
@@ -1037,6 +1119,93 @@ async def stage_candidate_csv(
         raise
 
 
+async def approve_import_image_origin(
+    session: AsyncSession,
+    preview_token: str,
+    hostname: str,
+    *,
+    actor_id: UUID,
+    actor_session_id: UUID,
+) -> ImportOriginApprovalReceipt:
+    try:
+        normalized_hostname = normalize_exact_image_hostname(hostname)
+    except ImageOriginError as exc:
+        raise ImportConflict("IMPORT_ORIGIN_INVALID") from exc
+
+    try:
+        await _lock_valid_mao_session(session, actor_id, actor_session_id)
+        stage = await session.scalar(
+            select(CandidateImportPreview)
+            .where(
+                CandidateImportPreview.token_digest == _token_digest(preview_token),
+                CandidateImportPreview.actor_id == actor_id,
+                CandidateImportPreview.actor_session_id == actor_session_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if stage is None:
+            raise ImportConflict("IMPORT_PREVIEW_NOT_FOUND")
+        if (
+            stage.committed_at is not None
+            or stage.content is None
+            or as_utc(stage.expires_at) <= _now()
+        ):
+            raise ImportConflict("IMPORT_PREVIEW_EXPIRED")
+        observed = any(
+            group.get("code") == "UNAPPROVED_IMAGE_HOST"
+            and group.get("host") == normalized_hostname
+            for group in stage.report_json.get("issue_groups", [])
+            if isinstance(group, dict)
+        )
+        if not observed:
+            raise ImportConflict("IMPORT_ORIGIN_NOT_IN_PREVIEW")
+        existing = await session.scalar(
+            select(ImageOriginApproval).where(
+                ImageOriginApproval.hostname == normalized_hostname
+            )
+        )
+        if existing is not None:
+            return ImportOriginApprovalReceipt(
+                hostname=normalized_hostname, created=False
+            )
+        session.add(
+            ImageOriginApproval(
+                hostname=normalized_hostname,
+                approved_by_id=actor_id,
+            )
+        )
+        session.add(
+            AuditEvent(
+                actor_id=actor_id,
+                action="IMAGE_ORIGIN_APPROVED",
+                object_type="ImageOrigin",
+                object_id=normalized_hostname,
+                reason="Approved from candidate import preview",
+                before_json=None,
+                after_json={"hostname": normalized_hostname},
+            )
+        )
+        await session.commit()
+        return ImportOriginApprovalReceipt(hostname=normalized_hostname, created=True)
+    except IntegrityError as exc:
+        await session.rollback()
+        existing = await session.scalar(
+            select(ImageOriginApproval).where(
+                ImageOriginApproval.hostname == normalized_hostname
+            )
+        )
+        if existing is not None:
+            return ImportOriginApprovalReceipt(
+                hostname=normalized_hostname, created=False
+            )
+        raise ImportConflict("IMPORT_ORIGIN_APPROVAL_CONFLICT") from exc
+    except BaseException:
+        if session.in_transaction():
+            await session.rollback()
+        raise
+
+
 def _candidate_record(species_id: UUID, row: NormalizedCandidate) -> Candidate:
     return Candidate(
         species_id=species_id,
@@ -1082,6 +1251,7 @@ async def _commit_once(
     preview_token: str,
     actor_id: UUID,
     actor_session_id: UUID,
+    skip_blocking_rows: bool,
 ) -> ImportResult:
     await acquire_sync_generation_lock(session)
     condition = (
@@ -1111,15 +1281,17 @@ async def _commit_once(
         raise ImportConflict("IMPORT_PREVIEW_STALE")
 
     current = await _db_preview(session, stage.content, lock=True)
-    if not bool(stage.report_json.get("can_commit")):
+    if not bool(stage.report_json.get("can_commit")) and not skip_blocking_rows:
         raise ImportConflict("IMPORT_PREVIEW_BLOCKED")
     if (
         current.database_fingerprint != stage.database_fingerprint
         or _safe_report(current) != stage.report_json
     ):
         raise ImportConflict("IMPORT_PREVIEW_STALE")
-    if not current.can_commit:
+    if not current.can_commit and not skip_blocking_rows:
         raise ImportConflict("IMPORT_PREVIEW_STALE")
+    if skip_blocking_rows and current.new_rows == 0:
+        raise ImportConflict("IMPORT_NO_VALID_ROWS")
 
     species = {
         record.code: record.id for record in (await session.scalars(select(Species))).all()
@@ -1131,7 +1303,8 @@ async def _commit_once(
         total=current.total,
         inserted=current.new_rows,
         skipped_exact=current.exact_duplicates,
-        possible_url_duplicates=current.possible_url_duplicates,
+        skipped_url_duplicates=current.url_duplicates,
+        skipped_blocking=current.blocking_errors if skip_blocking_rows else 0,
         file_sha256=stage.file_sha256,
     )
     session.add(
@@ -1148,7 +1321,9 @@ async def _commit_once(
                 "total": result.total,
                 "inserted": result.inserted,
                 "skipped_exact": result.skipped_exact,
-                "possible_url_duplicates": result.possible_url_duplicates,
+                "skipped_url_duplicates": result.skipped_url_duplicates,
+                "skipped_blocking": result.skipped_blocking,
+                "skip_blocking_rows": skip_blocking_rows,
             },
         )
     )
@@ -1165,11 +1340,16 @@ async def commit_candidate_csv(
     actor_id: UUID,
     *,
     actor_session_id: UUID,
+    skip_blocking_rows: bool = False,
 ) -> ImportResult:
     for attempt in range(3):
         try:
             return await _commit_once(
-                session, preview_token, actor_id, actor_session_id
+                session,
+                preview_token,
+                actor_id,
+                actor_session_id,
+                skip_blocking_rows,
             )
         except ImportConflict:
             if session.in_transaction():

@@ -69,7 +69,7 @@ class Settings:
                 raise ValueError("Trusted proxy CIDR cannot cover the full network")
         try:
             normalized_origins = normalize_image_origin_allowlist(
-                self.IMAGE_ORIGIN_ALLOWLIST
+                (*DEFAULT_IMAGE_ORIGIN_ALLOWLIST, *self.IMAGE_ORIGIN_ALLOWLIST)
             )
         except ImageOriginError as exc:
             raise ValueError(str(exc)) from exc

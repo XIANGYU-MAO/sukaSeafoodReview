@@ -12,6 +12,17 @@ class ImportIssue(BaseModel):
     code: str
     message: str
     blocking: bool = True
+    host: str | None = None
+
+
+class ImportIssueGroup(BaseModel):
+    code: str
+    message: str
+    blocking: bool
+    host: str | None = None
+    count: int = 0
+    sample_rows: list[int] = Field(default_factory=list)
+    omitted_rows: int = 0
 
 
 class NormalizedCandidate(BaseModel):
@@ -40,7 +51,7 @@ class ImportPreview(BaseModel):
     total: int = 0
     new_rows: int = 0
     exact_duplicates: int = 0
-    possible_url_duplicates: int = 0
+    url_duplicates: int = 0
     invalid_species: int = 0
     missing_urls: int = 0
     invalid_licenses: int = 0
@@ -54,6 +65,7 @@ class ImportPreview(BaseModel):
     can_commit: bool = False
     file_sha256: str
     issues: list[ImportIssue] = Field(default_factory=list)
+    issue_groups: list[ImportIssueGroup] = Field(default_factory=list)
     issues_truncated: bool = False
     omitted_issue_details: int = 0
     preview_token: str | None = None
@@ -71,11 +83,25 @@ class ImportCommitRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     preview_token: str = Field(min_length=32, max_length=512)
+    skip_blocking_rows: bool = False
+
+
+class ImportOriginApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preview_token: str = Field(min_length=32, max_length=512)
+    hostname: str = Field(min_length=1, max_length=253)
+
+
+class ImportOriginApprovalReceipt(BaseModel):
+    hostname: str
+    created: bool
 
 
 class ImportResult(BaseModel):
     total: int
     inserted: int
     skipped_exact: int
-    possible_url_duplicates: int
+    skipped_url_duplicates: int
+    skipped_blocking: int
     file_sha256: str

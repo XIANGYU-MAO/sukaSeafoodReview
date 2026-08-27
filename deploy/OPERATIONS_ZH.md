@@ -80,7 +80,7 @@ powershell -NoProfile -File deploy/scripts/import_candidates_from_windows.ps1
 powershell -NoProfile -File deploy/scripts/import_candidates_from_windows.ps1 -Commit
 ```
 
-提交命令在一个数据库事务内重新验证。随后脚本下载并读取 commit report，核对其中的 `file_sha256` 与本机 CSV 的 SHA-256 相同，并打印 `total`、`inserted`、`skipped_exact` 和 `possible_url_duplicates`。重复运行只报告 exact duplicates，不重复插入；服务器不会请求这些外部图片地址。
+提交命令在一个数据库事务内重新验证。随后脚本下载并读取 commit report，核对其中的 `file_sha256` 与本机 CSV 的 SHA-256 相同，并打印 `total`、`inserted`、`skipped_exact`、`skipped_url_duplicates` 和 `skipped_blocking`。重复运行会跳过来源身份或同鱼种原图地址重复项，不重复插入；服务器不会请求这些外部图片地址。网页后台另外支持批准预检查中观察到的精确图片主机，以及二次确认后只导入有效行。
 
 ## 批次与离线回执
 

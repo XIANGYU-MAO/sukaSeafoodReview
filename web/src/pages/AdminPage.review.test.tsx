@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 
@@ -43,6 +43,9 @@ it("guides collection through four steps with current downloads, copy, and speci
   }
   expect(screen.getByRole("link", { name: "下载采集器 ZIP" })).toHaveAttribute("href", "/sukaseafood/review/downloads/sukaseafood-collector.zip");
   expect(screen.getByRole("link", { name: "下载最新鱼种配置" })).toHaveAttribute("href", "/sukaseafood/api/v1/admin/collector/config");
+  const downloads = screen.getByRole("group", { name: "采集器下载" });
+  expect(downloads).toHaveClass("equal-action-row");
+  expect(within(downloads).getAllByRole("link")).toHaveLength(2);
   expect(screen.getByRole("list", { name: "当前启用鱼种" })).toHaveTextContent("SF001 · 测试鱼");
   await user.click(screen.getByRole("button", { name: "复制命令" }));
   expect(await screen.findByRole("status")).toHaveTextContent("命令已复制。");
@@ -58,6 +61,86 @@ it("blocks configuration download until at least one active species is available
 
   expect(screen.getByRole("button", { name: "下载最新鱼种配置" })).toBeDisabled();
   expect(screen.getByText("请先在鱼种管理中新增并启用鱼种。")).toBeInTheDocument();
+});
+
+it("switches command syntax for Unix replenishment and accepts a CSV dropped onto the upload area", async () => {
+  const fetchMock = mockAdmin((url) => url.endsWith("/admin/imports/preview") ? jsonResponse(importPreviewFixture) : undefined);
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("采集与导入");
+
+  await user.click(screen.getByRole("button", { name: "macOS / Linux" }));
+  await user.click(screen.getByRole("button", { name: "数量不足时补采" }));
+  const limit = screen.getByRole("spinbutton", { name: "每个鱼种、每个来源最多采集" });
+  fireEvent.change(limit, { target: { value: "250" } });
+  expect(screen.getByText(/python3 \.\/collect_fish_images\.py.*--max-per-species 250 --resume/)).toBeInTheDocument();
+
+  const dropped = new File(["seafood_code\nSF001"], "dropped.csv", { type: "text/csv" });
+  const dropZone = screen.getByText("把候选 CSV 拖到这里").closest(".csv-drop-zone");
+  expect(dropZone).not.toBeNull();
+  fireEvent.drop(dropZone!, { dataTransfer: { files: [dropped] } });
+  expect(screen.getByText("已选择：dropped.csv")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "预检查" }));
+  await screen.findByRole("button", { name: "提交导入" });
+  const previewCall = fetchMock.mock.calls.find(([inputValue]) => String(inputValue).endsWith("/admin/imports/preview"));
+  expect(previewCall?.[1]?.body).toBeInstanceOf(FormData);
+});
+
+it("approves an observed image host and automatically previews the retained CSV again", async () => {
+  let previewCount = 0;
+  const blocked = {
+    ...importPreviewFixture,
+    new_rows: 1,
+    can_commit: false,
+    blocking_errors: 1,
+    issues: [{ row: 2, code: "UNAPPROVED_IMAGE_HOST", message: "not approved", blocking: true, host: "data.newmuseum.org" }],
+    issue_groups: [{ code: "UNAPPROVED_IMAGE_HOST", message: "not approved", blocking: true, host: "data.newmuseum.org", count: 1, sample_rows: [2], omitted_rows: 0 }],
+  };
+  const fetchMock = mockAdmin((url) => {
+    if (url.endsWith("/admin/imports/preview")) {
+      previewCount += 1;
+      return jsonResponse(previewCount === 1 ? blocked : importPreviewFixture);
+    }
+    if (url.endsWith("/admin/imports/approve-origin")) return jsonResponse({ hostname: "data.newmuseum.org", created: true });
+  });
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("采集与导入");
+  await user.upload(screen.getByLabelText("候选 CSV 文件"), new File(["A"], "a.csv", { type: "text/csv" }));
+  await user.click(screen.getByRole("button", { name: "预检查" }));
+  await user.click(await screen.findByRole("button", { name: "批准此来源并重新预检查" }));
+
+  expect(await screen.findByRole("button", { name: "提交导入" })).toBeEnabled();
+  expect(previewCount).toBe(2);
+  const approval = fetchMock.mock.calls.find(([inputValue]) => String(inputValue).endsWith("/admin/imports/approve-origin"));
+  expect(JSON.parse(String(approval?.[1]?.body))).toEqual({ preview_token: importPreviewFixture.preview_token, hostname: "data.newmuseum.org" });
+});
+
+it("requires explicit confirmation before skipping blocking rows", async () => {
+  const blocked = {
+    ...importPreviewFixture,
+    new_rows: 1,
+    can_commit: false,
+    blocking_errors: 1,
+    issues: [{ row: 3, code: "INVALID_LICENSE", message: "invalid", blocking: true, host: null }],
+    issue_groups: [{ code: "INVALID_LICENSE", message: "invalid", blocking: true, host: null, count: 1, sample_rows: [3], omitted_rows: 0 }],
+  };
+  const fetchMock = mockAdmin((url) => {
+    if (url.endsWith("/admin/imports/preview")) return jsonResponse(blocked);
+    if (url.endsWith("/admin/imports/commit")) return jsonResponse({ total: 4, inserted: 1, skipped_exact: 1, skipped_url_duplicates: 1, skipped_blocking: 1, file_sha256: "a".repeat(64) });
+  });
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("采集与导入");
+  await user.upload(screen.getByLabelText("候选 CSV 文件"), new File(["A"], "a.csv", { type: "text/csv" }));
+  await user.click(screen.getByRole("button", { name: "预检查" }));
+  await user.click(await screen.findByRole("button", { name: "跳过阻断行并导入有效行" }));
+  expect(screen.getByText(/被跳过的行不会进入审核队列/)).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "确认跳过并导入" }));
+
+  expect(await screen.findByRole("status")).toHaveTextContent("跳过阻断行 1");
+  const commit = fetchMock.mock.calls.find(([inputValue]) => String(inputValue).endsWith("/admin/imports/commit"));
+  expect(JSON.parse(String(commit?.[1]?.body))).toEqual({ preview_token: importPreviewFixture.preview_token, skip_blocking_rows: true });
 });
 
 it("blocks configuration download when every listed species is inactive", async () => {
@@ -212,7 +295,7 @@ it("aborts preview A when B is selected and only commits B's in-memory token", a
       signals.push(init?.signal as AbortSignal);
       return previews === 1 ? previewA.promise : jsonResponse({ ...importPreviewFixture, preview_token: tokenB });
     }
-    if (url.endsWith("/admin/imports/commit")) return jsonResponse({ total: 4, inserted: 2, skipped_exact: 1, possible_url_duplicates: 1, file_sha256: "a".repeat(64) });
+    if (url.endsWith("/admin/imports/commit")) return jsonResponse({ total: 4, inserted: 2, skipped_exact: 1, skipped_url_duplicates: 1, skipped_blocking: 0, file_sha256: "a".repeat(64) });
   });
   const user = userEvent.setup();
   renderWithAuth(<App />, "/admin");
@@ -228,7 +311,7 @@ it("aborts preview A when B is selected and only commits B's in-memory token", a
   await act(async () => previewA.resolve(jsonResponse(importPreviewFixture)));
 
   const commit = fetchMock.mock.calls.find(([inputValue]) => String(inputValue).endsWith("/admin/imports/commit"));
-  expect(JSON.parse(String(commit?.[1]?.body))).toEqual({ preview_token: tokenB });
+  expect(JSON.parse(String(commit?.[1]?.body))).toEqual({ preview_token: tokenB, skip_blocking_rows: false });
 });
 
 it("locks file ownership while commit A is pending and applies its completion exactly once", async () => {
@@ -264,7 +347,7 @@ it("locks file ownership while commit A is pending and applies its completion ex
   expect(commits).toBe(1);
   expect(previews).toBe(1);
 
-  await act(async () => committed.resolve(jsonResponse({ total: 4, inserted: 2, skipped_exact: 1, possible_url_duplicates: 1, file_sha256: "a".repeat(64) })));
+  await act(async () => committed.resolve(jsonResponse({ total: 4, inserted: 2, skipped_exact: 1, skipped_url_duplicates: 1, skipped_blocking: 0, file_sha256: "a".repeat(64) })));
   expect(await screen.findByRole("status")).toHaveTextContent("导入完成：新增 2");
   expect(commits).toBe(1);
   expect(previews).toBe(1);
@@ -288,7 +371,7 @@ it("ignores a pending import commit completion after unmount", async () => {
   await waitFor(() => expect(commits).toBe(1));
   rendered.unmount();
 
-  await act(async () => committed.resolve(jsonResponse({ total: 4, inserted: 2, skipped_exact: 1, possible_url_duplicates: 1, file_sha256: "a".repeat(64) })));
+  await act(async () => committed.resolve(jsonResponse({ total: 4, inserted: 2, skipped_exact: 1, skipped_url_duplicates: 1, skipped_blocking: 0, file_sha256: "a".repeat(64) })));
   expect(commits).toBe(1);
   expect(document.body).not.toHaveTextContent("导入完成");
 });

@@ -23,6 +23,7 @@ from app.models import (
     AuditEvent,
     Candidate,
     CandidateImportPreview,
+    ImageOriginApproval,
     Review,
     Session,
     Species,
@@ -361,6 +362,44 @@ def test_preview_blocks_unsafe_urls_invalid_licenses_and_sources(changes, field,
     assert preview.issues[0].code == code
 
 
+def test_public_https_unknown_host_is_an_approvable_group_not_an_unsafe_url():
+    rows = [
+        valid_row(
+            source_dataset="GBIF",
+            source_record_id=f"unknown-host-{number}",
+            image_url=f"https://data.newmuseum.org/media/{number}",
+        )
+        for number in range(1, 4)
+    ]
+
+    preview = preview_candidate_csv(csv_bytes(rows))
+
+    assert preview.blocking_errors == 3
+    assert preview.missing_urls == 3
+    assert len(preview.issue_groups) == 1
+    group = preview.issue_groups[0]
+    assert group.model_dump(mode="json") == {
+        "code": "UNAPPROVED_IMAGE_HOST",
+        "message": "Image origin is not approved",
+        "blocking": True,
+        "host": "data.newmuseum.org",
+        "count": 3,
+        "sample_rows": [2, 3, 4],
+        "omitted_rows": 0,
+    }
+    assert all(issue.host == "data.newmuseum.org" for issue in preview.issues)
+
+
+def test_intrinsically_unsafe_url_has_no_approvable_host():
+    preview = preview_candidate_csv(
+        csv_bytes([valid_row(image_url="https://user:secret@example.test/fish.jpg")])
+    )
+
+    assert preview.issues[0].code == "UNSAFE_URL"
+    assert preview.issues[0].host is None
+    assert preview.issue_groups[0].host is None
+
+
 def test_issue_details_are_bounded_while_counts_remain_complete():
     preview = preview_candidate_csv(
         csv_bytes(
@@ -373,6 +412,9 @@ def test_issue_details_are_bounded_while_counts_remain_complete():
     assert len(preview.issues) == 100
     assert preview.issues_truncated is True
     assert preview.omitted_issue_details == 50
+    assert preview.issue_groups[0].count == 150
+    assert preview.issue_groups[0].sample_rows == list(range(2, 12))
+    assert preview.issue_groups[0].omitted_rows == 140
 
 
 def test_final_normalized_values_fit_columns_and_reject_controls():
@@ -486,9 +528,10 @@ def test_db_preview_classifies_internal_exact_conflict_and_url_duplicates(settin
     assert exact_report.can_commit is True
     assert conflict_report.conflicting_identities == 1
     assert conflict_report.can_commit is False
-    assert url_report.new_rows == 2
-    assert url_report.possible_url_duplicates == 1
+    assert url_report.new_rows == 1
+    assert url_report.url_duplicates == 1
     assert url_report.can_commit is True
+    assert any(issue.code == "DUPLICATE_IMAGE_URL" for issue in url_report.issues)
 
 
 def test_db_preview_classifies_existing_exact_and_url_duplicates(settings):
@@ -517,10 +560,31 @@ def test_db_preview_classifies_existing_exact_and_url_duplicates(settings):
             await dry_run_candidate_csv(db, url_content),
         )
 
-    exact, possible = asyncio.run(run_with_session(settings, reports))
+    exact, duplicate = asyncio.run(run_with_session(settings, reports))
 
     assert (exact.new_rows, exact.exact_duplicates, exact.can_commit) == (0, 1, True)
-    assert (possible.new_rows, possible.possible_url_duplicates, possible.can_commit) == (1, 1, True)
+    assert (duplicate.new_rows, duplicate.url_duplicates, duplicate.can_commit) == (0, 1, True)
+
+
+def test_db_preview_blocks_one_image_url_assigned_to_different_species(settings):
+    seed_import_database(settings)
+    first = valid_row(seafood_code="SF001")
+    conflicting_species = valid_row(
+        seafood_code="SF002",
+        source_record_id="obs:101/photo:201",
+        image_url=first["image_url"],
+        source_url="https://www.inaturalist.org/observations/101",
+    )
+
+    async def operation(db):
+        return await dry_run_candidate_csv(db, csv_bytes([first, conflicting_species]))
+
+    report = asyncio.run(run_with_session(settings, operation))
+
+    assert report.new_rows == 1
+    assert report.conflicting_identities == 1
+    assert report.can_commit is False
+    assert any(issue.code == "CONFLICTING_IMAGE_SPECIES" for issue in report.issues)
 
 
 def test_staged_preview_binds_digest_actor_expiry_and_mutates_no_candidates_or_audit(settings):
@@ -631,7 +695,8 @@ def test_commit_inserts_all_candidates_with_null_assignments_one_bounded_audit(s
         "total": 4,
         "inserted": 4,
         "skipped_exact": 0,
-        "possible_url_duplicates": 0,
+        "skipped_url_duplicates": 0,
+        "skipped_blocking": 0,
         "file_sha256": hashlib.sha256(fixture_bytes()).hexdigest(),
     }
     assert len(candidates) == 4
@@ -734,6 +799,48 @@ def test_commit_refuses_blocking_preview_and_stale_file_or_database_state(settin
     asyncio.run(attempt(stale_db.preview_token, "IMPORT_PREVIEW_STALE"))
     assert asyncio.run(count_rows(settings, Candidate)) == 1
     assert asyncio.run(count_rows(settings, AuditEvent)) == 0
+
+
+def test_commit_can_explicitly_skip_blocking_rows_and_import_valid_rows(settings):
+    seed = seed_import_database(settings)
+    content = csv_bytes(
+        [
+            valid_row(source_record_id="valid-row"),
+            valid_row(source_record_id="blocked-row", license="ARR"),
+        ]
+    )
+
+    async def operation(db):
+        preview = await stage_candidate_csv(
+            db,
+            content,
+            actor_id=seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+            filename="mixed.csv",
+        )
+        with pytest.raises(ImportConflict) as caught:
+            await commit_candidate_csv(
+                db,
+                preview.preview_token,
+                seed.user_ids["Mao"],
+                actor_session_id=seed.session_ids["Mao"],
+            )
+        assert caught.value.code == "IMPORT_PREVIEW_BLOCKED"
+        result = await commit_candidate_csv(
+            db,
+            preview.preview_token,
+            seed.user_ids["Mao"],
+            actor_session_id=seed.session_ids["Mao"],
+            skip_blocking_rows=True,
+        )
+        return preview, result
+
+    preview, result = asyncio.run(run_with_session(settings, operation))
+
+    assert (preview.new_rows, preview.blocking_errors, preview.can_commit) == (1, 1, False)
+    assert result.inserted == 1
+    assert result.skipped_blocking == 1
+    assert asyncio.run(count_rows(settings, Candidate)) == 1
 
 
 def test_successful_commit_retry_returns_exact_stored_result_without_new_writes(settings):
@@ -879,6 +986,103 @@ def test_preview_api_requires_initialized_mao_and_csrf_and_never_mutates_candida
     assert success.json()["preview_token"]
     assert success.json()["new_rows"] == 4
     assert asyncio.run(count_rows(settings, Candidate)) == 0
+    assert asyncio.run(count_rows(settings, AuditEvent)) == 0
+
+
+def test_mao_approves_host_from_own_preview_then_same_csv_passes(settings):
+    seed = seed_import_database(settings)
+    content = csv_bytes(
+        [
+            valid_row(
+                source_dataset="GBIF",
+                source_record_id=f"museum-{number}",
+                image_url=f"https://data.newmuseum.org/media/{number}",
+            )
+            for number in range(2)
+        ]
+    )
+
+    with TestClient(create_app(settings)) as client:
+        first = client.post(
+            "/v1/admin/imports/preview",
+            files={"file": ("museum.csv", content, "text/csv")},
+            headers=admin_headers(seed, csrf=True),
+        )
+        approval = client.post(
+            "/v1/admin/imports/approve-origin",
+            json={
+                "preview_token": first.json()["preview_token"],
+                "hostname": "DATA.NEWMUSEUM.ORG.",
+            },
+            headers=admin_headers(seed, csrf=True),
+        )
+        repeated = client.post(
+            "/v1/admin/imports/approve-origin",
+            json={
+                "preview_token": first.json()["preview_token"],
+                "hostname": "data.newmuseum.org",
+            },
+            headers=admin_headers(seed, csrf=True),
+        )
+        second = client.post(
+            "/v1/admin/imports/preview",
+            files={"file": ("museum.csv", content, "text/csv")},
+            headers=admin_headers(seed, csrf=True),
+        )
+
+    assert first.status_code == 200
+    assert first.json()["issue_groups"][0]["host"] == "data.newmuseum.org"
+    assert approval.status_code == 200
+    assert approval.json() == {"hostname": "data.newmuseum.org", "created": True}
+    assert repeated.json() == {"hostname": "data.newmuseum.org", "created": False}
+    assert second.status_code == 200
+    assert second.json()["blocking_errors"] == 0
+    assert second.json()["new_rows"] == 2
+    assert second.json()["can_commit"] is True
+    origins = asyncio.run(load_all(settings, ImageOriginApproval))
+    audits = asyncio.run(load_all(settings, AuditEvent))
+    assert [origin.hostname for origin in origins] == ["data.newmuseum.org"]
+    assert [event.action for event in audits] == ["IMAGE_ORIGIN_APPROVED"]
+
+
+def test_origin_approval_rejects_unobserved_host_and_non_admin(settings):
+    seed = seed_import_database(settings)
+    content = csv_bytes(
+        [
+            valid_row(
+                source_dataset="GBIF",
+                image_url="https://data.newmuseum.org/media/one",
+            )
+        ]
+    )
+
+    with TestClient(create_app(settings)) as client:
+        preview = client.post(
+            "/v1/admin/imports/preview",
+            files={"file": ("museum.csv", content, "text/csv")},
+            headers=admin_headers(seed, csrf=True),
+        ).json()
+        unobserved = client.post(
+            "/v1/admin/imports/approve-origin",
+            json={
+                "preview_token": preview["preview_token"],
+                "hostname": "other.example.org",
+            },
+            headers=admin_headers(seed, csrf=True),
+        )
+        reviewer = client.post(
+            "/v1/admin/imports/approve-origin",
+            json={
+                "preview_token": preview["preview_token"],
+                "hostname": "data.newmuseum.org",
+            },
+            headers=admin_headers(seed, "Hassan", csrf=True),
+        )
+
+    assert unobserved.status_code == 409
+    assert unobserved.json()["detail"] == {"code": "IMPORT_ORIGIN_NOT_IN_PREVIEW"}
+    assert reviewer.status_code == 403
+    assert asyncio.run(count_rows(settings, ImageOriginApproval)) == 0
     assert asyncio.run(count_rows(settings, AuditEvent)) == 0
 
 
@@ -1203,7 +1407,7 @@ def test_real_1221_manifest_dry_run_has_exact_counts_and_no_writes(settings, tmp
         "SF005": 245,
     }
     assert "preview_token" not in report
-    assert report["possible_url_duplicates"] == 247
+    assert report["url_duplicates"] == 247
     assert report["warnings"] == 262
     assert len(report["issues"]) == 100
     assert report["issues_truncated"] is True

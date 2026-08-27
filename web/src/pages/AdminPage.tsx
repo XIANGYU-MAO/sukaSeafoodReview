@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 
 import { CandidatesTab } from "../admin/CandidatesTab";
 import { ExportsTab } from "../admin/ExportsTab";
@@ -7,19 +7,34 @@ import { ProgressTab } from "../admin/ProgressTab";
 import { ReviewsTab } from "../admin/ReviewsTab";
 import { SpeciesTab } from "../admin/SpeciesTab";
 import { UsersTab } from "../admin/UsersTab";
-import { useAdminQuery } from "../admin/common";
+import { useAdminQuery, type AdminTabProps } from "../admin/common";
 import { useSpeciesDirectory } from "../admin/directory";
 import { parseAdminSources, parseAdminUsers } from "../admin/types";
 
-const TABS = [
-  ["progress", "审核进度", ProgressTab],
-  ["candidates", "候选图片", CandidatesTab],
-  ["species", "鱼种管理", SpeciesTab],
-  ["reviews", "审核历史", ReviewsTab],
-  ["imports", "采集与导入", ImportsTab],
-  ["exports", "训练集同步", ExportsTab],
-  ["users", "账号", UsersTab],
-] as const;
+type TabDefinition = readonly [key: string, label: string, component: ComponentType<AdminTabProps>];
+type TabGroup = { key: string; label: string; tabs: readonly TabDefinition[] };
+
+const TAB_GROUPS = [
+  { key: "review", label: "审核工作", tabs: [
+    ["progress", "审核进度", ProgressTab],
+    ["candidates", "候选图片", CandidatesTab],
+    ["reviews", "审核历史", ReviewsTab],
+  ] },
+  { key: "collection", label: "鱼种与采集", tabs: [
+    ["species", "鱼种管理", SpeciesTab],
+    ["imports", "采集与导入", ImportsTab],
+  ] },
+  { key: "training", label: "训练数据", tabs: [
+    ["exports", "训练集同步", ExportsTab],
+  ] },
+  { key: "system", label: "系统管理", tabs: [
+    ["users", "账号", UsersTab],
+  ] },
+] as const satisfies readonly TabGroup[];
+const TABS = TAB_GROUPS.reduce<TabDefinition[]>((tabs, group) => {
+  tabs.push(...group.tabs);
+  return tabs;
+}, []);
 const EMPTY_USERS: never[] = [];
 const EMPTY_SPECIES: never[] = [];
 const EMPTY_SOURCES: string[] = [];
@@ -56,25 +71,33 @@ export function AdminPage({ csrfToken, retryBootstrap }: { csrfToken: string; re
     sources: sourcesQuery.data?.sources ?? EMPTY_SOURCES,
     directoriesUnavailable: usersQuery.unavailable || speciesQuery.unavailable || sourcesQuery.unavailable,
     refreshDirectories,
-    openSpecies: () => select(2),
+    openSpecies: () => select(TABS.findIndex(([key]) => key === "species")),
   };
 
   return <main className="admin-workspace" lang="zh-CN">
     <div className="admin-heading"><p className="eyebrow">SukaSeafood</p><h1>管理后台</h1><p>管理共享审核、目录、导入和本地训练集同步。</p></div>
     {usersQuery.error || speciesQuery.error || sourcesQuery.error ? <div role="alert" className="notice notice--error">管理选项加载失败。<button className="text-button" type="button" onClick={refreshDirectories}>重试</button></div> : null}
     <div className="admin-tabs" role="tablist" aria-label="后台管理功能">
-      {TABS.map(([key, label], index) => <button
-        key={key}
-        ref={(node) => { tabRefs.current[index] = node; }}
-        id={`admin-tab-${key}`}
-        type="button"
-        role="tab"
-        aria-selected={active === index}
-        aria-controls={`admin-panel-${key}`}
-        tabIndex={active === index ? 0 : -1}
-        onClick={() => select(index)}
-        onKeyDown={(event) => onKeyDown(event, index)}
-      >{label}</button>)}
+      {TAB_GROUPS.map((group) => <div key={group.key} className="admin-tab-group" role="group" aria-label={group.label}>
+        <span className="admin-tab-group__label">{group.label}</span>
+        <div className="admin-tab-group__tabs">
+          {group.tabs.map(([key, label]) => {
+            const index = TABS.findIndex(([tabKey]) => tabKey === key);
+            return <button
+              key={key}
+              ref={(node) => { tabRefs.current[index] = node; }}
+              id={`admin-tab-${key}`}
+              type="button"
+              role="tab"
+              aria-selected={active === index}
+              aria-controls={`admin-panel-${key}`}
+              tabIndex={active === index ? 0 : -1}
+              onClick={() => select(index)}
+              onKeyDown={(event) => onKeyDown(event, index)}
+            >{label}</button>;
+          })}
+        </div>
+      </div>)}
     </div>
     {TABS.map(([key, label, Component], index) => visited.has(index) ? <div
       key={key}

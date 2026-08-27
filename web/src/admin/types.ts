@@ -104,17 +104,18 @@ export interface AdminReviewItem {
 }
 export interface AdminReviewList { total: number; items: AdminReviewItem[] }
 
-export interface ImportIssue { row: number | null; code: string; message: string; blocking: boolean }
+export interface ImportIssue { row: number | null; code: string; message: string; blocking: boolean; host: string | null }
+export interface ImportIssueGroup { code: string; message: string; blocking: boolean; host: string | null; count: number; sample_rows: number[]; omitted_rows: number }
 export interface ImportPreview {
-  total: number; new_rows: number; exact_duplicates: number; possible_url_duplicates: number;
+  total: number; new_rows: number; exact_duplicates: number; url_duplicates: number;
   invalid_species: number; missing_urls: number; invalid_licenses: number; invalid_sources: number;
   conflicting_identities: number; parse_errors: number; warnings: number;
   source_counts: Record<string, number>; species_counts: Record<string, number>;
-  blocking_errors: number; can_commit: boolean; file_sha256: string; issues: ImportIssue[];
+  blocking_errors: number; can_commit: boolean; file_sha256: string; issues: ImportIssue[]; issue_groups: ImportIssueGroup[];
   issues_truncated: boolean; omitted_issue_details: number; preview_token: string | null;
 }
 export interface ImportResult {
-  total: number; inserted: number; skipped_exact: number; possible_url_duplicates: number; file_sha256: string;
+  total: number; inserted: number; skipped_exact: number; skipped_url_duplicates: number; skipped_blocking: number; file_sha256: string;
 }
 
 export interface ExportBatch {
@@ -267,13 +268,14 @@ export function parseProgress(value: unknown): ProgressResponse { return parsePr
 export function parseImportPreview(value: unknown): ImportPreview {
   try {
     const root = object(value);
-    const countKeys = ["total", "new_rows", "exact_duplicates", "possible_url_duplicates", "invalid_species", "missing_urls", "invalid_licenses", "invalid_sources", "conflicting_identities", "parse_errors", "warnings", "blocking_errors", "omitted_issue_details"] as const;
+    const countKeys = ["total", "new_rows", "exact_duplicates", "url_duplicates", "invalid_species", "missing_urls", "invalid_licenses", "invalid_sources", "conflicting_identities", "parse_errors", "warnings", "blocking_errors", "omitted_issue_details"] as const;
     const counts = Object.fromEntries(countKeys.map((key) => [key, integer(root[key])])) as unknown as Pick<ImportPreview, typeof countKeys[number]>;
-    const issues = array(root.issues, 100).map((entry) => { const item = object(entry); exact(item, ["row", "code", "message", "blocking"]); return { row: item.row === null ? null : positive(item.row), code: enumCode(item.code), message: text(item.message, 500), blocking: bool(item.blocking) }; });
+    const issues = array(root.issues, 100).map((entry) => { const item = object(entry); exact(item, ["row", "code", "message", "blocking", "host"]); return { row: item.row === null ? null : positive(item.row), code: enumCode(item.code), message: text(item.message, 500), blocking: bool(item.blocking), host: item.host === null ? null : text(item.host, 253) }; });
+    const issueGroups = array(root.issue_groups, 100).map((entry) => { const item = object(entry); exact(item, ["code", "message", "blocking", "host", "count", "sample_rows", "omitted_rows"]); return { code: enumCode(item.code), message: text(item.message, 500), blocking: bool(item.blocking), host: item.host === null ? null : text(item.host, 253), count: positive(item.count), sample_rows: array(item.sample_rows, 10).map(positive), omitted_rows: integer(item.omitted_rows) }; });
     const token = root.preview_token === null ? null : text(root.preview_token, 512, 32);
     const preview = {
       ...counts, source_counts: countMap(root.source_counts), species_counts: countMap(root.species_counts), can_commit: bool(root.can_commit),
-      file_sha256: sha(root.file_sha256), issues, issues_truncated: bool(root.issues_truncated), preview_token: token,
+      file_sha256: sha(root.file_sha256), issues, issue_groups: issueGroups, issues_truncated: bool(root.issues_truncated), preview_token: token,
     } as ImportPreview;
     if (preview.can_commit && !preview.preview_token) fail();
     if (preview.issues_truncated !== (preview.omitted_issue_details > 0)) fail();
@@ -281,11 +283,11 @@ export function parseImportPreview(value: unknown): ImportPreview {
   } catch { throw new Error("导入预检查响应无效"); }
 }
 
-export function parseImportResult(value: unknown, expected: ImportPreview): ImportResult {
+export function parseImportResult(value: unknown, expected: ImportPreview, skipBlockingRows = false): ImportResult {
   try {
-    const root = object(value); exact(root, ["total", "inserted", "skipped_exact", "possible_url_duplicates", "file_sha256"]);
-    const result = { total: integer(root.total), inserted: integer(root.inserted), skipped_exact: integer(root.skipped_exact), possible_url_duplicates: integer(root.possible_url_duplicates), file_sha256: sha(root.file_sha256) };
-    if (result.total !== expected.total || result.inserted !== expected.new_rows || result.skipped_exact !== expected.exact_duplicates || result.possible_url_duplicates !== expected.possible_url_duplicates || result.file_sha256 !== expected.file_sha256) fail();
+    const root = object(value); exact(root, ["total", "inserted", "skipped_exact", "skipped_url_duplicates", "skipped_blocking", "file_sha256"]);
+    const result = { total: integer(root.total), inserted: integer(root.inserted), skipped_exact: integer(root.skipped_exact), skipped_url_duplicates: integer(root.skipped_url_duplicates), skipped_blocking: integer(root.skipped_blocking), file_sha256: sha(root.file_sha256) };
+    if (result.total !== expected.total || result.inserted !== expected.new_rows || result.skipped_exact !== expected.exact_duplicates || result.skipped_url_duplicates !== expected.url_duplicates || result.skipped_blocking !== (skipBlockingRows ? expected.blocking_errors : 0) || result.file_sha256 !== expected.file_sha256) fail();
     return result;
   } catch { throw new Error("导入结果无效"); }
 }

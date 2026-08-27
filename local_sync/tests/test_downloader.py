@@ -217,6 +217,22 @@ def test_retries_transport_failures(http, fake_sleep, valid_jpeg, tmp_path, fail
     assert_bounded_wait(fake_sleep, 10.0)
 
 
+def test_server_exported_exact_origin_is_used_for_download(http, valid_jpeg, tmp_path):
+    url = "https://data.newmuseum.org/original.jpg"
+    http.add(responses.GET, url, body=valid_jpeg, status=200)
+
+    result = download_image(
+        session(),
+        add_row(original_url=url, image_origin_allowlist=("data.newmuseum.org",)),
+        tmp_path / "museum.image",
+        policy(),
+        noop,
+        never_cancel,
+    )
+
+    assert result.byte_count == len(valid_jpeg)
+
+
 def test_404_fails_immediately_without_retry(http, fake_sleep, tmp_path):
     http.add(responses.GET, IMAGE_URL, status=404)
 

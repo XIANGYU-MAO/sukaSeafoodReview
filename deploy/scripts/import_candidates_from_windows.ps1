@@ -64,7 +64,7 @@ try {
     Invoke-Native "ssh" @($SshOptions + @($SshHost, $DryRun))
     Invoke-Native "scp" @($SshOptions + @("${SshHost}:$RemoteReport", $LocalReport))
     $Report = Get-Content -LiteralPath $LocalReport -Raw -Encoding UTF8 | ConvertFrom-Json
-    $Report | Select-Object total, species_counts, source_counts, blocking_errors, invalid_species, invalid_licenses, invalid_sources, missing_urls, exact_duplicates, possible_url_duplicates | ConvertTo-Json -Depth 5
+    $Report | Select-Object total, species_counts, source_counts, blocking_errors, invalid_species, invalid_licenses, invalid_sources, missing_urls, exact_duplicates, url_duplicates | ConvertTo-Json -Depth 5
 
     if ($Report.blocking_errors -ne 0 -or -not $Report.can_commit) {
         throw "Dry-run contains blocking or invalid rows; commit is forbidden"
@@ -78,7 +78,7 @@ try {
         if ($CommitReport.file_sha256 -ne $Sha256) {
             throw "Commit report SHA256 does not match the local CSV"
         }
-        $CommitReport | Select-Object total, inserted, skipped_exact, possible_url_duplicates | ConvertTo-Json
+        $CommitReport | Select-Object total, inserted, skipped_exact, skipped_url_duplicates, skipped_blocking | ConvertTo-Json
         Write-Output "Committed the validated candidate CSV; report: $RemoteCommitReport"
     }
     else {

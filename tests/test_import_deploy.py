@@ -23,7 +23,7 @@ def test_import_upload_uses_only_sha_path_and_requires_clean_dry_run_for_commit(
     assert "--commit" in script
     assert "$RemoteCommitReport" in script and "$LocalCommitReport" in script
     assert "$CommitReport.file_sha256 -ne $Sha256" in script
-    assert "total, inserted, skipped_exact, possible_url_duplicates" in script
+    assert "total, inserted, skipped_exact, skipped_url_duplicates, skipped_blocking" in script
     assert "1221" not in script
     assert "current_reviewer_id IS NULL" not in script
     assert "Invoke-WebRequest" not in script

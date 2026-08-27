@@ -1,78 +1,288 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { API_BASE, ApiError, request, WEB_BASE } from "../api/client";
 import { adminMutation, mutationMessage, type AdminTabProps } from "./common";
+import { HelpHint } from "./HelpHint";
 import { parseImportPreview, parseImportResult, type ImportPreview } from "./types";
 
 const ISSUE_LABELS: Record<string, string> = {
-  EXACT_DUPLICATE: "完全重复记录", POSSIBLE_URL_DUPLICATE: "可能重复的图片地址", INVALID_SPECIES: "无效鱼种",
-  MISSING_URL: "缺少图片地址", INVALID_LICENSE: "无效许可证", UNSUPPORTED_SOURCE: "不支持的来源",
-  CSV_TOO_LARGE: "CSV 文件过大", CSV_TOO_MANY_ROWS: "CSV 行数过多", CSV_INVALID_ENCODING: "CSV 编码无效",
-  CSV_INVALID_HEADER: "CSV 列名无效", CSV_MISSING_HEADERS: "CSV 缺少必要列", CSV_DUPLICATE_HEADERS: "CSV 存在重复列", CSV_MALFORMED: "CSV 格式错误",
-  CONFLICTING_SOURCE_IDENTITY: "来源身份冲突", FIELD_TOO_LONG: "字段内容过长", INVALID_CONTROL_CHARACTER: "字段包含控制字符",
-  INVALID_LICENSE_URL: "许可证地址无效", METADATA_TOO_LARGE: "元数据过大", MISSING_SOURCE_IDENTITY: "缺少来源身份",
-  UNPARSED_SOURCE_DATE: "来源日期无法解析", UNSAFE_URL: "地址不安全",
+  EXACT_DUPLICATE: "完全重复记录（自动跳过）",
+  DUPLICATE_IMAGE_URL: "同鱼种重复图片地址（自动跳过）",
+  CONFLICTING_IMAGE_SPECIES: "同一图片被分到不同鱼种",
+  UNAPPROVED_IMAGE_HOST: "图片来源待管理员批准",
+  INVALID_SPECIES: "无效鱼种",
+  MISSING_URL: "缺少图片地址",
+  INVALID_LICENSE: "无效许可证",
+  UNSUPPORTED_SOURCE: "不支持的来源",
+  CSV_TOO_LARGE: "CSV 文件过大",
+  CSV_TOO_MANY_ROWS: "CSV 行数过多",
+  CSV_INVALID_ENCODING: "CSV 编码无效",
+  CSV_INVALID_HEADER: "CSV 列名无效",
+  CSV_MISSING_HEADERS: "CSV 缺少必要列",
+  CSV_DUPLICATE_HEADERS: "CSV 存在重复列",
+  CSV_MALFORMED: "CSV 格式错误",
+  CONFLICTING_SOURCE_IDENTITY: "来源身份冲突",
+  FIELD_TOO_LONG: "字段内容过长",
+  INVALID_CONTROL_CHARACTER: "字段包含控制字符",
+  INVALID_LICENSE_URL: "许可证地址无效",
+  METADATA_TOO_LARGE: "元数据过大",
+  MISSING_SOURCE_IDENTITY: "缺少来源身份",
+  UNPARSED_SOURCE_DATE: "来源日期无法解析（不影响导入）",
+  UNSAFE_URL: "地址格式确实不安全",
 };
 
+type Confirmation = "normal" | "skip" | null;
+type CommandPlatform = "windows" | "unix";
+type CollectionMode = "initial" | "replenish";
+
 export function ImportsTab(props: AdminTabProps) {
-  const [file, setFile] = useState<File | null>(null); const [preview, setPreview] = useState<ImportPreview | null>(null); const [pending, setPending] = useState(false); const [committing, setCommitting] = useState(false); const [confirming, setConfirming] = useState(false); const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
-  const generation = useRef(0); const operationKind = useRef<"preview" | "commit" | null>(null); const mounted = useRef(true); const previewController = useRef<AbortController | null>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [pending, setPending] = useState(false);
+  const [committing, setCommitting] = useState(false);
+  const [confirmation, setConfirmation] = useState<Confirmation>(null);
+  const [dragging, setDragging] = useState(false);
+  const [platform, setPlatform] = useState<CommandPlatform>("windows");
+  const [collectionMode, setCollectionMode] = useState<CollectionMode>("initial");
+  const [maxPerSpecies, setMaxPerSpecies] = useState(100);
+  const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const generation = useRef(0);
+  const operationKind = useRef<"preview" | "commit" | null>(null);
+  const mounted = useRef(true);
+  const previewController = useRef<AbortController | null>(null);
   const packageUrl = `${WEB_BASE}downloads/sukaseafood-collector.zip`;
   const configUrl = `${API_BASE}/admin/collector/config`;
-  const command = "python .\\collect_fish_images.py --config .\\species_config.json --source all --max-per-species 100";
   const hasActiveSpecies = props.species.some((species) => species.active);
   const activeSpecies = props.species.filter((species) => species.active);
+  const command = useMemo(() => {
+    const python = platform === "windows" ? "python" : "python3";
+    const separator = platform === "windows" ? ".\\" : "./";
+    const resume = collectionMode === "replenish" ? " --resume" : "";
+    return `${python} ${separator}collect_fish_images.py --config ${separator}species_config.json --source all --max-per-species ${maxPerSpecies}${resume}`;
+  }, [collectionMode, maxPerSpecies, platform]);
+
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; generation.current += 1; previewController.current?.abort(); previewController.current = null; };
+    return () => {
+      mounted.current = false;
+      generation.current += 1;
+      previewController.current?.abort();
+      previewController.current = null;
+    };
   }, []);
-  function choose(next: File | null) { if (operationKind.current === "commit") return; generation.current += 1; previewController.current?.abort(); previewController.current = null; operationKind.current = null; setPending(false); setFile(next); setPreview(null); setConfirming(false); setNotice(null); }
-  async function runPreview() {
-    if (!file || operationKind.current !== null) return; if (!file.name.toLowerCase().endsWith(".csv")) { setNotice({ kind: "error", text: "只接受 .csv 文件。" }); return; }
-    operationKind.current = "preview"; const selectedFile = file; const owner = ++generation.current; previewController.current?.abort(); const controller = new AbortController(); previewController.current = controller;
-    const form = new FormData(); form.append("file", selectedFile); setPreview(null); setConfirming(false); setPending(true); setNotice(null);
+
+  function choose(next: File | null) {
+    if (operationKind.current === "commit") return;
+    generation.current += 1;
+    previewController.current?.abort();
+    previewController.current = null;
+    operationKind.current = null;
+    setPending(false);
+    setFile(next);
+    setPreview(null);
+    setConfirmation(null);
+    setNotice(null);
+  }
+
+  async function previewFile(selectedFile: File) {
+    if (operationKind.current !== null) return;
+    if (!selectedFile.name.toLowerCase().endsWith(".csv")) {
+      setNotice({ kind: "error", text: "只接受 .csv 文件。" });
+      return;
+    }
+    operationKind.current = "preview";
+    const owner = ++generation.current;
+    previewController.current?.abort();
+    const controller = new AbortController();
+    previewController.current = controller;
+    const form = new FormData();
+    form.append("file", selectedFile);
+    setPreview(null);
+    setConfirmation(null);
+    setPending(true);
+    setNotice(null);
     try {
-      const raw = await request<unknown>("/admin/imports/preview", { method: "POST", body: form, csrfToken: props.csrfToken, signal: controller.signal });
-      const parsed = parseImportPreview(raw); if (!mounted.current || owner !== generation.current || controller.signal.aborted || selectedFile !== file) return; setPreview(parsed); setNotice(parsed.can_commit ? null : { kind: "error", text: "预检查发现阻断问题，不能提交。" });
+      const raw = await request<unknown>("/admin/imports/preview", {
+        method: "POST",
+        body: form,
+        csrfToken: props.csrfToken,
+        signal: controller.signal,
+      });
+      const parsed = parseImportPreview(raw);
+      if (!mounted.current || owner !== generation.current || controller.signal.aborted || selectedFile !== file) return;
+      setPreview(parsed);
+      setNotice(parsed.can_commit ? null : {
+        kind: "error",
+        text: parsed.new_rows > 0
+          ? "发现阻断行：可先批准待批准来源，或明确选择跳过阻断行并导入其余有效行。"
+          : "发现阻断问题，当前没有可导入的有效行。请处理下方问题后重新预检查。",
+      });
     } catch (error) {
       if (!mounted.current || owner !== generation.current || controller.signal.aborted) return;
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) void props.retryBootstrap();
       const detail = error instanceof ApiError && typeof error.body === "object" && error.body && "detail" in error.body && typeof error.body.detail === "object" && error.body.detail ? error.body.detail as Record<string, unknown> : null;
       const code = detail && typeof detail.code === "string" ? detail.code : "";
       if (error instanceof ApiError && (error.status === 413 || error.status === 422) && detail && "report" in detail) {
-        try { const report = parseImportPreview(detail.report); if (!report.can_commit && report.preview_token === null) setPreview(report); } catch { /* Malformed reports remain opaque. */ }
+        try {
+          const report = parseImportPreview(detail.report);
+          if (!report.can_commit && report.preview_token === null) setPreview(report);
+        } catch {
+          // Malformed server reports remain opaque.
+        }
       }
       setNotice({ kind: "error", text: ISSUE_LABELS[code] ?? "预检查失败，请检查 CSV 后重试。" });
-    } finally { if (mounted.current && owner === generation.current) { operationKind.current = null; setPending(false); previewController.current = null; } }
+    } finally {
+      if (mounted.current && owner === generation.current) {
+        operationKind.current = null;
+        setPending(false);
+        previewController.current = null;
+      }
+    }
   }
-  async function commit() {
-    if (!preview?.can_commit || !preview.preview_token || operationKind.current !== null) return;
-    operationKind.current = "commit"; const owner = ++generation.current; const committedPreview = preview; setPending(true); setCommitting(true); setNotice(null);
+
+  async function runPreview() {
+    if (file) await previewFile(file);
+  }
+
+  async function approveOrigin(host: string) {
+    if (!file || !preview?.preview_token || operationKind.current !== null) return;
+    operationKind.current = "preview";
+    const selectedFile = file;
+    setPending(true);
+    setNotice(null);
+    let approved = false;
     try {
-      const raw = await adminMutation<unknown>("/admin/imports/commit", { method: "POST", body: { preview_token: committedPreview.preview_token }, csrfToken: props.csrfToken }, props.retryBootstrap);
-      const result = parseImportResult(raw, committedPreview); if (!mounted.current || owner !== generation.current) return;
-      setPreview(null); setFile(null); setConfirming(false); setNotice({ kind: "success", text: `导入完成：新增 ${result.inserted}，跳过完全重复 ${result.skipped_exact}，可能重复地址 ${result.possible_url_duplicates}。` });
+      await adminMutation<unknown>("/admin/imports/approve-origin", {
+        method: "POST",
+        body: { preview_token: preview.preview_token, hostname: host },
+        csrfToken: props.csrfToken,
+      }, props.retryBootstrap);
+      approved = true;
+    } catch (error) {
+      setNotice({ kind: "error", text: error instanceof ApiError && error.status === 409 ? "这份预检查已变化，请重新预检查。" : mutationMessage(error) });
+    } finally {
+      operationKind.current = null;
+      setPending(false);
+    }
+    if (approved && mounted.current) await previewFile(selectedFile);
+  }
+
+  async function commit(skipBlockingRows: boolean) {
+    if (!preview?.preview_token || operationKind.current !== null) return;
+    if (!skipBlockingRows && !preview.can_commit) return;
+    if (skipBlockingRows && (preview.can_commit || preview.new_rows === 0)) return;
+    operationKind.current = "commit";
+    const owner = ++generation.current;
+    const committedPreview = preview;
+    setPending(true);
+    setCommitting(true);
+    setNotice(null);
+    try {
+      const raw = await adminMutation<unknown>("/admin/imports/commit", {
+        method: "POST",
+        body: { preview_token: committedPreview.preview_token, skip_blocking_rows: skipBlockingRows },
+        csrfToken: props.csrfToken,
+      }, props.retryBootstrap);
+      const result = parseImportResult(raw, committedPreview, skipBlockingRows);
+      if (!mounted.current || owner !== generation.current) return;
+      setPreview(null);
+      setFile(null);
+      setConfirmation(null);
+      setNotice({ kind: "success", text: `导入完成：新增 ${result.inserted}，跳过完全重复 ${result.skipped_exact}，跳过同鱼种重复地址 ${result.skipped_url_duplicates}，跳过阻断行 ${result.skipped_blocking}。` });
     } catch (error) {
       if (!mounted.current || owner !== generation.current) return;
-      if (error instanceof ApiError && error.status === 409) { setPreview(null); setConfirming(false); }
+      if (error instanceof ApiError && error.status === 409) {
+        setPreview(null);
+        setConfirmation(null);
+      }
       setNotice({ kind: "error", text: error instanceof ApiError && error.status === 409 ? "预检查已过期、已使用或与当前会话/数据库不一致，请重新预检查。" : mutationMessage(error) });
-    } finally { if (mounted.current && owner === generation.current) { operationKind.current = null; setPending(false); setCommitting(false); } }
+    } finally {
+      if (mounted.current && owner === generation.current) {
+        operationKind.current = null;
+        setPending(false);
+        setCommitting(false);
+      }
+    }
   }
+
   async function copyCommand() {
-    try { await navigator.clipboard.writeText(command); setNotice({ kind: "success", text: "命令已复制。" }); }
-    catch { setNotice({ kind: "error", text: "复制失败，请手动选择命令。" }); }
+    try {
+      await navigator.clipboard.writeText(command);
+      setNotice({ kind: "success", text: "命令已复制。" });
+    } catch {
+      setNotice({ kind: "error", text: "复制失败，请手动选择命令。" });
+    }
   }
+
   const summaries = preview ? [
-    ["总行数", preview.total], ["新增", preview.new_rows], ["完全重复", preview.exact_duplicates], ["可能重复地址", preview.possible_url_duplicates], ["无效鱼种", preview.invalid_species], ["缺少地址", preview.missing_urls], ["无效许可证", preview.invalid_licenses], ["无效来源", preview.invalid_sources], ["身份冲突", preview.conflicting_identities], ["解析错误", preview.parse_errors], ["警告", preview.warnings], ["阻断问题", preview.blocking_errors],
+    ["总行数", preview.total],
+    ["新增", preview.new_rows],
+    ["完全重复", preview.exact_duplicates],
+    ["同鱼种重复地址", preview.url_duplicates],
+    ["无效鱼种", preview.invalid_species],
+    ["缺少地址", preview.missing_urls],
+    ["无效许可证", preview.invalid_licenses],
+    ["无效来源", preview.invalid_sources],
+    ["身份冲突", preview.conflicting_identities],
+    ["解析错误", preview.parse_errors],
+    ["警告", preview.warnings],
+    ["阻断问题", preview.blocking_errors],
   ] : [];
-  return <div className="admin-stack">{notice ? <div className={`notice notice--${notice.kind}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.text}</div> : null}
-    <section className="admin-card"><h3>1. 管理鱼种</h3><p>当前启用鱼种：{activeSpecies.length} 种。先维护鱼种和需要的来源覆盖值。</p>{activeSpecies.length > 0 ? <ul aria-label="当前启用鱼种">{activeSpecies.map((species) => <li key={species.id}>{species.code} · {species.name_zh}</li>)}</ul> : null}<button type="button" className="secondary-button" onClick={props.openSpecies}>前往鱼种管理</button></section>
-    <section className="admin-card"><h3>2. 准备本地采集器</h3><p>首次使用请下载采集器 ZIP；鱼种更新后下载最新配置。</p><div className="inline-actions"><a className="primary-button compact-button" href={packageUrl} download>下载采集器 ZIP</a>{hasActiveSpecies ? <a className="secondary-button" href={configUrl}>下载最新鱼种配置</a> : <button type="button" className="secondary-button" disabled>下载最新鱼种配置</button>}</div>{hasActiveSpecies ? null : <p>请先在鱼种管理中新增并启用鱼种。</p>}<p><code>{command}</code></p><button type="button" className="secondary-button" onClick={() => void copyCommand()}>复制命令</button></section>
-    <section className="admin-card"><h3>3. 本地生成 CSV</h3><p>解压 ZIP、安装 requirements.txt、保存 species_config.json 后运行上面的命令。输出文件为 collector/output/candidates.csv；补采时使用 --resume。</p></section>
-    <section className="admin-card"><h3>4. 预检查并导入</h3><p>只读取 CSV 文本进行预检查；不会在浏览器中请求任何图片地址。</p><label>候选 CSV 文件<input aria-label="候选 CSV 文件" type="file" accept=".csv,text/csv" disabled={committing} onChange={(event) => { if (operationKind.current === "commit") { event.currentTarget.value = ""; return; } choose(event.target.files?.[0] ?? null); }} /></label><button type="button" className="primary-button compact-button" disabled={!file || pending} onClick={() => void runPreview()}>{pending ? "处理中…" : "预检查"}</button>
-      {!preview && file ? <button type="button" className="primary-button compact-button" disabled>提交导入</button> : null}
-      {preview ? <section className="admin-card-subsection"><h4>预检查摘要</h4><div className="admin-stat-grid">{summaries.map(([label, count]) => <div key={label}><span>{label}</span><strong>{count}</strong><span className="admin-summary-inline">{label === "新增" || label === "可能重复地址" ? `${label}：${count}` : ""}</span></div>)}</div><div className="admin-split"><div><h4>来源数量</h4><ul>{Object.entries(preview.source_counts).map(([code, count]) => <li key={code}>{code}：{count}</li>)}</ul></div><div><h4>鱼种数量</h4><ul>{Object.entries(preview.species_counts).map(([code, count]) => <li key={code}>{code}：{count}</li>)}</ul></div></div><h4>问题明细</h4>{preview.issues.length ? <ul>{preview.issues.map((issue, index) => <li key={`${issue.row}-${issue.code}-${index}`} className={issue.blocking ? "issue-blocking" : "issue-warning"}>{issue.blocking ? "阻断" : "警告"} · {issue.row ? `第 ${issue.row} 行 · ` : ""}{ISSUE_LABELS[issue.code] ?? `问题代码 ${issue.code}`}</li>)}</ul> : <p>没有问题。</p>}{preview.issues_truncated ? <p>另有 {preview.omitted_issue_details} 条问题明细未显示。</p> : null}
-        {!confirming ? <button type="button" className="primary-button compact-button" disabled={!preview.can_commit || !preview.preview_token || pending} onClick={() => setConfirming(true)}>提交导入</button> : <div className="notice notice--error"><p>确认以单个事务提交本次预检查结果？</p><button type="button" className="danger-button" disabled={pending} onClick={() => void commit()}>确认提交导入</button><button type="button" className="secondary-button" disabled={pending} onClick={() => setConfirming(false)}>取消</button></div>}
+
+  return <div className="admin-stack">
+    {notice ? <div className={`notice notice--${notice.kind}`} role={notice.kind === "error" ? "alert" : "status"}>{notice.text}</div> : null}
+    <section className="admin-card">
+      <h3>1. 管理鱼种</h3>
+      <p>当前启用鱼种：{activeSpecies.length} 种。先维护鱼种和需要的来源覆盖值。</p>
+      {activeSpecies.length > 0 ? <ul aria-label="当前启用鱼种">{activeSpecies.map((species) => <li key={species.id}>{species.code} · {species.name_zh}</li>)}</ul> : null}
+      <button type="button" className="secondary-button" onClick={props.openSpecies}>前往鱼种管理</button>
+    </section>
+    <section className="admin-card">
+      <h3>2. 准备本地采集器</h3>
+      <p>首次使用请下载采集器 ZIP；鱼种更新后下载最新配置。</p>
+      <div className="inline-actions equal-action-row" role="group" aria-label="采集器下载">
+        <a className="primary-button compact-button" href={packageUrl} download>下载采集器 ZIP</a>
+        {hasActiveSpecies ? <a className="secondary-button" href={configUrl}>下载最新鱼种配置</a> : <button type="button" className="secondary-button" disabled>下载最新鱼种配置</button>}
+      </div>
+      {hasActiveSpecies ? null : <p>请先在鱼种管理中新增并启用鱼种。</p>}
+    </section>
+    <section className="admin-card">
+      <h3>3. 本地生成 CSV</h3>
+      <p>解压 ZIP、安装 requirements.txt，并把最新 species_config.json 放到采集器目录。</p>
+      <div className="command-options">
+        <fieldset className="command-option-group"><legend>命令格式</legend><div className="command-pill-group">
+          <button type="button" className={`pill-choice${platform === "windows" ? " pill-choice--selected" : ""}`} aria-pressed={platform === "windows"} onClick={() => setPlatform("windows")}>Windows</button>
+          <button type="button" className={`pill-choice${platform === "unix" ? " pill-choice--selected" : ""}`} aria-pressed={platform === "unix"} onClick={() => setPlatform("unix")}>macOS / Linux</button>
+        </div></fieldset>
+        <fieldset className="command-option-group"><legend>采集方式</legend><div className="command-pill-group">
+          <button type="button" className={`pill-choice${collectionMode === "initial" ? " pill-choice--selected" : ""}`} aria-pressed={collectionMode === "initial"} onClick={() => setCollectionMode("initial")}>首次采集</button>
+          <button type="button" className={`pill-choice${collectionMode === "replenish" ? " pill-choice--selected" : ""}`} aria-pressed={collectionMode === "replenish"} onClick={() => setCollectionMode("replenish")}>数量不足时补采</button>
+        </div></fieldset>
+        <div className="command-number-field"><div className="admin-field-label"><label htmlFor="collector-max">每个鱼种、每个来源最多采集</label><HelpHint context="字段" label="采集数量参数">这是每个鱼种在每个来源尝试收集的上限，不是最终保证数量。审核后不够时，调大这个数字并选择“数量不足时补采”；采集器保留旧 CSV，导入时系统也会按来源身份和原图地址自动去重。</HelpHint></div><input id="collector-max" type="number" min="1" max="10000" value={maxPerSpecies} onChange={(event) => setMaxPerSpecies(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></div>
+      </div>
+      <p className="collector-command"><code>{command}</code></p>
+      <button type="button" className="secondary-button" onClick={() => void copyCommand()}>复制命令</button>
+      <p>输出文件为 <code>output/candidates.csv</code>。审核后数量不够时，不用清空或重做：提高参数后补采，再导入新 CSV，重复图片会自动跳过。</p>
+    </section>
+    <section className="admin-card">
+      <h3>4. 预检查并导入</h3>
+      <p>只读取 CSV 文本进行预检查；不会在浏览器中请求任何图片地址。</p>
+      <div className={`csv-drop-zone${dragging ? " csv-drop-zone--active" : ""}`} onDragEnter={(event) => { event.preventDefault(); if (!committing) setDragging(true); }} onDragOver={(event) => { event.preventDefault(); }} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); if (!committing) choose(event.dataTransfer.files?.[0] ?? null); }}>
+        <label htmlFor="candidate-csv"><strong>把候选 CSV 拖到这里</strong><span>，或点击选择文件</span><small>{file ? `已选择：${file.name}` : "仅接受 .csv 文件"}</small></label>
+        <input id="candidate-csv" aria-label="候选 CSV 文件" type="file" accept=".csv,text/csv" disabled={committing} onChange={(event) => { if (operationKind.current === "commit") { event.currentTarget.value = ""; return; } choose(event.target.files?.[0] ?? null); }} />
+      </div>
+      <div className="inline-actions equal-action-row"><button type="button" className="primary-button compact-button" disabled={!file || pending} onClick={() => void runPreview()}>{pending ? "处理中…" : "预检查"}</button></div>
+      {file && (!preview || !preview.preview_token) ? <button type="button" className="primary-button compact-button" disabled>提交导入</button> : null}
+      {preview ? <section className="admin-card-subsection">
+        <h4>预检查摘要</h4>
+        <div className="admin-stat-grid">{summaries.map(([label, count]) => <div key={label}><span>{label}</span><strong>{count}</strong></div>)}</div>
+        <div className="admin-split"><div><h4>来源数量</h4><ul>{Object.entries(preview.source_counts).map(([code, count]) => <li key={code}>{code}：{count}</li>)}</ul></div><div><h4>鱼种数量</h4><ul>{Object.entries(preview.species_counts).map(([code, count]) => <li key={code}>{code}：{count}</li>)}</ul></div></div>
+        <h4>问题汇总</h4>
+        {preview.issue_groups.length ? <ul className="import-issue-groups">{preview.issue_groups.map((issue) => <li key={`${issue.code}-${issue.host ?? "none"}`} className={issue.blocking ? "issue-blocking" : "issue-warning"}><div><strong>{issue.blocking ? "阻断" : "警告"} · {ISSUE_LABELS[issue.code] ?? issue.message}</strong>{issue.host ? <span> · {issue.host}</span> : null}<span> · 共 {issue.count} 行</span>{issue.sample_rows.length ? <small>示例行：{issue.sample_rows.join("、")}{issue.omitted_rows ? `，另有 ${issue.omitted_rows} 行` : ""}</small> : null}</div>{issue.code === "UNAPPROVED_IMAGE_HOST" && issue.host && preview.preview_token ? <button type="button" className="secondary-button" disabled={pending} onClick={() => void approveOrigin(issue.host!)}>批准此来源并重新预检查</button> : null}</li>)}</ul> : <p>没有问题。</p>}
+        {confirmation === null ? <div className="inline-actions equal-action-row">
+          {preview.can_commit ? <button type="button" className="primary-button compact-button" disabled={!preview.preview_token || pending} onClick={() => setConfirmation("normal")}>提交导入</button> : null}
+          {!preview.can_commit && preview.new_rows > 0 ? <button type="button" className="danger-button" disabled={!preview.preview_token || pending} onClick={() => setConfirmation("skip")}>跳过阻断行并导入有效行</button> : null}
+        </div> : confirmation === "normal" ? <div className="notice notice--error"><p>确认以单个事务提交本次预检查结果？</p><div className="inline-actions equal-action-row"><button type="button" className="danger-button" disabled={pending} onClick={() => void commit(false)}>确认提交导入</button><button type="button" className="secondary-button" disabled={pending} onClick={() => setConfirmation(null)}>取消</button></div></div> : <div className="notice notice--error"><p>确认忽略全部阻断行，只导入上方显示的 {preview.new_rows} 行有效数据？被跳过的行不会进入审核队列。</p><div className="inline-actions equal-action-row"><button type="button" className="danger-button" disabled={pending} onClick={() => void commit(true)}>确认跳过并导入</button><button type="button" className="secondary-button" disabled={pending} onClick={() => setConfirmation(null)}>取消</button></div></div>}
       </section> : null}
     </section>
   </div>;

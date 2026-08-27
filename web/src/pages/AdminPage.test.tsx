@@ -54,7 +54,7 @@ describe("admin authorization and accessible shell", () => {
     expect(calls.some((url) => url.includes("/admin/"))).toBe(false);
   });
 
-  it("shows exactly seven fixed-Chinese tabs in English locale with roving keyboard selection", async () => {
+  it("groups exactly seven fixed-Chinese tabs by function while retaining global roving keyboard selection", async () => {
     const fetchMock = mockAdmin();
     const user = userEvent.setup();
     renderWithAuth(<App />, "/admin");
@@ -63,6 +63,14 @@ describe("admin authorization and accessible shell", () => {
     expect(await screen.findByRole("heading", { name: "管理后台" })).toBeVisible();
     expect(screen.queryByText("Mao 管理")).not.toBeInTheDocument();
     expect(await screen.findAllByRole("tab")).toHaveLength(7);
+    const reviewGroup = screen.getByRole("group", { name: "审核工作" });
+    const collectionGroup = screen.getByRole("group", { name: "鱼种与采集" });
+    const trainingGroup = screen.getByRole("group", { name: "训练数据" });
+    const systemGroup = screen.getByRole("group", { name: "系统管理" });
+    for (const label of ["审核进度", "候选图片", "审核历史"]) expect(within(reviewGroup).getByRole("tab", { name: label })).toBeVisible();
+    for (const label of ["鱼种管理", "采集与导入"]) expect(within(collectionGroup).getByRole("tab", { name: label })).toBeVisible();
+    expect(within(trainingGroup).getByRole("tab", { name: "训练集同步" })).toBeVisible();
+    expect(within(systemGroup).getByRole("tab", { name: "账号" })).toBeVisible();
     for (const label of labels) expect(screen.getByRole("tab", { name: label })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "English" }));
     for (const label of labels) expect(screen.getByRole("tab", { name: label })).toBeVisible();
@@ -200,6 +208,43 @@ describe("progress/current and candidate safety", () => {
 });
 
 describe("species and review administration", () => {
+  it("explains species table headings and create fields on hover or focus and groups equal-height form actions", async () => {
+    mockAdmin();
+    const user = userEvent.setup();
+    renderWithAuth(<App />, "/admin");
+    await openTab("鱼种管理");
+    await screen.findByText("Piscis probatio");
+
+    for (const label of ["代码", "中文名", "英文名", "学名", "排序", "候选数", "状态", "操作"]) {
+      expect(screen.getByRole("button", { name: `表头说明：${label}` })).toBeInTheDocument();
+    }
+    const scientificHeadingHelp = screen.getByRole("button", { name: "表头说明：学名" });
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    await user.hover(scientificHeadingHelp);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("拉丁学名");
+    await user.unhover(scientificHeadingHelp);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "新增鱼种" }));
+    for (const label of ["鱼种代码", "中文名", "英文名", "学名", "排序", "启用", "鱼种修改原因"]) {
+      expect(screen.getByRole("button", { name: `字段说明：${label}` })).toBeInTheDocument();
+    }
+    const scientificFieldHelp = screen.getByRole("button", { name: "字段说明：学名" });
+    fireEvent.focus(scientificFieldHelp);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("采集器");
+    fireEvent.blur(scientificFieldHelp);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+
+    await user.click(screen.getByText("高级来源配置（通常不需要填写）"));
+    for (const label of ["iNaturalist taxon ID", "GBIF taxon key", "Commons 分类", "Fish-Vista 过滤名称"]) {
+      expect(screen.getByRole("button", { name: `字段说明：${label}` })).toBeInTheDocument();
+    }
+    const actions = screen.getByRole("group", { name: "鱼种表单操作" });
+    expect(actions).toHaveClass("equal-action-row");
+    expect(within(actions).getByRole("button", { name: "创建鱼种" })).toBeInTheDocument();
+    expect(within(actions).getByRole("button", { name: "取消新增" })).toBeInTheDocument();
+  });
+
   it("edits advanced source overrides as typed values and clears an override with JSON null", async () => {
     const configured = {
       ...speciesFixture.items[0],
@@ -380,8 +425,8 @@ describe("import, export and one-time password workflows", () => {
     const file = new File(["seafood_code\nSF001"], "candidates.csv", { type: "text/csv" });
     await user.upload(screen.getByLabelText("候选 CSV 文件"), file);
     await user.click(screen.getByRole("button", { name: "预检查" }));
-    expect(await screen.findByText("新增：2")).toBeInTheDocument();
-    expect(screen.getByText("可能重复地址：1")).toBeInTheDocument();
+    expect(await screen.findByText("新增")).toBeInTheDocument();
+    expect(screen.getByText("同鱼种重复地址")).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent(importPreviewFixture.preview_token);
     const call = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/admin/imports/preview"));
     expect(call?.[1]?.body).toBeInstanceOf(FormData);
@@ -396,7 +441,7 @@ describe("import, export and one-time password workflows", () => {
     const fetchMock = mockAdmin((url, init) => {
       if (url.endsWith("/admin/imports/preview")) return jsonResponse(importPreviewFixture);
       if (url.endsWith("/admin/imports/commit") && init?.method === "POST") {
-        return jsonResponse({ total: 4, inserted: 2, skipped_exact: 1, possible_url_duplicates: 1, file_sha256: "a".repeat(64) });
+        return jsonResponse({ total: 4, inserted: 2, skipped_exact: 1, skipped_url_duplicates: 1, skipped_blocking: 0, file_sha256: "a".repeat(64) });
       }
     });
     const user = userEvent.setup();
@@ -408,7 +453,7 @@ describe("import, export and one-time password workflows", () => {
     await user.click(screen.getByRole("button", { name: "确认提交导入" }));
     expect(await screen.findByRole("status")).toHaveTextContent("导入完成：新增 2");
     const call = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/admin/imports/commit"));
-    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ preview_token: importPreviewFixture.preview_token });
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ preview_token: importPreviewFixture.preview_token, skip_blocking_rows: false });
     expect(document.body).not.toHaveTextContent(importPreviewFixture.preview_token);
   });
 

@@ -199,7 +199,7 @@ describe("production-shell integration", () => {
     expect(await screen.findByRole("heading", { name: "管理后台" })).toBeInTheDocument();
     expect(screen.queryByText("Mao 管理")).not.toBeInTheDocument();
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
-      "审核进度", "候选图片", "鱼种管理", "审核历史", "采集与导入", "训练集同步", "账号",
+      "审核进度", "候选图片", "审核历史", "鱼种管理", "采集与导入", "训练集同步", "账号",
     ]);
     expect(fetchMock.mock.calls.some(([input]) => pathOf(input).endsWith("/auth/names"))).toBe(true);
     expect(fetchMock.mock.calls.some(([input]) => pathOf(input).endsWith("/auth/login"))).toBe(true);

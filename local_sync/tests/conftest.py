@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 from pathlib import Path
 from uuid import UUID
@@ -28,6 +29,7 @@ EXPORT_COLUMNS = (
     "license",
     "license_url",
     "attribution",
+    "image_origin_allowlist",
 )
 
 BATCH_ID = UUID("11111111-1111-4111-8111-111111111111")
@@ -54,6 +56,7 @@ def valid_row(**overrides: object) -> dict[str, str]:
         "license": "CC BY 4.0",
         "license_url": "https://creativecommons.org/licenses/by/4.0/",
         "attribution": "A. Researcher / Example Catalog",
+        "image_origin_allowlist": json.dumps(["images.example.test"]),
     }
     row.update({key: str(value) for key, value in overrides.items()})
     return row

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import importlib
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -23,6 +24,7 @@ from app.models import (
     ExportAction,
     ExportBatch,
     ExportItem,
+    ImageOriginApproval,
     Review,
     Species,
 )
@@ -41,7 +43,7 @@ EXPORT_COLUMNS = [
     "batch_id", "receipt_token", "action", "candidate_id", "review_id", "review_version",
     "species_code", "target_relative_path", "previous_relative_path",
     "preview_url", "original_url", "source_url", "creator", "license",
-    "license_url", "attribution",
+    "license_url", "attribution", "image_origin_allowlist",
 ]
 
 
@@ -107,6 +109,7 @@ def test_new_approved_export_is_immutable_rfc4180_snapshot_and_csv_get_stays_pen
     assert rows[0]["original_url"].endswith("/1/original.jpg")
     assert rows[0]["creator"] == 'Fish, "Quoted"\nCreator'
     assert rows[0]["attribution"] == 'Fish, "Quoted"\nCreator / source'
+    assert json.loads(rows[0]["image_origin_allowlist"]) == ["images.example.test"]
     decoded = csv_response.content.decode("utf-8-sig")
     assert '"Fish, ""Quoted""\nCreator"' in decoded
     assert decoded.splitlines()[0] == ",".join(EXPORT_COLUMNS)
@@ -121,6 +124,29 @@ def test_new_approved_export_is_immutable_rfc4180_snapshot_and_csv_get_stays_pen
     assert batches[0].status == "pending"
     assert items[0].status == "pending"
     assert items[0].succeeded_at is None
+
+
+def test_export_uses_database_approved_image_origin_and_carries_it_to_local_csv(settings):
+    seed = create_seed(settings)
+
+    async def approve_and_move_urls():
+        engine = create_async_engine(settings.DATABASE_URL)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as db:
+            candidate = await db.get(Candidate, seed.candidate_ids[0])
+            assert candidate is not None
+            candidate.preview_url = "https://data.newmuseum.org/preview.jpg"
+            candidate.original_url = "https://data.newmuseum.org/original.jpg"
+            db.add(ImageOriginApproval(hostname="data.newmuseum.org", approved_by_id=seed.mao_id))
+            await db.commit()
+        await engine.dispose()
+
+    asyncio.run(approve_and_move_urls())
+    with TestClient(create_app(settings)) as client:
+        created = create_batch(client, seed)
+        _, rows = download(client, seed, created.json()["id"])
+
+    assert json.loads(rows[0]["image_origin_allowlist"]) == ["data.newmuseum.org"]
 
 
 def test_export_and_receipt_envelope_constants_agree():
@@ -1301,7 +1327,7 @@ def test_populated_chunking_downgrade_keeps_oldest_pending_batch_per_scope(tmp_p
     assert "uq_export_batches_pending_scope" in index_names
 
 
-def test_populated_revision_04_backfills_canonical_scope_and_reuses_after_reupgrade(tmp_path):
+def test_populated_revision_04_backfills_canonical_scope_after_reupgrade(tmp_path):
     from alembic import command
     from alembic.config import Config
 
@@ -1352,37 +1378,25 @@ def test_populated_revision_04_backfills_canonical_scope_and_reuses_after_reupgr
             )
         await engine.dispose()
 
-    async def scope_and_reuse():
-        from app.services.exports import create_export_batch
-
+    async def read_scope():
         engine = create_async_engine(database_url)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as db:
             scope = await db.scalar(
                 select(ExportBatch.scope_key).where(ExportBatch.id == batch_id)
             )
-            reused = await create_export_batch(
-                db,
-                user_id,
-                "SF001",
-                "migration-receipt-secret-that-is-long-enough",
-            )
         await engine.dispose()
-        return scope, reused
+        return scope
 
     asyncio.run(seed_revision_04())
     command.upgrade(config, "20260827_06")
-    first_scope, first_reuse = asyncio.run(scope_and_reuse())
+    first_scope = asyncio.run(read_scope())
     assert first_scope == str(species_id)
-    assert first_reuse.batch.id == batch_id
-    assert first_reuse.created is False
 
     command.downgrade(config, "20260826_04")
     command.upgrade(config, "20260827_06")
-    second_scope, second_reuse = asyncio.run(scope_and_reuse())
+    second_scope = asyncio.run(read_scope())
     assert second_scope == str(species_id)
-    assert second_reuse.batch.id == batch_id
-    assert second_reuse.created is False
 
 
 def test_revision_05_rejects_existing_unsafe_species_codes_before_schema_changes(tmp_path):

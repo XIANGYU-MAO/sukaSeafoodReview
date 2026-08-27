@@ -478,6 +478,21 @@ h1 {
   gap: 0.75rem;
 }
 
+.equal-action-row {
+  align-items: stretch;
+}
+
+.equal-action-row > :is(a, button) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 3.25rem;
+  margin-top: 0;
+  line-height: 1.2;
+  text-align: center;
+  box-sizing: border-box;
+}
+
 .candidate-card {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(22rem, 0.8fr);
@@ -994,14 +1009,37 @@ h1 {
 }
 
 .admin-tabs {
-  display: flex;
-  gap: 0.45rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 0.75rem;
   margin: 1.5rem 0;
-  overflow-x: auto;
-  padding: 0.35rem;
+  padding: 0.75rem;
   border: 1px solid rgba(7, 59, 76, 0.16);
   border-radius: 0.9rem;
   background: rgba(255, 255, 255, 0.75);
+}
+
+.admin-tab-group {
+  display: grid;
+  align-content: start;
+  gap: 0.45rem;
+  padding: 0.65rem;
+  border: 1px solid rgba(7, 59, 76, 0.12);
+  border-radius: 0.75rem;
+  background: rgba(237, 248, 246, 0.72);
+}
+
+.admin-tab-group__label {
+  color: #526c73;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
+.admin-tab-group__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
 }
 
 .admin-tabs [role="tab"] {
@@ -1013,6 +1051,110 @@ h1 {
   color: #173f49;
   background: transparent;
   font-weight: 800;
+}
+
+.admin-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 0.85rem;
+  margin: 0.85rem 0;
+}
+
+.admin-form-field {
+  display: grid;
+  gap: 0.35rem;
+  font-weight: 700;
+}
+
+.admin-field-label,
+.admin-table-heading,
+.admin-check-field {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.admin-field-label label {
+  display: inline;
+}
+
+.admin-field-label {
+  margin-bottom: 0;
+  font-weight: 700;
+}
+
+.admin-check-field {
+  width: fit-content;
+  margin: 0.85rem 0;
+}
+
+.admin-check-field .check-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: auto;
+}
+
+.admin-check-field .check-label input {
+  width: 1.15rem;
+  height: 1.15rem;
+  margin: 0;
+  padding: 0;
+}
+
+.help-hint {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-style: normal;
+}
+
+.help-hint__trigger {
+  display: inline-grid;
+  width: 1.2rem;
+  height: 1.2rem;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #6e9299;
+  border-radius: 50%;
+  color: #075d6b;
+  background: white;
+  font-size: 0.78rem;
+  font-weight: 900;
+  line-height: 1;
+  cursor: help;
+}
+
+.help-hint__trigger:hover,
+.help-hint__trigger:focus-visible {
+  border-color: #087f8c;
+  color: white;
+  background: #087f8c;
+  outline: 2px solid rgba(8, 127, 140, 0.25);
+  outline-offset: 2px;
+}
+
+.help-hint__tooltip {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  width: max-content;
+  max-width: min(18rem, calc(100vw - 2rem));
+  padding: 0.55rem 0.7rem;
+  border-radius: 0.55rem;
+  color: white;
+  background: #173f49;
+  box-shadow: 0 0.45rem 1.2rem rgba(7, 59, 76, 0.22);
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.admin-table-wrap th:last-child .help-hint__tooltip {
+  right: 0;
+  left: auto;
 }
 
 .admin-tabs [aria-selected="true"] {
@@ -1126,7 +1268,119 @@ h1 {
   padding: 0.7rem;
   border-bottom: 1px solid #c8dcde;
   text-align: left;
-  vertical-align: top;
+  vertical-align: middle;
+}
+
+.admin-table-wrap td:last-child .secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  line-height: 1.2;
+}
+
+.command-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.command-option-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.command-option-group legend {
+  margin-bottom: 0.55rem;
+  font-weight: 800;
+}
+
+.command-pill-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.command-pill-group .pill-choice {
+  flex: 1 1 8rem;
+}
+
+.command-number-field {
+  display: grid;
+  align-content: start;
+  gap: 0.45rem;
+}
+
+.collector-command {
+  overflow-x: auto;
+  padding: 0.85rem;
+  border-radius: 0.7rem;
+  background: #eaf5f3;
+  white-space: nowrap;
+}
+
+.csv-drop-zone {
+  position: relative;
+  display: grid;
+  min-height: 9rem;
+  place-items: center;
+  margin: 1rem 0;
+  padding: 1.25rem;
+  border: 2px dashed #6e9299;
+  border-radius: 1rem;
+  background: #f5fbfa;
+  text-align: center;
+  transition: border-color 140ms ease, background-color 140ms ease, transform 140ms ease;
+}
+
+.csv-drop-zone--active {
+  border-color: #087f8c;
+  background: #dcf5f0;
+  transform: scale(1.01);
+}
+
+.csv-drop-zone label {
+  display: grid;
+  gap: 0.35rem;
+  pointer-events: none;
+}
+
+.csv-drop-zone small,
+.import-issue-groups small {
+  display: block;
+  color: #526c73;
+  font-weight: 600;
+}
+
+.csv-drop-zone input[type="file"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.import-issue-groups {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0;
+  list-style: none;
+}
+
+.import-issue-groups li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem;
+  border: 1px solid currentColor;
+  border-radius: 0.7rem;
 }
 
 .admin-table-wrap th {

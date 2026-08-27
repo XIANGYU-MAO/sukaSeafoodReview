@@ -3,6 +3,7 @@ from app.models.auth import Base, Session, User
 from app.models.catalog import Candidate, Species
 from app.models.export import ExportAction, ExportBatch, ExportItem
 from app.models.imports import CandidateImportPreview
+from app.models.origins import ImageOriginApproval
 from app.models.review import Decision, IdempotencyCommand, Review, ReviewRevision
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "ExportBatch",
     "ExportItem",
     "IdempotencyCommand",
+    "ImageOriginApproval",
     "Review",
     "ReviewRevision",
     "Session",

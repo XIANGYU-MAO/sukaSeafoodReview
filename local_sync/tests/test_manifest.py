@@ -36,6 +36,7 @@ def write_lexical_manifest(
     row = valid_row()
     cells = [row[column] for column in EXPORT_COLUMNS]
     cells[EXPORT_COLUMNS.index("creator")] = creator_cell
+    cells[EXPORT_COLUMNS.index("image_origin_allowlist")] = '"[""images.example.test""]"'
     path = directory / "lexical.csv"
     path.write_bytes(
         (
@@ -467,6 +468,30 @@ def test_image_fields_require_an_approved_public_origin(
 
     with pytest.raises(ManifestError, match=field):
         load_manifest(path)
+
+
+def test_manifest_accepts_exact_image_origin_carried_by_server_export(tmp_path: Path) -> None:
+    host = "data.newmuseum.org"
+    row = valid_row(
+        preview_url=f"https://{host}/preview.jpg",
+        original_url=f"https://{host}/original.jpg",
+        image_origin_allowlist=f'["{host}"]',
+    )
+
+    manifest = load_manifest(write_manifest(tmp_path, rows=[row]))
+
+    assert manifest.image_origin_allowlist == (host,)
+
+
+def test_manifest_never_accepts_intrinsically_unsafe_origin_from_export(tmp_path: Path) -> None:
+    row = valid_row(
+        preview_url="https://private.invalid/preview.jpg",
+        original_url="https://private.invalid/original.jpg",
+        image_origin_allowlist='["private.invalid"]',
+    )
+
+    with pytest.raises(ManifestError, match="image_origin_allowlist|preview_url"):
+        load_manifest(write_manifest(tmp_path, rows=[row]))
 
 
 def test_invalid_url_port_has_no_raw_or_secret_bearing_exception_chain(

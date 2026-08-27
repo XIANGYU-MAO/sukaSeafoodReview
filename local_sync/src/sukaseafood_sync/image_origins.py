@@ -11,6 +11,7 @@ DEFAULT_IMAGE_ORIGIN_ALLOWLIST = (
     "caos.boldsystems.org",
     "cdn.floridamuseum.ufl.edu",
     "collections.nmnh.si.edu",
+    "data.nhm.ac.uk",
     "huggingface.co",
     "pictures.snsb.info",
     "specify.saiab.ac.za",
@@ -72,6 +73,16 @@ def configured_image_origin_allowlist() -> tuple[str, ...]:
     return normalized
 
 
+def normalize_exact_image_hostname(value: str) -> str:
+    host = value.strip().rstrip(".").lower()
+    if host.endswith(".invalid") or host == "invalid":
+        raise ImageOriginPolicyError("intrinsically unsafe image origin")
+    normalized = _pattern(host)
+    if normalized.startswith("."):
+        raise ImageOriginPolicyError("image origin must be an exact hostname")
+    return normalized
+
+
 def require_approved_image_url(
     value: str, allowlist: tuple[str, ...] | None = None
 ) -> str:
@@ -92,7 +103,12 @@ def require_approved_image_url(
     ):
         raise ImageOriginPolicyError("image URL must use approved HTTPS")
     host = hostname.rstrip(".").lower()
-    if host == "localhost" or host.endswith(".localhost"):
+    if (
+        host == "localhost"
+        or host.endswith(".localhost")
+        or host == "invalid"
+        or host.endswith(".invalid")
+    ):
         raise ImageOriginPolicyError("local image origins are forbidden")
     try:
         ip_address(host)

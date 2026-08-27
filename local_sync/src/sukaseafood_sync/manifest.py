@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, field
 import io
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -12,7 +13,12 @@ import unicodedata
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from .image_origins import ImageOriginPolicyError, require_approved_image_url
+from .image_origins import (
+    ImageOriginPolicyError,
+    configured_image_origin_allowlist,
+    normalize_exact_image_hostname,
+    require_approved_image_url,
+)
 
 
 EXPORT_COLUMNS = (
@@ -32,6 +38,7 @@ EXPORT_COLUMNS = (
     "license",
     "license_url",
     "attribution",
+    "image_origin_allowlist",
 )
 MAX_MANIFEST_BYTES = 20 * 1024 * 1024
 MAX_MANIFEST_ROWS = 10_000
@@ -84,6 +91,7 @@ class ManifestRow:
     license: str
     license_url: str | None = field(repr=False)
     attribution: str
+    image_origin_allowlist: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +99,7 @@ class ExportManifest:
     rows: tuple[ManifestRow, ...]
     batch_id: UUID
     receipt_token: str = field(repr=False)
+    image_origin_allowlist: tuple[str, ...] = field(default=(), repr=False)
 
 
 def _error(field_name: str, reason: str) -> ManifestError:
@@ -184,11 +193,13 @@ def _https_url(value: str, field_name: str, *, required: bool = True) -> str | N
     return checked
 
 
-def _image_url(value: str, field_name: str) -> str:
+def _image_url(
+    value: str, field_name: str, image_origin_allowlist: tuple[str, ...]
+) -> str:
     checked = _https_url(value, field_name)
     assert checked is not None
     try:
-        return require_approved_image_url(checked)
+        return require_approved_image_url(checked, image_origin_allowlist)
     except ImageOriginPolicyError as exc:
         raise _error(field_name, str(exc)) from exc
 
@@ -316,7 +327,32 @@ def _validate_action_shape(row: ManifestRow) -> None:
         raise _error(previous_field, "must be different from target_relative_path")
 
 
-def _parse_row(raw: dict[str, str], row_number: int) -> tuple[ManifestRow, str]:
+def _parse_image_origin_allowlist(value: str) -> tuple[str, ...]:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        parsed = None
+    if (
+        not isinstance(parsed, list)
+        or not parsed
+        or len(parsed) > 32
+        or any(not isinstance(item, str) for item in parsed)
+    ):
+        raise _error(
+            "image_origin_allowlist", "must be a nonempty JSON array of exact hostnames"
+        )
+    try:
+        normalized = tuple(
+            dict.fromkeys(normalize_exact_image_hostname(item) for item in parsed)
+        )
+    except ImageOriginPolicyError as exc:
+        raise _error("image_origin_allowlist", str(exc)) from exc
+    return normalized
+
+
+def _parse_row(
+    raw: dict[str, str], row_number: int
+) -> tuple[ManifestRow, str, tuple[str, ...]]:
     for field_name, value in raw.items():
         if len(value) > MAX_FIELD_CHARS:
             raise _error(field_name, f"row {row_number} exceeds the field limit")
@@ -329,6 +365,10 @@ def _parse_row(raw: dict[str, str], row_number: int) -> tuple[ManifestRow, str]:
     if action not in {"ADD", "MOVE", "REMOVE"}:
         raise _error("action", "must be exactly ADD, MOVE, or REMOVE")
     previous_raw = raw["previous_relative_path"]
+    row_origins = _parse_image_origin_allowlist(raw["image_origin_allowlist"])
+    effective_origins = tuple(
+        dict.fromkeys((*configured_image_origin_allowlist(), *row_origins))
+    )
     row = ManifestRow(
         batch_id=batch_id,
         action=action,  # type: ignore[arg-type]
@@ -344,8 +384,8 @@ def _parse_row(raw: dict[str, str], row_number: int) -> tuple[ManifestRow, str]:
             if previous_raw
             else None
         ),
-        preview_url=_image_url(raw["preview_url"], "preview_url"),
-        original_url=_image_url(raw["original_url"], "original_url"),
+        preview_url=_image_url(raw["preview_url"], "preview_url", effective_origins),
+        original_url=_image_url(raw["original_url"], "original_url", effective_origins),
         source_url=_https_url(raw["source_url"], "source_url") or "",
         creator=_bounded_text(
             raw["creator"], "creator", required=False, allow_newlines=True
@@ -362,8 +402,9 @@ def _parse_row(raw: dict[str, str], row_number: int) -> tuple[ManifestRow, str]:
             allow_newlines=True,
         )
         or "",
+        image_origin_allowlist=row_origins,
     )
-    return row, token
+    return row, token, row_origins
 
 
 def _read_manifest_bytes(path: Path) -> bytes:
@@ -465,6 +506,7 @@ def load_manifest(path: Path) -> ExportManifest:
 
     rows: list[ManifestRow] = []
     tokens: list[str] = []
+    approved_origins: set[str] = set()
     csv_failed = False
     try:
         with io.StringIO(decoded, newline="") as stream:
@@ -479,11 +521,12 @@ def load_manifest(path: Path) -> ExportManifest:
                     raise ManifestError(
                         f"CSV row {row_number} has an invalid column count"
                     )
-                parsed, token = _parse_row(
+                parsed, token, row_origins = _parse_row(
                     dict(zip(EXPORT_COLUMNS, cells, strict=True)), row_number
                 )
                 rows.append(parsed)
                 tokens.append(token)
+                approved_origins.update(row_origins)
     except csv.Error:
         csv_failed = True
     if csv_failed:
@@ -511,4 +554,9 @@ def load_manifest(path: Path) -> ExportManifest:
         seen_targets.add(folded_target)
     for row in rows:
         _validate_action_shape(row)
-    return ExportManifest(rows=tuple(rows), batch_id=batch_id, receipt_token=token)
+    return ExportManifest(
+        rows=tuple(rows),
+        batch_id=batch_id,
+        receipt_token=token,
+        image_origin_allowlist=tuple(sorted(approved_origins)),
+    )

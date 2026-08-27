@@ -124,8 +124,8 @@ def test_readmes_describe_implemented_sync_envelope_storage_and_release_truth():
     assert "YGF gateway now returns 404 for `/project`" in english
     assert "已完成生产 SSH 部署与公开验收" in chinese
     assert "production SSH deployment and public acceptance are complete" in english
-    assert "精确 16 列 CSV" in chinese
-    assert "exact 16-column CSV" in english
+    assert "精确 17 列 CSV" in chinese
+    assert "exact 17-column CSV" in english
     assert "七字段 CSV" not in chinese
     assert "seven-field CSV" not in english
 

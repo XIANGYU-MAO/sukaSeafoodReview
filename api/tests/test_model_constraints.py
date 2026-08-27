@@ -191,6 +191,7 @@ def test_initial_migration_upgrades_a_fresh_database(tmp_path):
         "export_batches",
         "export_items",
         "candidate_import_previews",
+        "image_origin_approvals",
     }
     assert expected_tables == set(inspector.get_table_names())
 
@@ -199,6 +200,17 @@ def test_initial_migration_upgrades_a_fresh_database(tmp_path):
         for constraint in inspector.get_unique_constraints("candidates")
     }
     assert ("source_dataset", "source_record_id") in candidate_uniques
+
+    origin_uniques = {
+        tuple(constraint["column_names"])
+        for constraint in inspector.get_unique_constraints("image_origin_approvals")
+    }
+    assert ("hostname",) in origin_uniques
+    assert any(
+        foreign_key["constrained_columns"] == ["approved_by_id"]
+        and foreign_key["referred_table"] == "users"
+        for foreign_key in inspector.get_foreign_keys("image_origin_approvals")
+    )
 
     review_indexes = {
         index["name"]: index for index in inspector.get_indexes("reviews")

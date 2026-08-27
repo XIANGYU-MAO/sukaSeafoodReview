@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from email.utils import parsedate_to_datetime
 import hashlib
 import os
@@ -17,7 +17,11 @@ from PIL import Image, ImageOps
 import requests
 
 from .manifest import ManifestRow
-from .image_origins import ImageOriginPolicyError, require_approved_image_url
+from .image_origins import (
+    ImageOriginPolicyError,
+    configured_image_origin_allowlist,
+    require_approved_image_url,
+)
 
 
 MIB = 1024 * 1024
@@ -52,6 +56,7 @@ class DownloadPolicy:
     timeout: tuple[float, float] = (5.0, 2.0)
     max_redirects: int = 5
     max_retry_after: float = 300.0
+    image_origin_allowlist: tuple[str, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         valid = (
@@ -162,9 +167,13 @@ def _prepare_paths(destination: Path) -> Path:
     return staging
 
 
-def _validated_https_url(candidate: str) -> str | None:
+def _validated_https_url(
+    candidate: str, image_origin_allowlist: tuple[str, ...]
+) -> str | None:
     try:
-        return require_approved_image_url(candidate)
+        return require_approved_image_url(
+            candidate, image_origin_allowlist or None
+        )
     except ImageOriginPolicyError:
         return None
 
@@ -181,7 +190,7 @@ def _request(
     while True:
         if cancel():
             raise DownloadCancelled("download cancelled")
-        current = _validated_https_url(current)
+        current = _validated_https_url(current, policy.image_origin_allowlist)
         if current is None:
             raise DownloadError("image origin rejected", code="NETWORK_ERROR")
         if current in visited:
@@ -223,12 +232,18 @@ def _request(
             )
         try:
             location_parts = urlsplit(location)
-            if location_parts.scheme and _validated_https_url(location) is None:
+            if location_parts.scheme and _validated_https_url(
+                location, policy.image_origin_allowlist
+            ) is None:
                 raise ValueError
             following = urljoin(current, location)
         except (TypeError, ValueError):
             following = None
-        current = _validated_https_url(following) if following is not None else None
+        current = (
+            _validated_https_url(following, policy.image_origin_allowlist)
+            if following is not None
+            else None
+        )
         if current is None:
             raise DownloadError("redirect target rejected", code="NETWORK_ERROR")
         redirects += 1
@@ -408,7 +423,19 @@ def download_image(
     session.trust_env = True
     if not isinstance(row, ManifestRow) or row.action != "ADD":
         raise DownloadError("download requires an ADD manifest row")
-    original_url = _validated_https_url(row.original_url)
+    effective_origins = tuple(
+        dict.fromkeys(
+            (
+                *configured_image_origin_allowlist(),
+                *policy.image_origin_allowlist,
+                *row.image_origin_allowlist,
+            )
+        )
+    )
+    effective_policy = replace(policy, image_origin_allowlist=effective_origins)
+    original_url = _validated_https_url(
+        row.original_url, effective_policy.image_origin_allowlist
+    )
     if original_url is None:
         raise DownloadError("original image URL is not safe HTTPS")
     target = Path(destination)
@@ -419,7 +446,7 @@ def download_image(
         transport_failed = False
         retry_delay: float | None = None
         try:
-            response = _request(session, original_url, policy, cancel)
+            response = _request(session, original_url, effective_policy, cancel)
             status = response.status_code
             if status in _RETRY_STATUSES:
                 retry_delay = _retry_after(response, policy)

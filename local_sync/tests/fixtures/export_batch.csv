@@ -1,4 +1,4 @@
-﻿batch_id,receipt_token,action,candidate_id,review_id,review_version,species_code,target_relative_path,previous_relative_path,preview_url,original_url,source_url,creator,license,license_url,attribution
+batch_id,receipt_token,action,candidate_id,review_id,review_version,species_code,target_relative_path,previous_relative_path,preview_url,original_url,source_url,creator,license,license_url,attribution,image_origin_allowlist
 11111111-1111-4111-8111-111111111111,test-only_batch-token_1234567890ABCDE,ADD,22222222-2222-4222-8222-222222222222,33333333-3333-4333-8333-333333333333,1,SF006,images/SF006/22222222-2222-4222-8222-222222222222.jpg,,https://images.example.test/fish/preview.jpg,https://images.example.test/fish/original.jpg,https://catalog.example.test/records/1,"Fish, ""Quoted""
 Creator",CC BY 4.0,https://creativecommons.org/licenses/by/4.0/,"Fish, ""Quoted""
-Creator / Example Catalog"
+Creator / Example Catalog","[""images.example.test""]"
