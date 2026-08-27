@@ -18,6 +18,7 @@ from app.models import (
     User,
 )
 from app.schemas.review import DecisionRequest, RejectionReason, ReviewResponse
+from app.services.sync_generation import acquire_sync_generation_lock
 
 
 class IdempotencyConflict(Exception):
@@ -96,6 +97,7 @@ async def submit_decision(
     digest = request_digest(user_id, candidate_id, payload)
 
     try:
+        await acquire_sync_generation_lock(session)
         user = await session.scalar(
             select(User).where(User.id == user_id).with_for_update()
         )

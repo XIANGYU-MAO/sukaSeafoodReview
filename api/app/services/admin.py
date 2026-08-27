@@ -61,6 +61,7 @@ from app.services.auth import (
 )
 from app.services.pool import lock_species_for_assignment
 from app.services.reviews import canonical_facts, review_snapshot
+from app.services.sync_generation import acquire_sync_generation_lock
 
 
 @dataclass(frozen=True)
@@ -380,6 +381,7 @@ async def patch_species(
     payload: SpeciesPatchRequest,
 ) -> SpeciesResponse:
     try:
+        await acquire_sync_generation_lock(session)
         species = await session.scalar(
             select(Species)
             .where(Species.id == species_id)
@@ -564,6 +566,7 @@ async def patch_candidate(
     image_origin_allowlist: tuple[str, ...] = DEFAULT_IMAGE_ORIGIN_ALLOWLIST,
 ) -> CandidateAdminResponse:
     try:
+        await acquire_sync_generation_lock(session)
         try:
             for field_name in ("preview_url", "original_url"):
                 if field_name in payload.model_fields_set:
@@ -802,6 +805,7 @@ async def edit_admin_review(
     payload: AdminReviewPatchRequest,
 ) -> ReviewResponse:
     try:
+        await acquire_sync_generation_lock(session)
         candidate_id = await session.scalar(
             select(Review.candidate_id).where(Review.id == review_id)
         )
@@ -955,6 +959,7 @@ async def release_current(
     payload: CandidateVersionReason,
 ) -> CandidateAdminResponse:
     try:
+        await acquire_sync_generation_lock(session)
         candidate = await session.scalar(
             select(Candidate)
             .where(Candidate.id == candidate_id)
@@ -1002,6 +1007,7 @@ async def transfer_current(
     payload: TransferRequest,
 ) -> CandidateAdminResponse:
     try:
+        await acquire_sync_generation_lock(session)
         target = await _lock_target(session, payload.new_reviewer_id)
         candidate = await session.scalar(
             select(Candidate)
@@ -1064,6 +1070,7 @@ async def reopen_review(
     payload: ReopenRequest,
 ) -> CandidateAdminResponse:
     try:
+        await acquire_sync_generation_lock(session)
         target = await _lock_target(session, payload.new_reviewer_id)
         candidate_id = await session.scalar(
             select(Review.candidate_id).where(Review.id == review_id)

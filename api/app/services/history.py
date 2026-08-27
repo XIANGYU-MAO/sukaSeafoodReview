@@ -18,6 +18,7 @@ from app.schemas.history import (
 from app.schemas.review import ReviewResponse, SpeciesSummary
 from app.services.admin import audited_change
 from app.services.reviews import canonical_facts, review_snapshot
+from app.services.sync_generation import acquire_sync_generation_lock
 
 
 class HistoryReviewNotFound(Exception):
@@ -173,6 +174,7 @@ async def edit_review(
     payload: HistoryEditRequest,
 ) -> ReviewResponse:
     try:
+        await acquire_sync_generation_lock(session)
         candidate_id = await session.scalar(
             select(Review.candidate_id).where(
                 Review.id == review_id, Review.reviewer_id == reviewer_id

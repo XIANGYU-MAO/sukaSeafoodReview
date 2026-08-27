@@ -33,6 +33,7 @@ from app.image_origins import (
 )
 from app.schemas.imports import ImportIssue, ImportPreview, ImportResult, NormalizedCandidate
 from app.services.auth import as_utc
+from app.services.sync_generation import acquire_sync_generation_lock
 from app.species_codes import is_safe_species_code
 
 
@@ -869,6 +870,7 @@ async def commit_candidate_csv_from_cli(
     """
 
     try:
+        await acquire_sync_generation_lock(session)
         actor = await session.scalar(
             select(User)
             .where(User.name == "Mao")
@@ -1081,6 +1083,7 @@ async def _commit_once(
     actor_id: UUID,
     actor_session_id: UUID,
 ) -> ImportResult:
+    await acquire_sync_generation_lock(session)
     condition = (
         CandidateImportPreview.token_digest == _token_digest(preview_token),
         CandidateImportPreview.actor_id == actor_id,

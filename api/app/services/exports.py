@@ -34,6 +34,7 @@ from app.image_origins import (
 )
 from app.schemas.exports import ExportBatchResponse, ReceiptItem, ReceiptResponse
 from app.services.auth import as_utc, utc_now
+from app.services.sync_generation import acquire_sync_generation_lock
 from app.species_codes import is_safe_species_code
 
 
@@ -61,6 +62,7 @@ EXPORT_MAX_BYTES = 20 * 1024 * 1024
 MAX_RECEIPT_BYTES = EXPORT_MAX_BYTES
 FAILED_ERROR_CODE = "LOCAL_DOWNLOAD_FAILED"
 KNOWN_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff", ".bmp"}
+LEGACY_UNKNOWN_FINGERPRINT = "0" * 64
 TOKEN_DOMAIN = b"sukaseafood:receipt:v1:"
 
 
@@ -139,6 +141,38 @@ def _metadata_fingerprint(candidate: Candidate, species: Species) -> str:
     )
 
 
+def _original_changed(local_item: ExportItem, candidate: Candidate) -> bool:
+    """Use retained URL truth when a legacy row has no real digest."""
+
+    if local_item.original_fingerprint == LEGACY_UNKNOWN_FINGERPRINT:
+        return local_item.original_url != candidate.original_url
+    return local_item.original_fingerprint != _original_fingerprint(candidate)
+
+
+def _metadata_changed(
+    local_item: ExportItem, candidate: Candidate, species: Species
+) -> bool:
+    """Compare the retained revision-05 snapshot when its digest is unknown."""
+
+    if local_item.metadata_fingerprint != LEGACY_UNKNOWN_FINGERPRINT:
+        return local_item.metadata_fingerprint != _metadata_fingerprint(
+            candidate, species
+        )
+    return any(
+        (
+            local_item.candidate_version != candidate.version,
+            local_item.species_code != species.code,
+            local_item.preview_url != candidate.preview_url,
+            local_item.original_url != candidate.original_url,
+            local_item.source_url != candidate.source_url,
+            local_item.creator != candidate.creator,
+            local_item.license != candidate.license,
+            local_item.license_url != candidate.license_url,
+            local_item.attribution != candidate.attribution,
+        )
+    )
+
+
 def _known_suffix(url: str) -> str:
     suffix = PurePosixPath(urlsplit(url).path).suffix.lower()
     return suffix if suffix in KNOWN_IMAGE_EXTENSIONS else ".image"
@@ -186,23 +220,20 @@ def _is_postgresql(session: AsyncSession) -> bool:
 async def _begin_creation_snapshot(session: AsyncSession) -> bool:
     """Begin a fresh coherent PostgreSQL snapshot and serialize exporters.
 
-    Authentication may already have opened a READ COMMITTED transaction on the
-    request session, so close it first.  ``LOCK TABLE`` is a PostgreSQL utility
-    command and does not acquire the MVCC snapshot; the self-conflicting SHARE
-    UPDATE EXCLUSIVE lock therefore waits for an older exporter before the
-    first data statement establishes this transaction's REPEATABLE READ view.
-    Ordinary INSERT/UPDATE/DELETE operations take ROW EXCLUSIVE and remain
-    compatible with this lock, so receipt writers are not serialized behind an
-    export snapshot.
+    Authentication may already have opened a transaction on the request
+    session, so close it first.  The common table-lock boundary is then acquired
+    before every generation/receipt writer's row locks.  Holding it for the
+    complete export transaction gives the state
+    reads a coherent writer-free cut.  Because ``LOCK TABLE`` is a utility
+    command, a waiter does not acquire its REPEATABLE READ snapshot until after
+    it owns the boundary.
     """
     if not _is_postgresql(session):
         return False
     if session.in_transaction():
         await session.commit()
     await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
-    await session.execute(
-        text("LOCK TABLE export_batches IN SHARE UPDATE EXCLUSIVE MODE")
-    )
+    await acquire_sync_generation_lock(session)
     return True
 
 
@@ -295,9 +326,7 @@ async def derive_deltas(
             else:
                 assert local_item is not None
                 previous_path = local_item.local_relative_path or local_item.target_relative_path
-                original_changed = (
-                    local_item.original_fingerprint != _original_fingerprint(candidate)
-                )
+                original_changed = _original_changed(local_item, candidate)
                 if not original_changed:
                     desired_path = _same_content_path(previous_path, species)
                 if previous_path != desired_path and not original_changed:
@@ -314,7 +343,7 @@ async def derive_deltas(
                     or local_item.review_version != current.version
                     or local_item.candidate_version != candidate.version
                     or original_changed
-                    or local_item.metadata_fingerprint != _metadata_fingerprint(candidate, species)
+                    or _metadata_changed(local_item, candidate, species)
                 ):
                     action = ExportAction.ADD
                     target_path = desired_path
@@ -454,10 +483,10 @@ async def create_export_batch(
         raise ValueError("RECEIPT_SECRET is required for exports")
     locked = False
     try:
-        # Lock order: close the authentication transaction, begin REPEATABLE
-        # READ, serialize exporters at export_batches, then expire and inspect
-        # batches. Export creation never locks candidate/review rows, so it
-        # cannot invert the mutation services' row-lock order.
+        # Lock order: close the authentication transaction, acquire the common
+        # generation boundary, serialize exporters at export_batches, then
+        # expire and inspect batches. Export creation never locks
+        # candidate/review rows, so it cannot invert writer row-lock order.
         locked = await _begin_creation_snapshot(session)
         await _expire_batches(session)
         species = None
@@ -800,6 +829,7 @@ async def apply_receipt(
     actor_id: UUID | None = None,
 ) -> ReceiptResponse:
     try:
+        await acquire_sync_generation_lock(session)
         batch = await session.scalar(
             select(ExportBatch)
             .where(ExportBatch.id == batch_id)

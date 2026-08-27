@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Candidate, Review, Species, User
 from app.schemas.review import ReviewFilters
 from app.services.auth import utc_now
+from app.services.sync_generation import acquire_sync_generation_lock
 
 
 def eligible_candidate_query(filters: ReviewFilters) -> Select[tuple[Candidate]]:
@@ -52,6 +53,7 @@ async def get_or_open_current(
     filters: ReviewFilters,
 ) -> Candidate | None:
     try:
+        await acquire_sync_generation_lock(session)
         user = await session.scalar(
             select(User).where(User.id == user_id).with_for_update()
         )

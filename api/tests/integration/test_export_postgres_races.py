@@ -41,6 +41,7 @@ pytestmark = pytest.mark.skipif(
     reason="TEST_POSTGRES_DSN is required for real PostgreSQL export races",
 )
 SECRET = "postgres-export-receipt-secret-is-unique-and-long"
+BARRIER_LOCK_KEY = 1_953_720_742
 
 
 async def create_migration_schema():
@@ -63,8 +64,9 @@ def migration_config(schema):
     api_root = Path(__file__).parents[2]
     config = Config(api_root / "alembic.ini")
     config.set_main_option("script_location", str(api_root / "alembic"))
-    config.set_main_option("sqlalchemy.url", POSTGRES_URL)
+    config.set_main_option("sqlalchemy.url", POSTGRES_URL.replace("%", "%%"))
     config.set_main_option("migration_schema", schema)
+    config.attributes["ignore_environment_database_url"] = True
     return config
 
 
@@ -82,6 +84,28 @@ def migration_engine(schema):
         cursor.close()
 
     return engine
+
+
+def test_migration_config_is_hermetic_with_percent_dsn_and_ambient_url(
+    monkeypatch,
+):
+    schema = asyncio.run(create_migration_schema())
+    scheme, authority = POSTGRES_URL.split("://", 1)
+    credentials, location = authority.rsplit("@", 1)
+    username, password = credentials.split(":", 1)
+    encoded_password = f"%{ord(password[0]):02X}{password[1:]}"
+    explicit_url = f"{scheme}://{username}:{encoded_password}@{location}"
+    monkeypatch.setitem(globals(), "POSTGRES_URL", explicit_url)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://invalid:invalid@127.0.0.1:1/invalid",
+    )
+    try:
+        config = migration_config(schema)
+        assert config.get_main_option("sqlalchemy.url") == explicit_url
+        command.upgrade(config, "head")
+    finally:
+        asyncio.run(drop_migration_schema(schema))
 
 
 async def install_update_delay(schema, table):
@@ -125,6 +149,167 @@ async def wait_for_export_batches_lock(schema, mode):
     finally:
         await engine.dispose()
     raise AssertionError(f"migration did not acquire {mode} on export_batches")
+
+
+async def wait_for_advisory_lock_counts(
+    schema, lock_key, *, granted_at_least=0, waiting_at_least=0
+):
+    engine = migration_engine(schema)
+    try:
+        for _ in range(100):
+            async with engine.connect() as connection:
+                counts = (
+                    await connection.execute(
+                        text(
+                            "SELECT "
+                            "COUNT(*) FILTER (WHERE granted), "
+                            "COUNT(*) FILTER (WHERE NOT granted) "
+                            "FROM pg_locks "
+                            "WHERE locktype = 'advisory' AND classid = 0 "
+                            "AND objid = :lock_key"
+                        ),
+                        {"lock_key": lock_key},
+                    )
+                ).one()
+            if int(counts[0]) >= granted_at_least and int(counts[1]) >= waiting_at_least:
+                return
+            await asyncio.sleep(0.05)
+    finally:
+        await engine.dispose()
+    raise AssertionError(
+        f"advisory lock {lock_key} did not reach "
+        f"granted>={granted_at_least}, waiting>={waiting_at_least}"
+    )
+
+
+async def export_batches_lock_count(schema, mode):
+    engine = migration_engine(schema)
+    try:
+        async with engine.connect() as connection:
+            return int(
+                await connection.scalar(
+                    text(
+                        "SELECT COUNT(*) FROM pg_locks locks "
+                        "JOIN pg_class tables ON tables.oid = locks.relation "
+                        "JOIN pg_namespace schemas ON schemas.oid = tables.relnamespace "
+                        "WHERE schemas.nspname = :schema "
+                        "AND tables.relname = 'export_batches' "
+                        "AND locks.mode = :mode AND locks.granted"
+                    ),
+                    {"schema": schema, "mode": mode},
+                )
+                or 0
+            )
+    finally:
+        await engine.dispose()
+
+
+async def wait_for_export_batches_lock_counts(
+    schema, mode, *, granted_at_least=0, waiting_at_least=0
+):
+    engine = migration_engine(schema)
+    try:
+        for _ in range(100):
+            async with engine.connect() as connection:
+                counts = (
+                    await connection.execute(
+                        text(
+                            "SELECT "
+                            "COUNT(*) FILTER (WHERE locks.granted), "
+                            "COUNT(*) FILTER (WHERE NOT locks.granted) "
+                            "FROM pg_locks locks "
+                            "JOIN pg_class tables ON tables.oid = locks.relation "
+                            "JOIN pg_namespace schemas ON schemas.oid = tables.relnamespace "
+                            "WHERE schemas.nspname = :schema "
+                            "AND tables.relname = 'export_batches' "
+                            "AND locks.mode = :mode"
+                        ),
+                        {"schema": schema, "mode": mode},
+                    )
+                ).one()
+            if int(counts[0]) >= granted_at_least and int(counts[1]) >= waiting_at_least:
+                return
+            await asyncio.sleep(0.05)
+    finally:
+        await engine.dispose()
+    raise AssertionError(
+        f"export_batches {mode} did not reach "
+        f"granted>={granted_at_least}, waiting>={waiting_at_least}"
+    )
+
+
+async def install_advisory_barrier_trigger(schema, table):
+    engine = migration_engine(schema)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION task_final_barrier_update() "
+                "RETURNS trigger LANGUAGE plpgsql AS $$ "
+                f"BEGIN PERFORM pg_advisory_xact_lock({BARRIER_LOCK_KEY}); "
+                "RETURN NEW; END; $$"
+            )
+        )
+        await connection.execute(
+            text(
+                f"CREATE TRIGGER task_final_barrier_update BEFORE UPDATE ON {table} "
+                "FOR EACH ROW EXECUTE FUNCTION task_final_barrier_update()"
+            )
+        )
+    await engine.dispose()
+
+
+async def acquire_barrier(engine):
+    connection = await engine.connect()
+    transaction = await connection.begin()
+    await connection.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": BARRIER_LOCK_KEY},
+    )
+    return connection, transaction
+
+
+async def release_barrier(connection, transaction):
+    if transaction.is_active:
+        await transaction.commit()
+    await connection.close()
+
+
+async def seed_high_review(engine):
+    _mao_id, candidate_id = await seed(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as db:
+        candidate = await db.get(Candidate, candidate_id)
+        review = await db.scalar(select(Review).where(Review.candidate_id == candidate_id))
+        assert candidate is not None and review is not None
+        candidate.version = 3
+        review.version = 100
+        reviewer_id = review.reviewer_id
+        review_id = review.id
+        await db.commit()
+    return candidate_id, reviewer_id, review_id
+
+
+async def assert_strict_candidate_epoch(engine, candidate_id):
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as db:
+        candidate_version = int(
+            await db.scalar(select(Candidate.version).where(Candidate.id == candidate_id))
+        )
+        maximum = int(
+            await db.scalar(
+                text(
+                    "SELECT MAX(v) FROM ("
+                    "SELECT version AS v FROM reviews WHERE candidate_id = :candidate_id "
+                    "UNION ALL SELECT review_version FROM review_revisions "
+                    "WHERE candidate_id = :candidate_id "
+                    "UNION ALL SELECT review_version FROM export_items "
+                    "WHERE candidate_id = :candidate_id"
+                    ") AS historical"
+                ),
+                {"candidate_id": candidate_id},
+            )
+        )
+    assert candidate_version > maximum
 
 
 async def in_isolated_schema(operation):
@@ -284,9 +469,8 @@ def test_export_persists_one_pre_or_post_mutation_snapshot_at_deterministic_barr
         original_state_maps = exports._state_maps
 
         async def barrier_state_maps(session):
-            # Export creation has already begun its REPEATABLE READ transaction.
-            # This read makes the PostgreSQL snapshot boundary explicit before
-            # the competing writer commits.
+            # Export creation already owns the entry gate in REPEATABLE READ.
+            # This read fixes its coherent snapshot before the raw test writer.
             await session.scalar(
                 select(Candidate.id).where(Candidate.id == candidate_id)
             )
@@ -503,6 +687,246 @@ def test_postgres_epoch_migration_serializes_against_receipt_completion():
         receipt_result, batch = asyncio.run(race_receipt())
         assert isinstance(receipt_result, ReceiptRejected)
         assert batch is not None and batch.status == "expired"
+    finally:
+        asyncio.run(drop_migration_schema(schema))
+
+
+def test_postgres_epoch_writer_first_waits_at_shared_entry_boundary():
+    """A high review writer must commit before the epoch snapshot is chosen."""
+
+    from app.services.sync_generation import acquire_sync_generation_lock
+
+    schema = asyncio.run(create_migration_schema())
+    config = migration_config(schema)
+    try:
+        command.upgrade(config, "20260827_06")
+
+        async def race_writer_first():
+            engine = migration_engine(schema)
+            candidate_id, _reviewer_id, review_id = await seed_high_review(engine)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            writer_entered = asyncio.Event()
+            release_writer = asyncio.Event()
+            writer = migration = None
+
+            async def write_high_review():
+                async with factory() as writer_db:
+                    await acquire_sync_generation_lock(writer_db)
+                    writer_entered.set()
+                    await release_writer.wait()
+                    candidate = await writer_db.scalar(
+                        select(Candidate)
+                        .where(Candidate.id == candidate_id)
+                        .with_for_update()
+                    )
+                    review = await writer_db.scalar(
+                        select(Review)
+                        .where(Review.id == review_id)
+                        .with_for_update()
+                    )
+                    assert candidate is not None and review is not None
+                    review.version += 1
+                    candidate.version += 1
+                    writer_db.add(
+                        ReviewRevision(
+                            candidate_id=candidate.id,
+                            review_id=review.id,
+                            reviewer_id=review.reviewer_id,
+                            actor_id=review.reviewer_id,
+                            decision=review.decision,
+                            is_current=True,
+                            review_version=review.version,
+                            snapshot_json={},
+                        )
+                    )
+                    await writer_db.commit()
+
+            try:
+                writer = asyncio.create_task(write_high_review())
+                await asyncio.wait_for(writer_entered.wait(), timeout=5)
+                migration = asyncio.create_task(
+                    asyncio.to_thread(command.upgrade, config, "20260827_07")
+                )
+                await wait_for_export_batches_lock_counts(
+                    schema,
+                    "ShareRowExclusiveLock",
+                    waiting_at_least=1,
+                )
+                release_writer.set()
+                await asyncio.wait_for(writer, timeout=10)
+                await asyncio.wait_for(migration, timeout=10)
+            finally:
+                release_writer.set()
+                pending = [task for task in (writer, migration) if task is not None]
+                if pending:
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending, return_exceptions=True), timeout=20
+                    )
+            await assert_strict_candidate_epoch(engine, candidate_id)
+            await engine.dispose()
+
+        asyncio.run(race_writer_first())
+    finally:
+        asyncio.run(drop_migration_schema(schema))
+
+
+def test_postgres_epoch_migration_first_blocks_writer_before_row_locks():
+    """Migration ownership of the boundary must precede all writer row locks."""
+
+    from app.services.sync_generation import acquire_sync_generation_lock
+
+    schema = asyncio.run(create_migration_schema())
+    config = migration_config(schema)
+    try:
+        command.upgrade(config, "20260827_06")
+
+        async def race_migration_first():
+            engine = migration_engine(schema)
+            candidate_id, _reviewer_id, review_id = await seed_high_review(engine)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            await install_advisory_barrier_trigger(schema, "candidates")
+            barrier_connection, barrier_transaction = await acquire_barrier(engine)
+            writer = migration = None
+
+            async def write_high_review():
+                async with factory() as writer_db:
+                    await acquire_sync_generation_lock(writer_db)
+                    candidate = await writer_db.scalar(
+                        select(Candidate)
+                        .where(Candidate.id == candidate_id)
+                        .with_for_update()
+                    )
+                    review = await writer_db.scalar(
+                        select(Review)
+                        .where(Review.id == review_id)
+                        .with_for_update()
+                    )
+                    assert candidate is not None and review is not None
+                    review.version += 1
+                    candidate.version += 1
+                    writer_db.add(
+                        ReviewRevision(
+                            candidate_id=candidate.id,
+                            review_id=review.id,
+                            reviewer_id=review.reviewer_id,
+                            actor_id=review.reviewer_id,
+                            decision=review.decision,
+                            is_current=True,
+                            review_version=review.version,
+                            snapshot_json={},
+                        )
+                    )
+                    await writer_db.commit()
+
+            try:
+                migration = asyncio.create_task(
+                    asyncio.to_thread(command.upgrade, config, "20260827_07")
+                )
+                await wait_for_advisory_lock_counts(
+                    schema, BARRIER_LOCK_KEY, granted_at_least=1, waiting_at_least=1
+                )
+                writer = asyncio.create_task(write_high_review())
+                await wait_for_export_batches_lock_counts(
+                    schema,
+                    "ShareUpdateExclusiveLock",
+                    waiting_at_least=1,
+                )
+                await release_barrier(barrier_connection, barrier_transaction)
+                barrier_connection = barrier_transaction = None
+                await asyncio.wait_for(migration, timeout=10)
+                await asyncio.wait_for(writer, timeout=10)
+            finally:
+                if barrier_connection is not None:
+                    await release_barrier(barrier_connection, barrier_transaction)
+                pending = [task for task in (writer, migration) if task is not None]
+                if pending:
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending, return_exceptions=True), timeout=20
+                    )
+            await assert_strict_candidate_epoch(engine, candidate_id)
+            await engine.dispose()
+
+        asyncio.run(race_migration_first())
+    finally:
+        asyncio.run(drop_migration_schema(schema))
+
+
+def test_postgres_epoch_receipt_first_has_no_table_lock_upgrade_deadlock():
+    """Receipt-first must make migration wait before its conflicting table lock."""
+
+    schema = asyncio.run(create_migration_schema())
+    config = migration_config(schema)
+    try:
+        command.upgrade(config, "20260827_06")
+
+        async def race_receipt_first():
+            engine = migration_engine(schema)
+            mao_id, candidate_id = await seed(engine)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as setup:
+                created = await create_export_batch(setup, mao_id, None, SECRET)
+                item = await setup.scalar(
+                    select(ExportItem).where(ExportItem.batch_id == created.batch.id)
+                )
+                assert item is not None
+                batch_id = created.batch.id
+                payload = ReceiptItem(
+                    candidate_id=item.candidate_id,
+                    review_id=item.review_id,
+                    review_version=item.review_version,
+                    status="SUCCEEDED",
+                    sha256="f" * 64,
+                    relative_path=item.target_relative_path,
+                )
+                token = receipt_token(batch_id, SECRET)
+            await install_advisory_barrier_trigger(schema, "export_batches")
+            barrier_connection, barrier_transaction = await acquire_barrier(engine)
+            receipt_task = migration = None
+            receipt_result = None
+            try:
+                async with factory() as receipt_db:
+                    receipt_task = asyncio.create_task(
+                        apply_receipt(
+                            receipt_db, batch_id, [payload], raw_token=token
+                        )
+                    )
+                    await wait_for_advisory_lock_counts(
+                        schema, BARRIER_LOCK_KEY, granted_at_least=1, waiting_at_least=1
+                    )
+                    migration = asyncio.create_task(
+                        asyncio.to_thread(command.upgrade, config, "20260827_07")
+                    )
+                    await wait_for_export_batches_lock_counts(
+                        schema,
+                        "ShareRowExclusiveLock",
+                        waiting_at_least=1,
+                    )
+                    assert (
+                        await export_batches_lock_count(
+                            schema, "ShareRowExclusiveLock"
+                        )
+                        == 0
+                    )
+                    await release_barrier(barrier_connection, barrier_transaction)
+                    barrier_connection = barrier_transaction = None
+                    receipt_result = await asyncio.wait_for(receipt_task, timeout=10)
+                    await asyncio.wait_for(migration, timeout=10)
+            finally:
+                if barrier_connection is not None:
+                    await release_barrier(barrier_connection, barrier_transaction)
+                pending = [task for task in (receipt_task, migration) if task is not None]
+                if pending:
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending, return_exceptions=True), timeout=20
+                    )
+            async with factory() as verify:
+                batch = await verify.get(ExportBatch, batch_id)
+            assert receipt_result is not None and receipt_result.status == "completed"
+            assert batch is not None and batch.status == "completed"
+            await assert_strict_candidate_epoch(engine, candidate_id)
+            await engine.dispose()
+
+        asyncio.run(race_receipt_first())
     finally:
         asyncio.run(drop_migration_schema(schema))
 

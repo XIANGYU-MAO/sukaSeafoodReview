@@ -562,6 +562,63 @@ def test_same_suffix_original_replacement_preserves_previous_path(settings):
     assert int(row["review_version"]) > old_generation
 
 
+@pytest.mark.parametrize(
+    ("changed_url", "expected_previous"),
+    (
+        (False, ""),
+        (True, "managed"),
+    ),
+    ids=("unchanged-legacy-url", "changed-legacy-url"),
+)
+def test_legacy_unknown_original_fingerprint_uses_retained_url_evidence(
+    settings, changed_url, expected_previous
+):
+    """The revision-05 sentinel must never masquerade as changed bytes."""
+
+    seed, local = _successful_initial_sync(settings)
+
+    async def mark_legacy_and_optionally_change_url():
+        engine = create_async_engine(settings.DATABASE_URL)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as db:
+            item = await db.scalar(
+                select(ExportItem).where(
+                    ExportItem.candidate_id == seed.candidate_ids[0],
+                    ExportItem.status == "succeeded",
+                )
+            )
+            candidate = await db.get(Candidate, seed.candidate_ids[0])
+            assert item is not None and candidate is not None
+            item.original_fingerprint = "0" * 64
+            item.metadata_fingerprint = "0" * 64
+            if changed_url:
+                candidate.original_url = (
+                    "https://images.example.test/1/legacy-replacement.jpg"
+                )
+                candidate.version += 1
+            await db.commit()
+        await engine.dispose()
+
+    asyncio.run(mark_legacy_and_optionally_change_url())
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/v1/admin/exports", json={}, headers=mao_headers(seed, csrf=True)
+        )
+        if not changed_url:
+            assert response.status_code == 200
+            assert response.json()["code"] == "NO_WORK"
+            return
+        assert response.status_code == 201
+        _, rows = download(client, seed, response.json()["id"])
+
+    assert len(rows) == 1
+    assert rows[0]["action"] == "ADD"
+    assert rows[0]["target_relative_path"] == local["target_relative_path"]
+    assert rows[0]["previous_relative_path"] == (
+        local["target_relative_path"] if expected_previous == "managed" else ""
+    )
+
+
 def test_metadata_refresh_and_original_url_change_emit_add_but_unchanged_state_does_not(settings):
     seed, local = _successful_initial_sync(settings)
     with TestClient(create_app(settings)) as client:
@@ -998,7 +1055,8 @@ def test_epoch_and_chunking_offline_ddl_emit_postgres_locks_and_integer_guards()
     downgrade.set_main_option("script_location", str(api_root / "alembic"))
     downgrade.set_main_option("sqlalchemy.url", "postgresql://review:password@db/review")
     command.downgrade(downgrade, "20260827_06:20260826_05", sql=True)
-    assert "LOCK TABLE export_batches IN SHARE UPDATE EXCLUSIVE MODE" in downgrade_output.getvalue()
+    downgrade_ddl = downgrade_output.getvalue()
+    assert "LOCK TABLE export_batches IN SHARE UPDATE EXCLUSIVE MODE" in downgrade_ddl
 
     sqlite_output = io.StringIO()
     sqlite = Config(api_root / "alembic.ini", output_buffer=sqlite_output)
