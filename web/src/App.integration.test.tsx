@@ -88,12 +88,13 @@ describe("production-shell integration", () => {
     expect(screen.getByRole("button", { name: "Keep (K)" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Reject (R)" }));
     expect(screen.getByRole("radio", { name: "Wrong species" })).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "Other" }));
     await user.click(screen.getByRole("button", { name: "Cancel rejection" }));
     fireEvent.load(image);
     const currentCallsBeforeSave = currentCalls;
     await user.click(screen.getByRole("button", { name: "Keep (K)" }));
     expect(currentCalls).toBe(currentCallsBeforeSave);
-    expect(screen.getByRole("status")).toHaveTextContent("Saving");
+    expect(screen.getByRole("status", { name: "Saving…" })).toBeInTheDocument();
 
     accepted = true;
     await act(async () => decisionReceipt.resolve(jsonResponse({

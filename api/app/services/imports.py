@@ -198,6 +198,7 @@ def _bounded_issue(
     report: ImportPreview,
     *,
     row: int | None,
+    related_row: int | None = None,
     code: str,
     message: str,
     blocking: bool = True,
@@ -228,6 +229,7 @@ def _bounded_issue(
     group.count += 1
     if row is not None and len(group.sample_rows) < 10:
         group.sample_rows.append(row)
+        group.sample_related_rows.append(related_row)
     elif row is not None:
         group.omitted_rows += 1
 
@@ -235,6 +237,7 @@ def _bounded_issue(
         report.issues.append(
             ImportIssue(
                 row=row,
+                related_row=related_row,
                 code=code,
                 message=message,
                 blocking=blocking,
@@ -249,6 +252,7 @@ def _bounded_issue(
             if not report.issues[index].blocking:
                 report.issues[index] = ImportIssue(
                     row=row,
+                    related_row=related_row,
                     code=code,
                     message=message,
                     blocking=True,
@@ -721,7 +725,7 @@ def _classify(
     existing: list[tuple[Candidate, str]] | None = None,
 ) -> ImportPreview:
     identity_rows: dict[tuple[str, str], NormalizedCandidate] = {}
-    url_rows: dict[str, list[tuple[tuple[str, str], str]]] = {}
+    url_rows: dict[str, list[tuple[tuple[str, str], str, int | None]]] = {}
     existing_identity: dict[tuple[str, str], NormalizedCandidate] = {}
     relevant_state: list[dict[str, Any]] = []
 
@@ -765,7 +769,7 @@ def _classify(
             active=candidate.active,
         )
         existing_identity[identity] = normalized
-        url_rows.setdefault(canonical_existing_url, []).append((identity, species_code))
+        url_rows.setdefault(canonical_existing_url, []).append((identity, species_code, None))
         relevant_state.append({"candidate": _material(normalized)})
 
     for index, row in enumerate(report.normalized_rows, start=2):
@@ -792,6 +796,7 @@ def _classify(
                 _bounded_issue(
                     report,
                     row=source_row,
+                    related_row=prior.source_row,
                     code="EXACT_DUPLICATE",
                     message="Exact duplicate source record will be skipped",
                     blocking=False,
@@ -831,16 +836,17 @@ def _classify(
 
         canonical = _canonical_url(row.original_url)
         other_rows = [
-            (other_identity, other_species)
-            for other_identity, other_species in url_rows.get(canonical, [])
+            (other_identity, other_species, other_row)
+            for other_identity, other_species, other_row in url_rows.get(canonical, [])
             if other_identity != identity
         ]
-        if any(other_species != row.species_code for _, other_species in other_rows):
+        if any(other_species != row.species_code for _, other_species, _ in other_rows):
             report.conflicting_identities += 1
             report.blocking_errors += 1
             _bounded_issue(
                 report,
                 row=source_row,
+                related_row=other_rows[0][2],
                 code="CONFLICTING_IMAGE_SPECIES",
                 message="Original URL is already assigned to a different species",
             )
@@ -851,12 +857,13 @@ def _classify(
             _bounded_issue(
                 report,
                 row=source_row,
+                related_row=other_rows[0][2],
                 code="DUPLICATE_IMAGE_URL",
                 message="Original URL is already queued for the same species and will be skipped",
                 blocking=False,
             )
             continue
-        url_rows.setdefault(canonical, []).append((identity, row.species_code))
+        url_rows.setdefault(canonical, []).append((identity, row.species_code, source_row))
         report.new_normalized_rows.append(row)
 
     report.new_rows = len(report.new_normalized_rows)

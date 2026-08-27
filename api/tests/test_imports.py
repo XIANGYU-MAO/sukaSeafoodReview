@@ -383,9 +383,10 @@ def test_public_https_unknown_host_is_an_approvable_group_not_an_unsafe_url():
         "message": "Image origin is not approved",
         "blocking": True,
         "host": "data.newmuseum.org",
-        "count": 3,
-        "sample_rows": [2, 3, 4],
-        "omitted_rows": 0,
+            "count": 3,
+            "sample_rows": [2, 3, 4],
+            "sample_related_rows": [None, None, None],
+            "omitted_rows": 0,
     }
     assert all(issue.host == "data.newmuseum.org" for issue in preview.issues)
 
@@ -526,12 +527,21 @@ def test_db_preview_classifies_internal_exact_conflict_and_url_duplicates(settin
 
     assert (exact_report.total, exact_report.new_rows, exact_report.exact_duplicates) == (2, 1, 1)
     assert exact_report.can_commit is True
+    exact_issue = next(issue for issue in exact_report.issues if issue.code == "EXACT_DUPLICATE")
+    assert (exact_issue.row, exact_issue.related_row) == (3, 2)
+    exact_group = next(group for group in exact_report.issue_groups if group.code == "EXACT_DUPLICATE")
+    assert exact_group.sample_rows == [3]
+    assert exact_group.sample_related_rows == [2]
     assert conflict_report.conflicting_identities == 1
     assert conflict_report.can_commit is False
     assert url_report.new_rows == 1
     assert url_report.url_duplicates == 1
     assert url_report.can_commit is True
-    assert any(issue.code == "DUPLICATE_IMAGE_URL" for issue in url_report.issues)
+    url_issue = next(issue for issue in url_report.issues if issue.code == "DUPLICATE_IMAGE_URL")
+    assert (url_issue.row, url_issue.related_row) == (3, 2)
+    url_group = next(group for group in url_report.issue_groups if group.code == "DUPLICATE_IMAGE_URL")
+    assert url_group.sample_rows == [3]
+    assert url_group.sample_related_rows == [2]
 
 
 def test_db_preview_classifies_existing_exact_and_url_duplicates(settings):
@@ -564,6 +574,8 @@ def test_db_preview_classifies_existing_exact_and_url_duplicates(settings):
 
     assert (exact.new_rows, exact.exact_duplicates, exact.can_commit) == (0, 1, True)
     assert (duplicate.new_rows, duplicate.url_duplicates, duplicate.can_commit) == (0, 1, True)
+    assert exact.issues[0].related_row is None
+    assert duplicate.issues[0].related_row is None
 
 
 def test_db_preview_blocks_one_image_url_assigned_to_different_species(settings):

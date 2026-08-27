@@ -18,6 +18,14 @@ function renderPage(retryBootstrap = vi.fn(async () => undefined), strict = fals
 }
 
 describe("TeamProgressPage", () => {
+  it("centers the initial menu loading indicator in the viewport", () => {
+    vi.stubGlobal("fetch", vi.fn(() => deferred<Response>().promise));
+    renderPage();
+
+    expect(screen.getByRole("status", { name: "正在载入团队进度…" }))
+      .toHaveClass("page-loading-overlay");
+  });
+
   it("loads aggregate progress without CSRF", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);

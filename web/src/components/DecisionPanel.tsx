@@ -102,14 +102,16 @@ export function DecisionPanel({
   }, [onSubmit, pending]);
 
   function chooseReason(nextReason: RejectionReasonCode) {
-    setReason(nextReason);
-    setValidationError(null);
-    if (nextReason !== "OTHER") setNotes("");
-    onPayloadChange?.({
+    const payload: DecisionPayload = {
       decision: "REJECTED",
       rejection_reason: nextReason,
       notes: nextReason === "OTHER" ? notes.trim() || null : null,
-    });
+    };
+    setReason(nextReason);
+    setValidationError(null);
+    if (nextReason !== "OTHER") setNotes("");
+    onPayloadChange?.(payload);
+    if (nextReason !== "OTHER") onSubmit(payload);
   }
 
   function changeNotes(nextNotes: string) {
@@ -124,19 +126,15 @@ export function DecisionPanel({
   }
 
   function confirmReject() {
-    if (!reason) {
-      setValidationError(t("chooseReason"));
-      return;
-    }
     const trimmedNotes = notes.trim();
-    if (reason === "OTHER" && !trimmedNotes) {
+    if (!trimmedNotes) {
       setValidationError(t("otherNotesRequired"));
       return;
     }
     onSubmit({
       decision: "REJECTED",
-      rejection_reason: reason,
-      notes: reason === "OTHER" ? trimmedNotes : null,
+      rejection_reason: "OTHER",
+      notes: trimmedNotes,
     });
   }
 
@@ -152,21 +150,31 @@ export function DecisionPanel({
           }`}
           type="button"
           disabled={pending}
+          aria-label={t("keep")}
           aria-pressed={selectedPayload?.decision === "APPROVED"}
           onClick={() => submitSimpleDecision("APPROVED")}
         >
-          {selectedPayload?.decision === "APPROVED" ? <span aria-hidden="true">✓ </span> : null}
-          {t("keep")}
+          <DecisionButtonContent
+            label={t("keep")}
+            pending={pending && selectedPayload?.decision === "APPROVED"}
+            selected={selectedPayload?.decision === "APPROVED"}
+            savingLabel={t("saving")}
+          />
         </button>
         <button
           className={`decision-button decision-button--reject${rejectSelected ? " decision-button--selected" : ""}`}
           type="button"
           disabled={pending}
+          aria-label={t("reject")}
           aria-pressed={rejectSelected}
           onClick={openReject}
         >
-          {rejectSelected ? <span aria-hidden="true">✓ </span> : null}
-          {t("reject")}
+          <DecisionButtonContent
+            label={t("reject")}
+            pending={pending && selectedPayload?.decision === "REJECTED"}
+            selected={rejectSelected}
+            savingLabel={t("saving")}
+          />
         </button>
         <button
           className={`decision-button decision-button--unsure${
@@ -174,14 +182,18 @@ export function DecisionPanel({
           }`}
           type="button"
           disabled={pending}
+          aria-label={t("unsure")}
           aria-pressed={selectedPayload?.decision === "UNSURE"}
           onClick={() => submitSimpleDecision("UNSURE")}
         >
-          {selectedPayload?.decision === "UNSURE" ? <span aria-hidden="true">✓ </span> : null}
-          {t("unsure")}
+          <DecisionButtonContent
+            label={t("unsure")}
+            pending={pending && selectedPayload?.decision === "UNSURE"}
+            selected={selectedPayload?.decision === "UNSURE"}
+            savingLabel={t("saving")}
+          />
         </button>
       </div>
-      {pending ? <p className="decision-saving" role="status">{t("saving")}</p> : null}
       {rejectOpen ? (
         <div className="rejection-panel" ref={rejectGroup}>
           <PillChoiceGroup
@@ -193,38 +205,62 @@ export function DecisionPanel({
             getOptionLabel={(code) => rejectionReasonLabel(locale, code)}
           />
           {reason === "OTHER" ? (
-            <label className="input-label rejection-notes">
-              {t("otherNotes")}
-              <textarea
-                className="text-input"
-                aria-label={t("otherNotes")}
-                value={notes}
-                disabled={pending}
-                maxLength={2_000}
-                onChange={(event) => changeNotes(event.target.value)}
-              />
-            </label>
+            <>
+              <label className="input-label rejection-notes">
+                {t("otherNotes")}
+                <textarea
+                  className="text-input"
+                  aria-label={t("otherNotes")}
+                  value={notes}
+                  disabled={pending}
+                  maxLength={2_000}
+                  onChange={(event) => changeNotes(event.target.value)}
+                />
+              </label>
+              {validationError ? <div className="notice notice--error" role="alert">{validationError}</div> : null}
+              <div className="rejection-actions">
+                <button className="primary-button compact-button" type="button" disabled={pending} onClick={confirmReject}>
+                  {t("confirmReject")}
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={pending}
+                  onClick={() => {
+                    setRejectOpen(false);
+                    setValidationError(null);
+                  }}
+                >
+                  {t("cancelReject")}
+                </button>
+              </div>
+            </>
           ) : null}
-          {validationError ? <div className="notice notice--error" role="alert">{validationError}</div> : null}
-          <div className="rejection-actions">
-            <button className="primary-button compact-button" type="button" disabled={pending} onClick={confirmReject}>
-              {t("confirmReject")}
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={pending}
-              onClick={() => {
-                setRejectOpen(false);
-                setValidationError(null);
-              }}
-            >
-              {t("cancelReject")}
-            </button>
-          </div>
         </div>
       ) : null}
     </section>
+  );
+}
+
+function DecisionButtonContent({
+  label,
+  pending,
+  savingLabel,
+  selected,
+}: {
+  label: string;
+  pending: boolean;
+  savingLabel: string;
+  selected: boolean;
+}) {
+  if (pending) {
+    return <span className="decision-button__spinner" role="status" aria-label={savingLabel} />;
+  }
+  return (
+    <>
+      {selected ? <span aria-hidden="true">✓ </span> : null}
+      {label}
+    </>
   );
 }
 

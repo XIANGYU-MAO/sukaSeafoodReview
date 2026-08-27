@@ -64,19 +64,17 @@ describe("DecisionPanel", () => {
     expect(screen.getByRole("textbox", { name: "Other reason notes" })).toHaveValue("fin detail");
   });
 
-  it("requires one rejection reason from ten wrapping pills instead of a combobox", async () => {
+  it("submits a fixed rejection reason immediately from eleven wrapping pills", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderPanel();
 
     await user.click(screen.getByRole("button", { name: "拒绝 (R)" }));
     expect(screen.queryByRole("combobox", { name: "拒绝原因" })).not.toBeInTheDocument();
-    expect(screen.getAllByRole("radio")).toHaveLength(10);
-    await user.click(screen.getByRole("button", { name: "确认拒绝" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("请选择拒绝原因");
-    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("radio")).toHaveLength(11);
+    expect(screen.getByRole("radio", { name: "不是鱼" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认拒绝" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("radio", { name: "鱼种错误" }));
-    await user.click(screen.getByRole("button", { name: "确认拒绝" }));
     expect(onSubmit).toHaveBeenCalledWith({
       decision: "REJECTED",
       rejection_reason: "WRONG_SPECIES",
@@ -103,6 +101,21 @@ describe("DecisionPanel", () => {
       rejection_reason: "OTHER",
       notes: "uncommon issue",
     });
+  });
+
+  it("replaces only the pending decision button label with a fixed-size spinner", () => {
+    renderPanel({
+      pending: true,
+      selectedPayload: { decision: "APPROVED", rejection_reason: null, notes: null },
+    });
+
+    const keep = screen.getByRole("button", { name: "保留 (K)" });
+    expect(keep).toBeDisabled();
+    expect(keep).not.toHaveTextContent("保留 (K)");
+    expect(keep.querySelector(".decision-button__spinner")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "正在保存…" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "拒绝 (R)" })).toHaveTextContent("拒绝 (R)");
+    expect(screen.getByRole("button", { name: "不确定 (U)" })).toHaveTextContent("不确定 (U)");
   });
 
   it("supports global K/R/U but ignores repeats, modifiers, pending, and interactive targets", () => {
@@ -192,7 +205,7 @@ describe("DecisionPanel", () => {
     );
     fireEvent.keyDown(document.body, { key: "k" });
     expect(onSubmit).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("status")).toHaveTextContent("正在保存");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保留 (K)" })).toBeDisabled();
   });
 

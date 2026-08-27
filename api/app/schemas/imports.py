@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class ImportIssue(BaseModel):
     row: int | None = None
+    related_row: int | None = None
     code: str
     message: str
     blocking: bool = True
@@ -22,6 +23,7 @@ class ImportIssueGroup(BaseModel):
     host: str | None = None
     count: int = 0
     sample_rows: list[int] = Field(default_factory=list)
+    sample_related_rows: list[int | None] = Field(default_factory=list)
     omitted_rows: int = 0
 
 

@@ -93,8 +93,8 @@ it("approves an observed image host and automatically previews the retained CSV 
     new_rows: 1,
     can_commit: false,
     blocking_errors: 1,
-    issues: [{ row: 2, code: "UNAPPROVED_IMAGE_HOST", message: "not approved", blocking: true, host: "data.newmuseum.org" }],
-    issue_groups: [{ code: "UNAPPROVED_IMAGE_HOST", message: "not approved", blocking: true, host: "data.newmuseum.org", count: 1, sample_rows: [2], omitted_rows: 0 }],
+    issues: [{ row: 2, related_row: null, code: "UNAPPROVED_IMAGE_HOST", message: "not approved", blocking: true, host: "data.newmuseum.org" }],
+    issue_groups: [{ code: "UNAPPROVED_IMAGE_HOST", message: "not approved", blocking: true, host: "data.newmuseum.org", count: 1, sample_rows: [2], sample_related_rows: [null], omitted_rows: 0 }],
   };
   const fetchMock = mockAdmin((url) => {
     if (url.endsWith("/admin/imports/preview")) {
@@ -122,8 +122,8 @@ it("requires explicit confirmation before skipping blocking rows", async () => {
     new_rows: 1,
     can_commit: false,
     blocking_errors: 1,
-    issues: [{ row: 3, code: "INVALID_LICENSE", message: "invalid", blocking: true, host: null }],
-    issue_groups: [{ code: "INVALID_LICENSE", message: "invalid", blocking: true, host: null, count: 1, sample_rows: [3], omitted_rows: 0 }],
+    issues: [{ row: 3, related_row: null, code: "INVALID_LICENSE", message: "invalid", blocking: true, host: null }],
+    issue_groups: [{ code: "INVALID_LICENSE", message: "invalid", blocking: true, host: null, count: 1, sample_rows: [3], sample_related_rows: [null], omitted_rows: 0 }],
   };
   const fetchMock = mockAdmin((url) => {
     if (url.endsWith("/admin/imports/preview")) return jsonResponse(blocked);
@@ -240,7 +240,15 @@ it("marks old rows unavailable during refresh and keeps them disabled after refr
 
 it("keeps the prior candidate page unavailable when page loading fails and installs the retried page", async () => {
   let candidateGets = 0;
-  const pageTwo = { ...candidatesFixture, total: 21, items: [{ ...candidatesFixture.items[0], id: "30000000-0000-4000-8000-000000000002" }] };
+  const pageTwo = {
+    ...candidatesFixture,
+    total: 21,
+    items: [{
+      ...candidatesFixture.items[0],
+      id: "30000000-0000-4000-8000-000000000002",
+      species: { ...candidatesFixture.items[0].species, name_zh: "第二页鱼" },
+    }],
+  };
   mockAdmin((url) => {
     if (url.includes("/admin/candidates?")) {
       candidateGets += 1;
@@ -257,7 +265,7 @@ it("keeps the prior candidate page unavailable when page loading fails and insta
   expect(await screen.findByText("刷新失败，旧数据暂不可操作。")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "编辑候选" })).toBeDisabled();
   await user.click(screen.getByRole("button", { name: "重试刷新" }));
-  expect(await screen.findByText(`候选编号 ${pageTwo.items[0].id}`)).toBeInTheDocument();
+  expect(await screen.findByText("第二页鱼")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "编辑候选" })).toBeEnabled();
 });
 
@@ -407,6 +415,55 @@ it("renders a validated fatal import report without enabling commit", async () =
   expect(screen.getByText("总行数")).toBeInTheDocument();
   expect(screen.getByText("4")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "提交导入" })).toBeDisabled();
+});
+
+it("explains the local export workflow and accepts a JSON receipt dropped onto its batch", async () => {
+  const secondCandidate = "30000000-0000-4000-8000-000000000002";
+  const fetchMock = mockAdmin((url, init) => {
+    if (url.endsWith(`/admin/exports/${IDS.batch}/receipt-file`) && init?.method === "POST") {
+      return jsonResponse({
+        batch_id: IDS.batch,
+        status: "pending",
+        accepted_candidate_ids: [IDS.candidate],
+        pending_candidate_ids: [secondCandidate],
+      });
+    }
+  });
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("训练集同步");
+
+  expect(await screen.findByRole("heading", { name: "训练数据同步流程" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "1. 下载任务 CSV" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "2. 在本地下载原图" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "3. 上传 JSON 回执" })).toBeInTheDocument();
+  expect(screen.getByText(/CSV 只交给本地下载工具/)).toBeInTheDocument();
+  expect(document.body).not.toHaveTextContent("Mao 的");
+
+  await user.hover(screen.getByRole("button", { name: "操作说明：上传下载回执" }));
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("网页不会上传图片");
+  expect(screen.getByRole("tooltip")).toHaveTextContent("成功项目以后不会重复加入下载批次");
+
+  const receipt = new File([JSON.stringify({
+    batch_id: IDS.batch,
+    items: [{
+      candidate_id: IDS.candidate,
+      review_id: IDS.review,
+      review_version: 1,
+      status: "SUCCEEDED",
+      sha256: "b".repeat(64),
+      relative_path: "SF001/example.jpg",
+      error: null,
+    }],
+  })], "receipt.json", { type: "application/json" });
+  const dropZone = screen.getByText("把 JSON 回执拖到这里").closest(".receipt-drop-zone");
+  expect(dropZone).not.toBeNull();
+  fireEvent.drop(dropZone!, { dataTransfer: { files: [receipt] } });
+
+  expect(await screen.findByRole("status")).toHaveTextContent("接受 1，待处理 1");
+  expect(fetchMock.mock.calls.filter(([requestUrl]) =>
+    String(requestUrl).endsWith(`/admin/exports/${IDS.batch}/receipt-file`),
+  )).toHaveLength(1);
 });
 
 it("paginates export history and accepts a partial success with another batch item pending", async () => {

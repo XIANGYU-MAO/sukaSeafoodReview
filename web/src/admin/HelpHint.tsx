@@ -1,6 +1,6 @@
 import { useId, useState, type ReactNode } from "react";
 
-export function HelpHint({ context, label, children }: { context: "字段" | "表头"; label: string; children: ReactNode }) {
+export function HelpHint({ context, label, children }: { context: "字段" | "表头" | "操作"; label: string; children: ReactNode }) {
   const tooltipId = useId();
   const [open, setOpen] = useState(false);
 

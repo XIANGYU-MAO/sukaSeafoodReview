@@ -30,6 +30,7 @@ describe("bilingual stable-code catalog", () => {
     expect(REJECTION_REASONS).toEqual([
       "WRONG_SPECIES",
       "NOT_WHOLE_FISH",
+      "NOT_A_FISH",
       "COOKED_OR_PROCESSED",
       "TOO_OCCLUDED",
       "TOO_SMALL_OR_BLURRY",
@@ -41,6 +42,8 @@ describe("bilingual stable-code catalog", () => {
     ]);
     expect(sourceLabel("zh", "WIKIMEDIA_COMMONS")).toBe("维基共享资源");
     expect(rejectionReasonLabel("zh", "IMAGE_URL_UNAVAILABLE")).toBe("图片链接失效");
+    expect(rejectionReasonLabel("zh", "NOT_A_FISH")).toBe("不是鱼");
+    expect(rejectionReasonLabel("en", "NOT_A_FISH")).toBe("Not a fish");
   });
 
   it("renders unknown future codes as localized bounded text", () => {

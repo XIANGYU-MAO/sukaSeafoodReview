@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, request } from "../api/client";
 import { parseProgressResponse, type ProgressResponse } from "../api/types";
 import { TeamProgress } from "../components/TeamProgress";
+import { ScreenLoader } from "../components/ScreenLoader";
 import { useI18n } from "../i18n/I18nProvider";
 
 interface TeamProgressPageProps {
@@ -56,13 +57,10 @@ export function TeamProgressPage({ retryBootstrap }: TeamProgressPageProps) {
   return (
     <main className="team-progress-workspace">
       {status === "loading" && progress === null ? (
-        <div className="progress-loading" aria-busy="true">
-          <span className="spinner" aria-hidden="true" />
-          <p role="status">{t("loadingProgress")}</p>
-        </div>
+        <ScreenLoader label={t("loadingProgress")} />
       ) : null}
       {status === "auth-refresh" ? (
-        <div className="progress-loading" aria-busy="true"><span className="spinner" aria-hidden="true" /></div>
+        <ScreenLoader label={t("loadingProgress")} />
       ) : null}
       {status === "error" ? (
         <div className="notice notice--error progress-error" role="alert">

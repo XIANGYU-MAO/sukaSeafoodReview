@@ -11,6 +11,7 @@ import { DecisionPanel } from "../components/DecisionPanel";
 import { ImageStage } from "../components/ImageStage";
 import { ProgressSummary } from "../components/ProgressSummary";
 import { ReviewGuidelinesDialog } from "../components/ReviewGuidelinesDialog";
+import { ScreenLoader } from "../components/ScreenLoader";
 import { sourceLabel } from "../i18n/catalog";
 import { useI18n } from "../i18n/I18nProvider";
 import {
@@ -271,13 +272,10 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
       ) : null}
 
       {currentStatus === "loading" ? (
-        <div className="review-state" aria-busy="true">
-          <span className="spinner" aria-hidden="true" />
-          <p role="status">{t("loadingCurrent")}</p>
-        </div>
+        <ScreenLoader label={t("loadingCurrent")} />
       ) : null}
       {currentStatus === "auth-refresh" ? (
-        <div className="review-state" aria-busy="true"><span className="spinner" aria-hidden="true" /></div>
+        <ScreenLoader label={t("loadingCurrent")} />
       ) : null}
       {currentStatus === "empty" ? (
         <div className="review-state"><p role="status">{t("emptyPool")}</p></div>

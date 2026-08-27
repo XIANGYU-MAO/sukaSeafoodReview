@@ -45,6 +45,8 @@ def canonical_facts(payload: DecisionRequest) -> tuple[str, str]:
         return "REVIEW", "NO"
     if payload.rejection_reason == RejectionReason.NOT_WHOLE_FISH:
         return "NO", "REVIEW"
+    if payload.rejection_reason == RejectionReason.NOT_A_FISH:
+        return "NO", "NO"
     return "REVIEW", "REVIEW"
 
 

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 
 import { ApiError } from "../api/client";
-import { PageControls, QueryBoundary, adminMutation, mutationMessage, safeHttps, sourceLabel, useAdminQuery, type AdminTabProps } from "./common";
+import { PageControls, QueryBoundary, adminMutation, decisionLabels, mutationMessage, safeHttps, sourceLabel, useAdminQuery, type AdminTabProps } from "./common";
 import { parseCandidateList, parseCandidateReceipt, type AdminCandidate } from "./types";
 
 const LIMIT = 20;
@@ -77,7 +77,7 @@ export function CandidatesTab(props: AdminTabProps) {
       <label>候选搜索<input type="search" aria-label="候选搜索" value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} /></label>
       <button type="submit" className="secondary-button">应用候选筛选</button>
     </form></fieldset>
-    <QueryBoundary query={query}>{(data, unavailable) => data.items.length ? <><div className="admin-card-grid">{data.items.map((item) => <article className="admin-card" key={item.id}><h3 className="mono">候选编号 {item.id}</h3><p>{item.species.code} · {item.species.name_zh}</p><p>{sourceLabel(item.source_dataset)} · {item.source_record_id}</p><p>版本 {item.version} · {item.active ? "启用" : "停用"} · {item.current_review ? "已审核" : "未审核"}</p><div className="inline-actions"><a href={item.source_url} target="_blank" rel="noreferrer">来源页</a><a href={item.original_url} target="_blank" rel="noreferrer">原图</a><button disabled={unavailable || props.directoriesUnavailable} type="button" className="secondary-button" onClick={() => edit(item)}>编辑候选</button></div></article>)}</div><PageControls offset={offset} total={data.total} limit={LIMIT} onChange={setOffset} disabled={unavailable || props.directoriesUnavailable} /></> : <p>没有符合条件的候选图片。</p>}</QueryBoundary>
+    <QueryBoundary query={query}>{(data, unavailable) => data.items.length ? <><div className="admin-card-grid admin-review-card-grid">{data.items.map((item) => <CandidateCard key={item.id} item={item} disabled={unavailable || props.directoriesUnavailable} onEdit={() => edit(item)} />)}</div><PageControls offset={offset} total={data.total} limit={LIMIT} onChange={setOffset} disabled={unavailable || props.directoriesUnavailable} /></> : <p>没有符合条件的候选图片。</p>}</QueryBoundary>
     {editing && draft ? <fieldset className="admin-fieldset" disabled={query.unavailable || props.directoriesUnavailable}><section className="admin-card"><h3>编辑候选 {editing.id}</h3>
       <label>预览图地址<input aria-label="预览图地址" value={draft.preview_url} onChange={(event) => setDraft({ ...draft, preview_url: event.target.value })} /></label>
       <label>原图地址<input aria-label="原图地址" value={draft.original_url} onChange={(event) => setDraft({ ...draft, original_url: event.target.value })} /></label>
@@ -88,4 +88,39 @@ export function CandidatesTab(props: AdminTabProps) {
       <div className="inline-actions"><button disabled={pending} type="button" className="primary-button compact-button" onClick={() => void save()}>{pending ? "保存中…" : draft.confirm ? "确认失效并保存" : "保存候选"}</button><button type="button" className="secondary-button" disabled={pending} onClick={() => { setEditing(null); setDraft(null); }}>取消</button></div>
     </section></fieldset> : null}
   </div>;
+}
+
+function CandidateCard({ item, disabled, onEdit }: { item: AdminCandidate; disabled: boolean; onEdit: () => void }) {
+  const source = sourceLabel(item.source_dataset);
+  const reviewer = item.current_reviewer?.display_name ?? item.current_review?.reviewer.display_name ?? "未分配";
+  const result = item.current_review ? decisionLabels[item.current_review.decision] : item.active ? "待审核" : "已停用";
+  const resultClass = item.current_review?.decision.toLowerCase() ?? (item.active ? "pending" : "inactive");
+  return (
+    <article className="admin-review-card">
+      <img className="admin-review-card__background" src={item.preview_url} alt="" aria-hidden="true" loading="lazy" referrerPolicy="no-referrer" />
+      <span className="admin-review-card__overlay" aria-hidden="true" />
+      <div className="admin-review-card__content">
+        <header className="admin-review-card__header">
+          <span className="admin-review-card__reviewer">{reviewer}</span>
+          <span className={`admin-review-result admin-review-result--${resultClass}`}>{result}</span>
+        </header>
+        <div className="admin-review-card__fish">
+          <span>{item.species.code}</span>
+          <h3>{item.species.name_zh}</h3>
+          <em>{item.species.scientific_name}</em>
+          <small>{item.active ? "启用" : "停用"} · {item.current_review ? "已审核" : item.current_reviewer ? "审核中" : "未审核"}</small>
+        </div>
+        <footer className="admin-review-card__footer">
+          <div className="admin-review-card__actions">
+            <button disabled={disabled} type="button" className="secondary-button" onClick={onEdit}>编辑候选</button>
+            <a href={item.original_url} target="_blank" rel="noopener noreferrer">查看原图</a>
+          </div>
+          <a className="admin-review-source-link" href={item.source_url} target="_blank" rel="noopener noreferrer" aria-label={`打开 ${source} 来源页`}>
+            <span>{source}</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false"><path d="M14 4h6v6M20 4l-9 9M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6" /></svg>
+          </a>
+        </footer>
+      </div>
+    </article>
+  );
 }

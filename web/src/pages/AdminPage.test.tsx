@@ -171,7 +171,18 @@ describe("progress/current and candidate safety", () => {
     const user = userEvent.setup();
     renderWithAuth(<App />, "/admin");
     await openTab("候选图片");
-    await screen.findByText(IDS.candidate);
+    const candidateCard = await screen.findByRole("article");
+    expect(candidateCard).toHaveClass("admin-review-card");
+    expect(candidateCard.querySelector(".admin-review-card__background")).toHaveAttribute(
+      "src",
+      candidateFixture.preview_url,
+    );
+    expect(within(candidateCard).getByText("Hassan")).toHaveClass("admin-review-card__reviewer");
+    expect(within(candidateCard).getByText("保留")).toHaveClass("admin-review-result--approved");
+    expect(within(candidateCard).getByText("测试鱼")).toBeInTheDocument();
+    expect(within(candidateCard).getByRole("link", { name: "打开 iNaturalist 来源页" }))
+      .toHaveAttribute("href", candidateFixture.source_url);
+    expect(candidateCard).not.toHaveTextContent(IDS.candidate);
     await user.selectOptions(screen.getByRole("combobox", { name: "审核状态" }), "true");
     await user.type(screen.getByRole("searchbox", { name: "候选搜索" }), "obs:1");
     await user.click(screen.getByRole("button", { name: "应用候选筛选" }));
@@ -372,10 +383,26 @@ describe("species and review administration", () => {
     const user = userEvent.setup();
     renderWithAuth(<App />, "/admin");
     await openTab("审核历史");
-    expect(await screen.findByText(IDS.review)).toBeInTheDocument();
+    const reviewCard = await screen.findByRole("article");
+    expect(reviewCard).toHaveClass("admin-review-card");
+    expect(reviewCard.querySelector(".admin-review-card__background")).toHaveAttribute(
+      "src",
+      reviewItem.candidate.preview_url,
+    );
+    expect(within(reviewCard).getByText("Hassan")).toHaveClass("admin-review-card__reviewer");
+    expect(within(reviewCard).getByText("保留")).toHaveClass("admin-review-result--approved");
+    expect(within(reviewCard).getByText("测试鱼")).toBeInTheDocument();
+    expect(within(reviewCard).getByRole("link", { name: "打开 iNaturalist 来源页" }))
+      .toHaveAttribute("href", reviewItem.candidate.source_url);
+    expect(reviewCard).not.toHaveTextContent(IDS.review);
+    expect(reviewCard).not.toHaveTextContent(IDS.candidate);
     expect(screen.getByLabelText("审核结束日期")).toHaveAttribute("max", "9998-12-31");
     await user.click(screen.getByRole("button", { name: "编辑审核" }));
     expect(screen.queryByRole("combobox", { name: "审核结果" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "编辑审核：测试鱼" })).toHaveClass("admin-review-editor");
+    expect(screen.getByRole("button", { name: "保留" })).toHaveClass("admin-review-decision-button--approved");
+    expect(screen.getByRole("button", { name: "拒绝" })).toHaveClass("admin-review-decision-button--rejected");
+    expect(screen.getByRole("button", { name: "不确定" })).toHaveClass("admin-review-decision-button--unsure");
     await user.click(screen.getByRole("button", { name: "拒绝" }));
     await user.click(screen.getByRole("radio", { name: "重复图片" }));
     await user.type(screen.getByLabelText("管理员修改原因"), "纠正判断");
@@ -389,6 +416,44 @@ describe("species and review administration", () => {
       notes: null,
       reason: "纠正判断",
     });
+  });
+
+  it("uses fixed colors for every admin review result tag", async () => {
+    mockAdmin((url, init) => {
+      if (url.includes("/admin/reviews?") && !init?.method) {
+        return jsonResponse({
+          total: 3,
+          items: [
+            reviewItem,
+            {
+              ...reviewItem,
+              id: "40000000-0000-4000-8000-000000000002",
+              decision: "REJECTED",
+              rejection_reason: "NOT_A_FISH",
+              whole_fish: "NO",
+              exact_species_verified: "NO",
+            },
+            {
+              ...reviewItem,
+              id: "40000000-0000-4000-8000-000000000003",
+              decision: "UNSURE",
+              rejection_reason: null,
+              whole_fish: "REVIEW",
+              exact_species_verified: "REVIEW",
+            },
+          ],
+        });
+      }
+    });
+    renderWithAuth(<App />, "/admin");
+    await openTab("审核历史");
+
+    expect(await screen.findByText("保留", { selector: ".admin-review-result" }))
+      .toHaveClass("admin-review-result--approved");
+    expect(screen.getByText("拒绝", { selector: ".admin-review-result" }))
+      .toHaveClass("admin-review-result--rejected");
+    expect(screen.getByText("不确定", { selector: ".admin-review-result" }))
+      .toHaveClass("admin-review-result--unsure");
   });
 
   it("reopens only after named confirmation with both versions and an active new reviewer", async () => {
@@ -427,6 +492,8 @@ describe("import, export and one-time password workflows", () => {
     await user.click(screen.getByRole("button", { name: "预检查" }));
     expect(await screen.findByText("新增")).toBeInTheDocument();
     expect(screen.getByText("同鱼种重复地址")).toBeInTheDocument();
+    expect(screen.getByText("第 3 行与第 2 行重复")).toBeInTheDocument();
+    expect(screen.getByText("第 4 行与第 2 行重复")).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent(importPreviewFixture.preview_token);
     const call = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/admin/imports/preview"));
     expect(call?.[1]?.body).toBeInstanceOf(FormData);
@@ -474,11 +541,12 @@ describe("import, export and one-time password workflows", () => {
     renderWithAuth(<App />, "/admin");
     await openTab("训练集同步");
     expect(await screen.findByText("SF002：0")).toBeInTheDocument();
-    const csvLink = screen.getByRole("link", { name: "下载 CSV" });
+    const csvLink = screen.getByRole("link", { name: "下载任务 CSV" });
     expect(csvLink).toHaveAttribute("href", `/sukaseafood/api/v1/admin/exports/${IDS.batch}.csv`);
     expect(csvLink).toHaveAttribute("download", `sukaseafood-export-${IDS.batch}.csv`);
-    expect(screen.getByText(/Windows 本地下载工具/)).toBeInTheDocument();
-    expect(screen.getByText(/失败或待处理项目仍可进入后续批次/)).toBeInTheDocument();
+    expect(screen.getByText(/本地下载工具/)).toBeInTheDocument();
+    expect(screen.getByText(/下载失败或尚未处理的项目仍可继续同步/)).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("Mao 的");
     await user.click(screen.getByRole("button", { name: "创建同步批次" }));
     expect(await screen.findByRole("status")).toHaveTextContent("没有待同步项目");
     await user.click(screen.getByRole("button", { name: "创建同步批次" }));
@@ -508,6 +576,14 @@ describe("import, export and one-time password workflows", () => {
     await openTab("账号");
     expect(await screen.findAllByRole("row")).toHaveLength(7);
     expect(screen.queryByRole("button", { name: "重置 Mao 密码" })).not.toBeInTheDocument();
+    const maoRow = screen.getByRole("row", { name: /Mao 管理员 启用/ });
+    const hassanRow = screen.getByRole("row", { name: /Hassan 审核员 启用/ });
+    expect(maoRow).toHaveClass("admin-account-row");
+    expect(hassanRow).toHaveClass("admin-account-row");
+    expect(within(maoRow).getByText("管理员账号只能通过服务器命令重置")).toHaveClass(
+      "admin-account-action-placeholder",
+    );
+    expect(document.body).not.toHaveTextContent("Mao 只能");
     await user.click(screen.getByRole("button", { name: "重置 Hassan 密码" }));
     await user.type(screen.getByLabelText("密码重置原因"), "账号恢复");
     await user.click(screen.getByRole("button", { name: "继续重置 Hassan" }));

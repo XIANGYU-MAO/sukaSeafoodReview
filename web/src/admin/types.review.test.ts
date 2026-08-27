@@ -192,4 +192,27 @@ describe("Task 12 review runtime mutation contracts", () => {
       exactSpeciesVerified: "REVIEW",
     } as never)).toThrow();
   });
+
+  it("accepts canonical facts when an image is rejected because it is not a fish", () => {
+    expect(() => parseReviewReceipt({
+      id: IDS.review,
+      candidate_id: IDS.candidate,
+      reviewer_id: IDS.hassan,
+      decision: "REJECTED",
+      rejection_reason: "NOT_A_FISH",
+      notes: null,
+      whole_fish: "NO",
+      exact_species_verified: "NO",
+      is_current: true,
+      version: 2,
+    }, {
+      id: IDS.review,
+      candidateId: IDS.candidate,
+      reviewerId: IDS.hassan,
+      previousVersion: 1,
+      decision: "REJECTED",
+      rejectionReason: "NOT_A_FISH",
+      notes: null,
+    })).not.toThrow();
+  });
 });

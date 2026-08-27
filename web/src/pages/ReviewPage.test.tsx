@@ -85,6 +85,14 @@ function uuidSequence(...values: string[]) {
 }
 
 describe("ReviewPage current candidate", () => {
+  it("centers the initial menu loading indicator in the viewport", () => {
+    vi.stubGlobal("fetch", vi.fn(() => deferred<Response>().promise));
+    renderPage();
+
+    expect(screen.getByRole("status", { name: "正在取得待审核图片…" }))
+      .toHaveClass("page-loading-overlay");
+  });
+
   it("requests current with CSRF, validates it, and renders localized safe metadata", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(candidate));
     vi.stubGlobal("fetch", fetchMock);
@@ -280,7 +288,8 @@ describe("ReviewPage immediate decision state machine", () => {
     fireEvent.click(keep);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(screen.getByText("Piscis probatio")).toBeInTheDocument();
-    expect(screen.getByText("正在保存…")).toHaveAttribute("role", "status");
+    expect(screen.getByRole("status", { name: "正在保存…" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保留 (K)" })).not.toHaveTextContent("保留 (K)");
     expect(screen.getByRole("button", { name: "保留 (K)" })).toBeDisabled();
     const decisionCall = fetchMock.mock.calls[1];
     expect(decisionCall[0]).toBe(
@@ -392,7 +401,7 @@ describe("ReviewPage immediate decision state machine", () => {
       await screen.findByText("Piscis probatio");
 
       await user.click(screen.getByRole("button", { name: "拒绝 (R)" }));
-      await user.click(screen.getByRole("radio", { name: "鱼种错误" }));
+      await user.click(screen.getByRole("radio", { name: "其他" }));
       await user.click(screen.getByRole("button", { name: buttonName }));
       expect(await screen.findByRole("alert")).toHaveTextContent("保存结果无法确认");
 
@@ -443,7 +452,7 @@ describe("ReviewPage immediate decision state machine", () => {
     expect(uuidSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the ambiguous key when rejection UI opens and closes without a concrete change", async () => {
+  it("keeps the ambiguous key when rejection UI opens without a concrete change", async () => {
     const approved = { decision: "APPROVED", rejection_reason: null, notes: null };
     const fetchMock = vi
       .fn()
@@ -463,7 +472,6 @@ describe("ReviewPage immediate decision state machine", () => {
     await user.click(screen.getByRole("button", { name: "保留 (K)" }));
     await screen.findByRole("alert");
     await user.click(screen.getByRole("button", { name: "拒绝 (R)" }));
-    await user.click(screen.getByRole("button", { name: "取消拒绝" }));
     expect(screen.getByRole("button", { name: "保留 (K)" })).toHaveAttribute("aria-pressed", "true");
     await user.click(screen.getByRole("button", { name: "保留 (K)" }));
     await screen.findByText("暂时没有待审核图片。稍后重试即可。");
@@ -498,11 +506,9 @@ describe("ReviewPage immediate decision state machine", () => {
 
     await user.click(screen.getByRole("button", { name: "拒绝 (R)" }));
     await user.click(screen.getByRole("radio", { name: "鱼种错误" }));
-    await user.click(screen.getByRole("button", { name: "确认拒绝" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("保存结果无法确认");
     await user.click(screen.getByRole("radio", { name: "遮挡过多" }));
     expect(screen.queryByRole("button", { name: "重试保存" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "确认拒绝" }));
 
     const decisionCalls = fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/decision"));
     expect(decisionCalls.map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"))).toEqual([

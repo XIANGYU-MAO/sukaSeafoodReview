@@ -104,8 +104,8 @@ export interface AdminReviewItem {
 }
 export interface AdminReviewList { total: number; items: AdminReviewItem[] }
 
-export interface ImportIssue { row: number | null; code: string; message: string; blocking: boolean; host: string | null }
-export interface ImportIssueGroup { code: string; message: string; blocking: boolean; host: string | null; count: number; sample_rows: number[]; omitted_rows: number }
+export interface ImportIssue { row: number | null; related_row: number | null; code: string; message: string; blocking: boolean; host: string | null }
+export interface ImportIssueGroup { code: string; message: string; blocking: boolean; host: string | null; count: number; sample_rows: number[]; sample_related_rows: (number | null)[]; omitted_rows: number }
 export interface ImportPreview {
   total: number; new_rows: number; exact_duplicates: number; url_duplicates: number;
   invalid_species: number; missing_urls: number; invalid_licenses: number; invalid_sources: number;
@@ -270,8 +270,14 @@ export function parseImportPreview(value: unknown): ImportPreview {
     const root = object(value);
     const countKeys = ["total", "new_rows", "exact_duplicates", "url_duplicates", "invalid_species", "missing_urls", "invalid_licenses", "invalid_sources", "conflicting_identities", "parse_errors", "warnings", "blocking_errors", "omitted_issue_details"] as const;
     const counts = Object.fromEntries(countKeys.map((key) => [key, integer(root[key])])) as unknown as Pick<ImportPreview, typeof countKeys[number]>;
-    const issues = array(root.issues, 100).map((entry) => { const item = object(entry); exact(item, ["row", "code", "message", "blocking", "host"]); return { row: item.row === null ? null : positive(item.row), code: enumCode(item.code), message: text(item.message, 500), blocking: bool(item.blocking), host: item.host === null ? null : text(item.host, 253) }; });
-    const issueGroups = array(root.issue_groups, 100).map((entry) => { const item = object(entry); exact(item, ["code", "message", "blocking", "host", "count", "sample_rows", "omitted_rows"]); return { code: enumCode(item.code), message: text(item.message, 500), blocking: bool(item.blocking), host: item.host === null ? null : text(item.host, 253), count: positive(item.count), sample_rows: array(item.sample_rows, 10).map(positive), omitted_rows: integer(item.omitted_rows) }; });
+    const issues = array(root.issues, 100).map((entry) => { const item = object(entry); exact(item, ["row", "related_row", "code", "message", "blocking", "host"]); return { row: item.row === null ? null : positive(item.row), related_row: item.related_row === null ? null : positive(item.related_row), code: enumCode(item.code), message: text(item.message, 500), blocking: bool(item.blocking), host: item.host === null ? null : text(item.host, 253) }; });
+    const issueGroups = array(root.issue_groups, 100).map((entry) => {
+      const item = object(entry); exact(item, ["code", "message", "blocking", "host", "count", "sample_rows", "sample_related_rows", "omitted_rows"]);
+      const sampleRows = array(item.sample_rows, 10).map(positive);
+      const sampleRelatedRows = array(item.sample_related_rows, 10).map((row) => row === null ? null : positive(row));
+      if (sampleRelatedRows.length !== sampleRows.length) fail();
+      return { code: enumCode(item.code), message: text(item.message, 500), blocking: bool(item.blocking), host: item.host === null ? null : text(item.host, 253), count: positive(item.count), sample_rows: sampleRows, sample_related_rows: sampleRelatedRows, omitted_rows: integer(item.omitted_rows) };
+    });
     const token = root.preview_token === null ? null : text(root.preview_token, 512, 32);
     const preview = {
       ...counts, source_counts: countMap(root.source_counts), species_counts: countMap(root.species_counts), can_commit: bool(root.can_commit),
@@ -432,5 +438,6 @@ function canonicalFacts(decisionValue: DecisionCode, rejection: RejectionReasonC
   if (decisionValue === "APPROVED") return { whole: "YES", exact: "YES" };
   if (decisionValue === "REJECTED" && rejection === "WRONG_SPECIES") return { whole: "REVIEW", exact: "NO" };
   if (decisionValue === "REJECTED" && rejection === "NOT_WHOLE_FISH") return { whole: "NO", exact: "REVIEW" };
+  if (decisionValue === "REJECTED" && rejection === "NOT_A_FISH") return { whole: "NO", exact: "NO" };
   return { whole: "REVIEW", exact: "REVIEW" };
 }

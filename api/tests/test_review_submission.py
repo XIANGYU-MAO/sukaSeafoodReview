@@ -56,6 +56,11 @@ async def create_database(settings, *, must_change_password=False):
             "REVIEW",
         ),
         (
+            {"decision": "REJECTED", "rejection_reason": "NOT_A_FISH"},
+            "NO",
+            "NO",
+        ),
+        (
             {"decision": "REJECTED", "rejection_reason": "TOO_OCCLUDED"},
             "REVIEW",
             "REVIEW",
@@ -175,6 +180,7 @@ def test_other_notes_are_trimmed_and_stable_rejection_codes_are_complete():
     assert {reason.value for reason in RejectionReason} == {
         "WRONG_SPECIES",
         "NOT_WHOLE_FISH",
+        "NOT_A_FISH",
         "COOKED_OR_PROCESSED",
         "TOO_OCCLUDED",
         "TOO_SMALL_OR_BLURRY",

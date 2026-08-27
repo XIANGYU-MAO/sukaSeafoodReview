@@ -13,6 +13,7 @@ import {
   type RejectionReasonCode,
 } from "../api/types";
 import { PillChoiceGroup } from "../components/PillChoiceGroup";
+import { ScreenLoader } from "../components/ScreenLoader";
 import {
   decisionLabel,
   rejectionReasonLabel,
@@ -69,6 +70,7 @@ export function HistoryPage({ csrfToken, reviewerId, retryBootstrap }: HistoryPa
   const [failedPayload, setFailedPayload] = useState<(DecisionPayload & { version: number }) | null>(null);
   const [savedId, setSavedId] = useState<string | null>(null);
   const [readOnlyNoticeId, setReadOnlyNoticeId] = useState<string | null>(null);
+  const [previewItem, setPreviewItem] = useState<HistoryItem | null>(null);
   const loadGeneration = useRef(0);
   const loadController = useRef<AbortController | null>(null);
   const editGeneration = useRef(0);
@@ -124,6 +126,15 @@ export function HistoryPage({ csrfToken, reviewerId, retryBootstrap }: HistoryPa
     editController.current?.abort();
     editPendingRef.current = false;
   }, []);
+
+  useEffect(() => {
+    if (!previewItem) return;
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setPreviewItem(null);
+    }
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [previewItem]);
 
   function updateFilter(key: keyof HistoryFilters, value: string) {
     setDraftFilters((current) => ({ ...current, [key]: value } as HistoryFilters));
@@ -344,22 +355,39 @@ export function HistoryPage({ csrfToken, reviewerId, retryBootstrap }: HistoryPa
           <button className="text-button" type="button" onClick={() => void loadHistory()}>{t("retryHistory")}</button>
         </div>
       ) : null}
-      {status === "loading" && history === null ? <div className="history-loading" aria-hidden="true"><span className="spinner" /></div> : null}
+      {status === "loading" && history === null || status === "auth-refresh"
+        ? <ScreenLoader label={t("loadingHistory")} />
+        : null}
       {status !== "auth-refresh" && history?.items.length === 0 ? <p className="empty-history" role="status">{t("emptyHistory")}</p> : null}
       <section className="history-list">
         {history?.items.map((item) => (
           <article className="history-card" key={item.id}>
-            <img
-              className="history-thumbnail"
-              src={item.preview_url}
-              alt={`${locale === "zh" ? item.species.name_zh : item.species.name_en} (${item.species.scientific_name})`}
-              loading="lazy"
-              referrerPolicy="no-referrer"
-            />
+            <button
+              className="history-thumbnail-viewer"
+              type="button"
+              aria-label={t("viewFullImage")}
+              onClick={() => setPreviewItem(item)}
+            >
+              <img
+                className="history-thumbnail"
+                src={item.preview_url}
+                alt={`${locale === "zh" ? item.species.name_zh : item.species.name_en} (${item.species.scientific_name})`}
+                loading="lazy"
+                referrerPolicy="no-referrer"
+              />
+              <span className="history-enlarge-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <circle cx="10.5" cy="10.5" r="6.5" />
+                  <path d="m15.5 15.5 4 4M7.5 10.5h6M10.5 7.5v6" />
+                </svg>
+              </span>
+            </button>
             <div className="history-card__body">
               <div className="history-card__title">
                 <div><span className="species-code">{item.species.code}</span><h2>{locale === "zh" ? item.species.name_zh : item.species.name_en} <em>{item.species.scientific_name}</em></h2></div>
-                <strong className="history-decision">{decisionLabel(locale, item.decision)}</strong>
+                <strong className={`history-decision history-decision--${item.decision.toLowerCase()}`}>
+                  {decisionLabel(locale, item.decision)}
+                </strong>
               </div>
               <p>{sourceLabel(locale, item.source_dataset)} · {item.source_record_id}</p>
               <div className="history-links">
@@ -395,6 +423,33 @@ export function HistoryPage({ csrfToken, reviewerId, retryBootstrap }: HistoryPa
           <span>{pageNumber} / {pageCount}</span>
           <button className="secondary-button" type="button" disabled={offset + PAGE_LIMIT >= total || status === "loading"} onClick={() => setOffset(offset + PAGE_LIMIT)}>{t("nextPage")}</button>
         </nav>
+      ) : null}
+      {previewItem ? (
+        <div
+          className="history-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("fullImage")}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setPreviewItem(null);
+          }}
+        >
+          <div className="history-lightbox__content" onMouseDown={(event) => event.stopPropagation()}>
+            <button
+              className="history-lightbox__close"
+              type="button"
+              aria-label={t("closeFullImage")}
+              onClick={() => setPreviewItem(null)}
+            >
+              ×
+            </button>
+            <img
+              src={previewItem.original_url}
+              alt={`${locale === "zh" ? previewItem.species.name_zh : previewItem.species.name_en} (${previewItem.species.scientific_name})`}
+              referrerPolicy="no-referrer"
+            />
+          </div>
+        </div>
       ) : null}
     </main>
   );

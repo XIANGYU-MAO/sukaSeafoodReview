@@ -38,6 +38,7 @@ export type DecisionCode = (typeof DECISION_CODES)[number];
 export const REJECTION_REASON_CODES = [
   "WRONG_SPECIES",
   "NOT_WHOLE_FISH",
+  "NOT_A_FISH",
   "COOKED_OR_PROCESSED",
   "TOO_OCCLUDED",
   "TOO_SMALL_OR_BLURRY",

@@ -13,6 +13,7 @@ from app.models import Decision, Review
 class RejectionReason(StrEnum):
     WRONG_SPECIES = "WRONG_SPECIES"
     NOT_WHOLE_FISH = "NOT_WHOLE_FISH"
+    NOT_A_FISH = "NOT_A_FISH"
     COOKED_OR_PROCESSED = "COOKED_OR_PROCESSED"
     TOO_OCCLUDED = "TOO_OCCLUDED"
     TOO_SMALL_OR_BLURRY = "TOO_SMALL_OR_BLURRY"

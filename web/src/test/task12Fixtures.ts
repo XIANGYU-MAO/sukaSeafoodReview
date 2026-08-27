@@ -174,12 +174,12 @@ export const importPreviewFixture = {
   can_commit: true,
   file_sha256: "a".repeat(64),
   issues: [
-    { row: 3, code: "EXACT_DUPLICATE", message: "duplicate", blocking: false, host: null },
-    { row: 4, code: "DUPLICATE_IMAGE_URL", message: "duplicate URL", blocking: false, host: null },
+    { row: 3, related_row: 2, code: "EXACT_DUPLICATE", message: "duplicate", blocking: false, host: null },
+    { row: 4, related_row: 2, code: "DUPLICATE_IMAGE_URL", message: "duplicate URL", blocking: false, host: null },
   ],
   issue_groups: [
-    { code: "EXACT_DUPLICATE", message: "duplicate", blocking: false, host: null, count: 1, sample_rows: [3], omitted_rows: 0 },
-    { code: "DUPLICATE_IMAGE_URL", message: "duplicate URL", blocking: false, host: null, count: 1, sample_rows: [4], omitted_rows: 0 },
+    { code: "EXACT_DUPLICATE", message: "duplicate", blocking: false, host: null, count: 1, sample_rows: [3], sample_related_rows: [2], omitted_rows: 0 },
+    { code: "DUPLICATE_IMAGE_URL", message: "duplicate URL", blocking: false, host: null, count: 1, sample_rows: [4], sample_related_rows: [2], omitted_rows: 0 },
   ],
   issues_truncated: false,
   omitted_issue_details: 0,

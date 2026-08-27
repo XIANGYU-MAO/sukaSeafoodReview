@@ -111,7 +111,7 @@ export function sourceLabel(code: string): string { return sourceLabels[code] ??
 
 export const decisionLabels = { APPROVED: "保留", REJECTED: "拒绝", UNSURE: "不确定" } as const;
 export const rejectionLabels = {
-  WRONG_SPECIES: "鱼种错误", NOT_WHOLE_FISH: "不是完整鱼体", COOKED_OR_PROCESSED: "已烹饪或加工",
+  WRONG_SPECIES: "鱼种错误", NOT_WHOLE_FISH: "不是完整鱼体", NOT_A_FISH: "不是鱼", COOKED_OR_PROCESSED: "已烹饪或加工",
   TOO_OCCLUDED: "遮挡严重", TOO_SMALL_OR_BLURRY: "过小或模糊", DUPLICATE: "重复图片",
   ARTWORK_OR_DIAGRAM: "绘画或示意图", LICENSE_OR_SOURCE_CONCERN: "许可证或来源问题",
   IMAGE_URL_UNAVAILABLE: "图片地址失效", OTHER: "其他",

@@ -35,6 +35,14 @@ function editedReview(overrides: Record<string, unknown> = {}) {
 }
 
 describe("HistoryPage private filters and paging", () => {
+  it("centers the initial menu loading indicator in the viewport", () => {
+    vi.stubGlobal("fetch", vi.fn(() => deferred<Response>().promise));
+    renderPage();
+
+    expect(screen.getByRole("status", { name: "正在载入历史记录…" }))
+      .toHaveClass("page-loading-overlay");
+  });
+
   it("uses localized native dropdowns, URLSearchParams, offset reset, paging, and safe dates", async () => {
     const calls: string[] = [];
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
@@ -139,6 +147,42 @@ describe("HistoryPage private filters and paging", () => {
 });
 
 describe("HistoryPage links, privacy, and editing", () => {
+  it("keeps approved, rejected, and unsure result tags visually distinct", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      ...historyFixture,
+      total: 3,
+      items: [
+        { ...historyItem, decision: "APPROVED", rejection_reason: null },
+        {
+          ...historyItem,
+          id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          candidate_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          decision: "REJECTED",
+          rejection_reason: "NOT_A_FISH",
+          whole_fish: "NO",
+          exact_species_verified: "NO",
+        },
+        {
+          ...historyItem,
+          id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          candidate_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          decision: "UNSURE",
+          rejection_reason: null,
+          whole_fish: "REVIEW",
+          exact_species_verified: "REVIEW",
+        },
+      ],
+    })));
+    renderPage();
+
+    expect(await screen.findByText("已保留", { selector: ".history-decision" }))
+      .toHaveClass("history-decision--approved");
+    expect(screen.getByText("已拒绝", { selector: ".history-decision" }))
+      .toHaveClass("history-decision--rejected");
+    expect(screen.getByText("不确定", { selector: ".history-decision" }))
+      .toHaveClass("history-decision--unsure");
+  });
+
   it("shows direct safe links/lazy thumbnail and never exposes editing for stale rows", async () => {
     const staleItem = {
       ...historyItem,
@@ -161,6 +205,36 @@ describe("HistoryPage links, privacy, and editing", () => {
     expect(within(rows[1]).queryByRole("button", { name: "编辑" })).not.toBeInTheDocument();
     expect(within(rows[1]).getByText("此记录不是当前结果，只能查看。")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalledWith(historyItem.preview_url, expect.anything());
+  });
+
+  it("keeps the existing card layout and opens the complete image in a dismissible lightbox", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(historyFixture)));
+    const user = userEvent.setup();
+    renderPage();
+
+    const card = await screen.findByRole("article");
+    expect(card).toHaveClass("history-card");
+    expect(card.querySelector(".history-card__body")).toBeInTheDocument();
+    const opener = within(card).getByRole("button", { name: "查看完整图片" });
+    expect(opener).toHaveClass("history-thumbnail-viewer");
+    expect(within(opener).getByRole("img")).toHaveAttribute("src", historyItem.preview_url);
+    expect(opener.querySelector(".history-enlarge-icon")).toBeInTheDocument();
+
+    await user.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "完整图片" });
+    expect(within(dialog).getByRole("img")).toHaveAttribute("src", historyItem.original_url);
+    await user.click(within(dialog).getByRole("img"));
+    expect(dialog).toBeInTheDocument();
+    fireEvent.mouseDown(dialog);
+    expect(screen.queryByRole("dialog", { name: "完整图片" })).not.toBeInTheDocument();
+
+    await user.click(opener);
+    await user.click(screen.getByRole("button", { name: "关闭完整图片" }));
+    expect(screen.queryByRole("dialog", { name: "完整图片" })).not.toBeInTheDocument();
+
+    await user.click(opener);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "完整图片" })).not.toBeInTheDocument();
   });
 
   it("sends one versioned CSRF PATCH and claims success only after validation and refetch", async () => {

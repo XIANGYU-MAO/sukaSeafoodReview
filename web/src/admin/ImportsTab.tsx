@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE, ApiError, request, WEB_BASE } from "../api/client";
 import { adminMutation, mutationMessage, type AdminTabProps } from "./common";
 import { HelpHint } from "./HelpHint";
-import { parseImportPreview, parseImportResult, type ImportPreview } from "./types";
+import { parseImportPreview, parseImportResult, type ImportIssueGroup, type ImportPreview } from "./types";
 
 const ISSUE_LABELS: Record<string, string> = {
   EXACT_DUPLICATE: "完全重复记录（自动跳过）",
@@ -30,6 +30,20 @@ const ISSUE_LABELS: Record<string, string> = {
   UNPARSED_SOURCE_DATE: "来源日期无法解析（不影响导入）",
   UNSAFE_URL: "地址格式确实不安全",
 };
+
+const DUPLICATE_ISSUE_CODES = new Set(["EXACT_DUPLICATE", "DUPLICATE_IMAGE_URL"]);
+
+function issueExamples(issue: ImportIssueGroup): string | null {
+  if (!issue.sample_rows.length) return null;
+  if (DUPLICATE_ISSUE_CODES.has(issue.code)) {
+    const pairs = issue.sample_rows.map((row, index) => {
+      const related = issue.sample_related_rows[index];
+      return related === null ? `第 ${row} 行与系统已有图片重复` : `第 ${row} 行与第 ${related} 行重复`;
+    });
+    return `${pairs.join("；")}${issue.omitted_rows ? `；另有 ${issue.omitted_rows} 行` : ""}`;
+  }
+  return `示例行：${issue.sample_rows.join("、")}${issue.omitted_rows ? `，另有 ${issue.omitted_rows} 行` : ""}`;
+}
 
 type Confirmation = "normal" | "skip" | null;
 type CommandPlatform = "windows" | "unix";
@@ -278,7 +292,7 @@ export function ImportsTab(props: AdminTabProps) {
         <div className="admin-stat-grid">{summaries.map(([label, count]) => <div key={label}><span>{label}</span><strong>{count}</strong></div>)}</div>
         <div className="admin-split"><div><h4>来源数量</h4><ul>{Object.entries(preview.source_counts).map(([code, count]) => <li key={code}>{code}：{count}</li>)}</ul></div><div><h4>鱼种数量</h4><ul>{Object.entries(preview.species_counts).map(([code, count]) => <li key={code}>{code}：{count}</li>)}</ul></div></div>
         <h4>问题汇总</h4>
-        {preview.issue_groups.length ? <ul className="import-issue-groups">{preview.issue_groups.map((issue) => <li key={`${issue.code}-${issue.host ?? "none"}`} className={issue.blocking ? "issue-blocking" : "issue-warning"}><div><strong>{issue.blocking ? "阻断" : "警告"} · {ISSUE_LABELS[issue.code] ?? issue.message}</strong>{issue.host ? <span> · {issue.host}</span> : null}<span> · 共 {issue.count} 行</span>{issue.sample_rows.length ? <small>示例行：{issue.sample_rows.join("、")}{issue.omitted_rows ? `，另有 ${issue.omitted_rows} 行` : ""}</small> : null}</div>{issue.code === "UNAPPROVED_IMAGE_HOST" && issue.host && preview.preview_token ? <button type="button" className="secondary-button" disabled={pending} onClick={() => void approveOrigin(issue.host!)}>批准此来源并重新预检查</button> : null}</li>)}</ul> : <p>没有问题。</p>}
+        {preview.issue_groups.length ? <ul className="import-issue-groups">{preview.issue_groups.map((issue) => <li key={`${issue.code}-${issue.host ?? "none"}`} className={issue.blocking ? "issue-blocking" : "issue-warning"}><div><strong>{issue.blocking ? "阻断" : "警告"} · {ISSUE_LABELS[issue.code] ?? issue.message}</strong>{issue.host ? <span> · {issue.host}</span> : null}<span> · 共 {issue.count} 行</span>{issueExamples(issue) ? <small>{issueExamples(issue)}</small> : null}</div>{issue.code === "UNAPPROVED_IMAGE_HOST" && issue.host && preview.preview_token ? <button type="button" className="secondary-button" disabled={pending} onClick={() => void approveOrigin(issue.host!)}>批准此来源并重新预检查</button> : null}</li>)}</ul> : <p>没有问题。</p>}
         {confirmation === null ? <div className="inline-actions equal-action-row">
           {preview.can_commit ? <button type="button" className="primary-button compact-button" disabled={!preview.preview_token || pending} onClick={() => setConfirmation("normal")}>提交导入</button> : null}
           {!preview.can_commit && preview.new_rows > 0 ? <button type="button" className="danger-button" disabled={!preview.preview_token || pending} onClick={() => setConfirmation("skip")}>跳过阻断行并导入有效行</button> : null}
