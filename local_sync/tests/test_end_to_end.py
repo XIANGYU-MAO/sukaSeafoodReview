@@ -465,21 +465,21 @@ def test_replacement_crash_recovery_and_pre_epoch_stale_replay_converge(
 
     target = root.joinpath(*relative_path.split("/"))
     assert injected
-    assert dict(interrupted.counts) == {"succeeded": 0, "failed": 1, "skipped": 0}
+    assert dict(interrupted.counts) == {"succeeded": 1, "failed": 0, "skipped": 0}
     assert interrupted.offline_receipt_path is not None
     interrupted_receipt = json.loads(
         interrupted.offline_receipt_path.read_text("utf-8")
     )
-    assert interrupted_receipt["items"][0]["status"] == "FAILED"
-    assert interrupted_receipt["items"][0]["error"] == "INDEX_ERROR"
+    assert interrupted_receipt["items"][0]["status"] == "SUCCEEDED"
+    assert interrupted_receipt["items"][0]["error"] is None
     assert target.read_bytes() == new_jpg
-    assert SyncIndex(root).max_generation(candidate_id) == 5
+    assert SyncIndex(root).max_generation(candidate_id) == 9
     with (root / "canonical_manifest.csv").open(
         "r", encoding="utf-8-sig", newline=""
     ) as stream:
         interrupted_canonical = list(csv.DictReader(stream))
-    assert interrupted_canonical[0]["review_version"] == "5"
-    assert interrupted_canonical[0]["sha256"] == old_sha
+    assert interrupted_canonical[0]["review_version"] == "9"
+    assert interrupted_canonical[0]["sha256"] == new_sha
 
     with responses.RequestsMock() as http:
         recovered = run_sync(
@@ -487,7 +487,7 @@ def test_replacement_crash_recovery_and_pre_epoch_stale_replay_converge(
         )
         assert len(http.calls) == 0
 
-    assert dict(recovered.counts) == {"succeeded": 1, "failed": 0, "skipped": 0}
+    assert dict(recovered.counts) == {"succeeded": 0, "failed": 0, "skipped": 1}
     assert target.read_bytes() == new_jpg
     with (root / "canonical_manifest.csv").open(
         "r", encoding="utf-8-sig", newline=""
@@ -516,3 +516,60 @@ def test_replacement_crash_recovery_and_pre_epoch_stale_replay_converge(
     ) as stream:
         after_replay = list(csv.DictReader(stream))
     assert after_replay == canonical
+
+
+def test_unrecoverable_replacement_barrier_never_persists_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A receipt is not uploadable while durable replacement state is unindexed."""
+
+    root = tmp_path / "training"
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir()
+    candidate_id = _uuid(81)
+    generation_5_review = _uuid(815)
+    generation_9_review = _uuid(819)
+    generation_9_batch = _uuid(7019)
+    relative_path = f"images/SF006/{candidate_id}.jpg"
+    old_jpg = _image_bytes("JPEG", (35, 75, 115))
+    new_jpg = _image_bytes("JPEG", (185, 45, 25))
+    new_url = "https://replacement.e2e.test/unrecoverable-9.jpg"
+    _seed_present(
+        root,
+        candidate_id=candidate_id,
+        review_id=generation_5_review,
+        review_version=5,
+        relative_path=relative_path,
+        body=old_jpg,
+    )
+    generation_9_row = valid_row(
+        batch_id=generation_9_batch,
+        candidate_id=candidate_id,
+        review_id=generation_9_review,
+        review_version=9,
+        target_relative_path=relative_path,
+        previous_relative_path=relative_path,
+        original_url=new_url,
+        source_url="https://replacement.e2e.test/record/81",
+    )
+    generation_9_manifest = write_manifest(
+        manifest_dir, rows=[generation_9_row], name="unrecoverable-9.csv"
+    )
+    original_record_success = SyncIndex.record_success
+
+    def reject_generation_9(self: SyncIndex, result: SyncResult):
+        if result.review_version == 9:
+            raise RuntimeError("persistent simulated index outage")
+        return original_record_success(self, result)
+
+    monkeypatch.setattr(SyncIndex, "record_success", reject_generation_9)
+    with responses.RequestsMock() as http:
+        http.add(responses.GET, new_url, body=new_jpg, status=200)
+        outcome = run_sync(
+            SyncRequest(generation_9_manifest, root, submit=False), Event()
+        )
+
+    assert outcome.exit_code == 2
+    assert outcome.offline_receipt_path is None
+    assert not (root / f"download_receipt-{generation_9_batch}.json").exists()
+    assert SyncIndex(root).max_generation(candidate_id) == 5

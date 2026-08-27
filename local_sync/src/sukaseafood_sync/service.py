@@ -8,7 +8,7 @@ from typing import Callable, Mapping
 
 import requests
 
-from .engine import ProgressEvent, SyncCallbacks, SyncEngine
+from .engine import ProgressEvent, SyncCallbacks, SyncEngine, SyncEngineError
 from .index import SyncIndex
 from .manifest import load_manifest
 from .receipt import (
@@ -265,6 +265,8 @@ def run_sync(
             receipt_directory,
         )
         return SyncOutcome(4, f"回执未完整上传，已保存：{saved}", counts, saved)
+    except SyncEngineError:
+        return SyncOutcome(2, "同步恢复或规范清单校验失败", counts)
     except ReceiptError:
         return SyncOutcome(2, "回执文件无法保存或验证", counts)
     finally:

@@ -620,40 +620,65 @@ class SyncEngine:
                                         downloaded, download_destination
                                     )
                                     raise
-                                downloaded = _promote_isolated_staging(
-                                    safe_root,
-                                    row,
-                                    destination,
-                                    download_destination,
-                                    downloaded,
+                                operation_started = True
+                                result = recover_add(
+                                    safe_root, row, index, operation_log=logger
                                 )
-                                prepare_add_intent(safe_root, row, downloaded, index)
-                                if cancel_event.is_set():
-                                    cancelled = True
+                                operation_started = False
+                                if result is not None:
+                                    _discard_isolated_staging(
+                                        downloaded, download_destination
+                                    )
+                                    write_canonical_manifest_locked(
+                                        safe_root,
+                                        manifest,
+                                        (self._receipt(row, result),),
+                                    )
+                                else:
+                                    prepare_add_intent(
+                                        safe_root,
+                                        row,
+                                        downloaded,
+                                        index,
+                                        isolated_staging_path=downloaded.staging_path,
+                                    )
+                                    downloaded = _promote_isolated_staging(
+                                        safe_root,
+                                        row,
+                                        destination,
+                                        download_destination,
+                                        downloaded,
+                                    )
+                                    if cancel_event.is_set():
+                                        cancelled = True
+                                        self._emit(
+                                            callbacks,
+                                            current=current,
+                                            total=total,
+                                            row=row,
+                                            phase="CANCELLED",
+                                        )
+                                        break
                                     self._emit(
                                         callbacks,
                                         current=current,
                                         total=total,
                                         row=row,
-                                        phase="CANCELLED",
+                                        phase="APPLYING",
                                     )
-                                    break
-                                self._emit(
-                                    callbacks,
-                                    current=current,
-                                    total=total,
-                                    row=row,
-                                    phase="APPLYING",
-                                )
-                                operation_started = True
-                                result = apply_add(
-                                    safe_root, row, downloaded, index, logger=logger
-                                )
-                                write_canonical_manifest_locked(
-                                    safe_root,
-                                    manifest,
-                                    (self._receipt(row, result),),
-                                )
+                                    operation_started = True
+                                    result = apply_add(
+                                        safe_root,
+                                        row,
+                                        downloaded,
+                                        index,
+                                        logger=logger,
+                                    )
+                                    write_canonical_manifest_locked(
+                                        safe_root,
+                                        manifest,
+                                        (self._receipt(row, result),),
+                                    )
                     elif row.action == "MOVE":
                         self._emit(
                             callbacks,
@@ -752,6 +777,52 @@ class SyncEngine:
                     session.close()
                 except Exception:
                     pass
+
+        try:
+            with root_state_lock(safe_root):
+                for position, receipt in enumerate(tuple(receipts)):
+                    row = manifest.rows[position]
+                    if row.action != "ADD":
+                        continue
+                    pending = index.get_add_intent(
+                        row.candidate_id,
+                        row.review_id,
+                        row.review_version,
+                        row.action,
+                    )
+                    replacement_pending = (
+                        pending is not None
+                        and pending.prior_relative_path is not None
+                    )
+                    if receipt.status != "SUCCEEDED" and not replacement_pending:
+                        continue
+                    recovered = recover_add(
+                        safe_root, row, index, operation_log=logger
+                    )
+                    if recovered is None:
+                        if receipt.status == "SUCCEEDED":
+                            raise SyncEngineError("RECOVERY_BARRIER_FAILED")
+                        continue
+                    reconciled = self._receipt(row, recovered)
+                    if receipt.status == "FAILED":
+                        counts["failed"] -= 1
+                        if recovered.status == "SKIPPED_ALREADY_COMPLETED":
+                            counts["skipped"] += 1
+                        else:
+                            counts["succeeded"] += 1
+                    receipts[position] = reconciled
+                    write_canonical_manifest_locked(
+                        safe_root,
+                        manifest,
+                        (reconciled,),
+                    )
+        except SyncEngineError:
+            raise
+        except Exception:
+            raise SyncEngineError("RECOVERY_BARRIER_FAILED") from None
+
+        if cancel_event.is_set():
+            cancelled = True
 
         if not cancelled:
             self._emit(

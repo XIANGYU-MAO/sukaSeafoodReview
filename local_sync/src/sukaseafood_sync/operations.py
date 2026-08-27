@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -9,7 +10,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
-from typing import Literal
+from typing import Iterator, Literal
 from uuid import UUID
 import warnings
 
@@ -28,6 +29,7 @@ from .manifest import (
 
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_HEX_32 = re.compile(r"[0-9a-f]{32}\Z", re.ASCII)
 _HEX_64 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _HEX_16 = re.compile(r"[0-9a-f]{16}\Z", re.ASCII)
 _FORMAT_SUFFIXES = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
@@ -321,19 +323,212 @@ def _read_recovery_image(
     return digest, perceptual_hash, len(content), width, height, suffix, before
 
 
-def _unlink_owned(path: Path, owned: os.stat_result, code: str) -> None:
+@contextmanager
+def _pin_link_parents(source: Path, target: Path) -> Iterator[None]:
+    """On Windows, deny rename/delete while pathname-based linking is in flight."""
+
+    if os.name != "nt":
+        yield
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    )
+    get_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    common = Path(os.path.commonpath((source.parent, target.parent)))
+    directories: list[Path] = [common]
+    for parent in (source.parent, target.parent):
+        try:
+            relative = parent.relative_to(common)
+        except ValueError:
+            raise OperationError("PATH_UNSAFE") from None
+        cursor = common
+        for part in relative.parts:
+            cursor /= part
+            if cursor not in directories:
+                directories.append(cursor)
+
+    handles: list[int] = []
+    invalid_handle = ctypes.c_void_p(-1).value
+    try:
+        for directory in directories:
+            before = _lstat(directory, "PARENT_UNSAFE")
+            if before is None or not stat.S_ISDIR(before.st_mode):
+                raise OperationError("PARENT_UNSAFE")
+            handle = create_file(
+                str(directory),
+                0x80000000,  # GENERIC_READ
+                0x0001 | 0x0002,  # share read/write, intentionally not delete
+                None,
+                3,  # OPEN_EXISTING
+                0x02000000 | 0x00200000,  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+                None,
+            )
+            if handle == invalid_handle:
+                raise OperationError("PARENT_UNSAFE")
+            handles.append(handle)
+            information = _ByHandleFileInformation()
+            if not get_information(handle, ctypes.byref(information)):
+                raise OperationError("PARENT_UNSAFE")
+            current = _lstat(directory, "PARENT_UNSAFE")
+            file_index = (
+                int(information.file_index_high) << 32
+            ) | int(information.file_index_low)
+            if (
+                current is None
+                or not stat.S_ISDIR(current.st_mode)
+                or information.file_attributes & _REPARSE_POINT
+                or not _same_file(before, current)
+                or int(current.st_ino) != file_index
+            ):
+                raise OperationError("PARENT_UNSAFE")
+        yield
+    finally:
+        for handle in reversed(handles):
+            close_handle(handle)
+
+
+@contextmanager
+def _pin_owned_file(
+    path: Path, owned: os.stat_result, code: str
+) -> Iterator[None]:
+    """Deny new Windows writers while an owned file is proved and unlinked."""
+
+    if os.name != "nt":
+        yield
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    )
+    get_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    handle = create_file(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x0001 | 0x0004,  # share read/delete, intentionally not write
+        None,
+        3,  # OPEN_EXISTING
+        0x00200000,  # FILE_FLAG_OPEN_REPARSE_POINT
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise OperationError(code)
+    try:
+        information = _ByHandleFileInformation()
+        if not get_information(handle, ctypes.byref(information)):
+            raise OperationError(code)
+        current = _lstat(path, code)
+        file_index = (
+            int(information.file_index_high) << 32
+        ) | int(information.file_index_low)
+        if (
+            current is None
+            or not _regular(current)
+            or information.file_attributes & _REPARSE_POINT
+            or not _same_file(owned, current)
+            or int(current.st_ino) != file_index
+        ):
+            raise OperationError(code)
+        yield
+    finally:
+        close_handle(handle)
+
+
+def _unlink_owned(
+    path: Path,
+    owned: os.stat_result,
+    code: str,
+    *,
+    expected_sha: str | None = None,
+) -> None:
     current = _lstat(path, code)
     if current is None:
         return
     if not _regular(current) or not _same_file(current, owned):
         raise OperationError(code)
     failed = False
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return
-    except OSError:
-        failed = True
+    with _pin_owned_file(path, owned, code):
+        if expected_sha is not None:
+            digest, _size, current = _hash_regular(path, code)
+            if digest != expected_sha or not _same_file(current, owned):
+                raise OperationError("SOURCE_STATE_MISMATCH")
+        with _pin_link_parents(path, path):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return
+            except OSError:
+                failed = True
     if failed:
         raise OperationError(code)
 
@@ -346,25 +541,33 @@ def _link_no_clobber(
 ) -> os.stat_result:
     failed = False
     exists = False
-    try:
-        os.link(source, target, follow_symlinks=False)
-    except FileExistsError:
-        exists = True
-    except OSError:
-        failed = True
-    if failed:
-        raise OperationError("FILESYSTEM_OPERATION_FAILED")
-    if exists:
+    with _pin_link_parents(source, target):
+        try:
+            os.link(source, target, follow_symlinks=False)
+        except FileExistsError:
+            exists = True
+        except OSError:
+            failed = True
+        if failed:
+            raise OperationError("FILESYSTEM_OPERATION_FAILED")
+        if exists:
+            target_sha, _size, target_metadata = _hash_regular(
+                target, "TARGET_UNSAFE"
+            )
+            if target_sha != expected_sha:
+                raise OperationError("TARGET_CONFLICT")
+            return target_metadata
         target_sha, _size, target_metadata = _hash_regular(target, "TARGET_UNSAFE")
-        if target_sha != expected_sha:
-            raise OperationError("TARGET_CONFLICT")
+        if (
+            not _same_file(source_metadata, target_metadata)
+            or target_sha != expected_sha
+        ):
+            if _same_file(source_metadata, target_metadata):
+                _unlink_owned(
+                    target, target_metadata, "FILESYSTEM_OPERATION_FAILED"
+                )
+            raise OperationError("FILESYSTEM_OPERATION_FAILED")
         return target_metadata
-    target_sha, _size, target_metadata = _hash_regular(target, "TARGET_UNSAFE")
-    if not _same_file(source_metadata, target_metadata) or target_sha != expected_sha:
-        if _same_file(source_metadata, target_metadata):
-            _unlink_owned(target, target_metadata, "FILESYSTEM_OPERATION_FAILED")
-        raise OperationError("FILESYSTEM_OPERATION_FAILED")
-    return target_metadata
 
 
 def _validated_row_identity(row: ManifestRow, expected_action: str) -> None:
@@ -756,11 +959,21 @@ def _cleanup_composite_previous(
     digest, _size, owned = _hash_regular(previous_path, "SOURCE_UNSAFE")
     if digest != prior.sha256:
         raise OperationError("SOURCE_STATE_MISMATCH")
-    _unlink_owned(previous_path, owned, "FILESYSTEM_OPERATION_FAILED")
+    _unlink_owned(
+        previous_path,
+        owned,
+        "FILESYSTEM_OPERATION_FAILED",
+        expected_sha=prior.sha256,
+    )
 
 
 def _validated_download(
-    root: Path, row: ManifestRow, target_relative: PurePosixPath, result: DownloadResult
+    root: Path,
+    row: ManifestRow,
+    target_relative: PurePosixPath,
+    result: DownloadResult,
+    *,
+    isolated_staging_path: Path | None = None,
 ) -> tuple[PurePosixPath, Path, str, str, os.stat_result]:
     if not isinstance(result, DownloadResult):
         raise OperationError("DOWNLOAD_RESULT_INVALID")
@@ -781,8 +994,34 @@ def _validated_download(
     )
     if not valid_metadata:
         raise OperationError("DOWNLOAD_RESULT_INVALID")
-    staging_relative = target_relative.with_name(target_relative.name + ".part")
-    expected_staging = _resolved_path(root, staging_relative)
+    if isolated_staging_path is None:
+        staging_relative = target_relative.with_name(target_relative.name + ".part")
+        expected_staging = _resolved_path(root, staging_relative)
+    else:
+        if not isinstance(isolated_staging_path, Path):
+            raise OperationError("STAGING_PATH_INVALID")
+        expected_staging = isolated_staging_path
+        expected_parent = root.joinpath(*target_relative.parent.parts)
+        prefix = f".{target_relative.name}."
+        suffix = ".sync-download.part"
+        name = expected_staging.name
+        token = (
+            name[len(prefix) : -len(suffix)]
+            if name.startswith(prefix) and name.endswith(suffix)
+            else ""
+        )
+        if (
+            expected_staging.parent != expected_parent
+            or _HEX_32.fullmatch(token) is None
+        ):
+            raise OperationError("STAGING_PATH_INVALID")
+        try:
+            lexical_relative = expected_staging.relative_to(root)
+            staging_relative = PurePosixPath(*lexical_relative.parts)
+        except ValueError:
+            raise OperationError("STAGING_PATH_INVALID") from None
+        if _resolved_path(root, staging_relative) != expected_staging:
+            raise OperationError("STAGING_PATH_INVALID")
     if not isinstance(result.staging_path, Path) or result.staging_path != expected_staging:
         raise OperationError("STAGING_PATH_INVALID")
     digest, size, staging_metadata = _hash_regular(
@@ -831,7 +1070,12 @@ def _apply_managed_replacement(
     )
     _record_replacement_intent(index, row, result, prior, backup_relative)
     _link_no_clobber(target, target_owned, backup, prior.sha256)
-    _unlink_owned(target, target_owned, "FILESYSTEM_OPERATION_FAILED")
+    _unlink_owned(
+        target,
+        target_owned,
+        "FILESYSTEM_OPERATION_FAILED",
+        expected_sha=prior.sha256,
+    )
     _link_no_clobber(staging, staging_metadata, target, result.sha256)
 
 
@@ -1102,7 +1346,12 @@ def _recover_managed_replacement(
             backup_sha = prior_sha
         if staging is None or staging_image is None:
             return _clear_replacement_intent(root, row, index, intent, prior)
-        _unlink_owned(target, target_owned, "FILESYSTEM_OPERATION_FAILED")
+        _unlink_owned(
+            target,
+            target_owned,
+            "FILESYSTEM_OPERATION_FAILED",
+            expected_sha=prior_sha,
+        )
         _link_no_clobber(staging, staging_image[6], target, intent.sha256)
     elif target_sha is None:
         if backup_sha != prior_sha or backup_metadata is None:
@@ -1301,7 +1550,12 @@ def _apply_relocation(
         _link_no_clobber(source, source_owned, target, prior.sha256)
 
     if source_owned is not None:
-        _unlink_owned(source, source_owned, "FILESYSTEM_OPERATION_FAILED")
+        _unlink_owned(
+            source,
+            source_owned,
+            "FILESYSTEM_OPERATION_FAILED",
+            expected_sha=prior.sha256,
+        )
     result = _desired_result(
         row, target_relative, prior.sha256, prior.perceptual_hash
     )
@@ -1397,6 +1651,8 @@ def prepare_add_intent(
     row: ManifestRow,
     download_result: DownloadResult,
     index: SyncIndex,
+    *,
+    isolated_staging_path: Path | None = None,
 ) -> None:
     """Persist exact recovery evidence after download but before cancellation."""
 
@@ -1404,7 +1660,11 @@ def prepare_add_intent(
     safe_root = _validated_root(root, index)
     target_relative = row.target_relative_path
     actual_relative, _staging, sha256, phash, _owned = _validated_download(
-        safe_root, row, target_relative, download_result
+        safe_root,
+        row,
+        target_relative,
+        download_result,
+        isolated_staging_path=isolated_staging_path,
     )
     result = _desired_result(row, actual_relative, sha256, phash)
     if row.previous_relative_path is not None and _same_windows_path(

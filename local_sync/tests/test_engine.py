@@ -246,6 +246,93 @@ def test_replacement_cancellation_before_swap_recovers_without_network(
     assert SyncIndex(sync_root).max_generation(generation_9.candidate_id) == 9
 
 
+def test_replacement_death_after_staging_promotion_recovers_without_network(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The promoted replacement stage must already have durable recovery intent."""
+
+    import sukaseafood_sync.engine as engine_module
+
+    sync_root.mkdir()
+    generation_5 = replace(row(66), review_version=5)
+    generation_9 = replace(
+        generation_5,
+        review_id=candidate(6609),
+        review_version=9,
+        previous_relative_path=generation_5.target_relative_path,
+        original_url="https://images.example.test/66/replacement.jpg",
+    )
+    old_jpg, old_phash, old_sha = jpeg_variant((13, 9), (35, 75, 115))
+    new_jpg, new_phash, new_sha = jpeg_variant((19, 13), (175, 45, 25))
+
+    def download_bytes(content: bytes, phash: str, sha256: str):
+        def download(session, item, destination, policy, progress, cancelled):
+            del session, item, policy, progress, cancelled
+            staging = Path(destination).with_name(Path(destination).name + ".part")
+            staging.write_bytes(content)
+            with Image.open(BytesIO(content)) as decoded:
+                width, height = decoded.size
+            return DownloadResult(
+                staging, sha256, phash, len(content), "JPEG", ".jpg", width, height
+            )
+
+        return download
+
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image",
+        download_bytes(old_jpg, old_phash, old_sha),
+    )
+    SyncEngine(session=Session()).run(
+        manifest(generation_5), sync_root, SyncCallbacks(), threading.Event()
+    )
+
+    original_promote = engine_module._promote_isolated_staging
+    died = False
+
+    def die_after_promotion(*args, **kwargs):
+        nonlocal died
+        promoted = original_promote(*args, **kwargs)
+        if not died:
+            died = True
+            raise KeyboardInterrupt("simulated death after stage promotion")
+        return promoted
+
+    monkeypatch.setattr(engine_module, "_promote_isolated_staging", die_after_promotion)
+    monkeypatch.setattr(
+        "sukaseafood_sync.engine.download_image",
+        download_bytes(new_jpg, new_phash, new_sha),
+    )
+    with pytest.raises(KeyboardInterrupt, match="after stage promotion"):
+        SyncEngine(session=Session()).run(
+            manifest(generation_9), sync_root, SyncCallbacks(), threading.Event()
+        )
+
+    pending = SyncIndex(sync_root).get_add_intent(
+        generation_9.candidate_id,
+        generation_9.review_id,
+        generation_9.review_version,
+        "ADD",
+    )
+    assert died
+    assert pending is not None
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("durable replacement recovery must precede network access")
+
+    monkeypatch.setattr("sukaseafood_sync.engine.download_image", no_network)
+    resumed = SyncEngine(session=Session()).run(
+        manifest(generation_9), sync_root, SyncCallbacks(), threading.Event()
+    )
+
+    target = local(sync_root, generation_9.target_relative_path)
+    assert resumed.counts == {"succeeded": 1, "failed": 0, "skipped": 0}
+    assert resumed.receipt_items[0].sha256 == new_sha
+    assert target.read_bytes() == new_jpg
+    assert SyncIndex(sync_root).max_generation(generation_9.candidate_id) == 9
+    assert not list(sync_root.rglob("*.part"))
+    assert not list(sync_root.rglob("*.sync-download"))
+
+
 def test_replacement_cancellation_after_backup_keeps_success_canonical(
     sync_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

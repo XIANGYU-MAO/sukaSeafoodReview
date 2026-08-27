@@ -467,6 +467,78 @@ def test_same_path_replacement_installs_new_managed_jpg_generation(
     assert not verified.staging_path.exists()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction/rename protection")
+def test_replacement_backup_parent_swap_cannot_escape_sync_root(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pinned managed parent must reject a junction swap before backup link."""
+
+    index = SyncIndex(sync_root)
+    managed = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    replacement_row = row(
+        review_version=9,
+        target_relative_path=managed,
+        previous_relative_path=managed,
+    )
+    old_jpg, old_phash = encoded_image("JPEG", (13, 9))
+    new_jpg, new_phash = encoded_image("JPEG", (19, 11))
+    target = write_file(sync_root, managed, old_jpg)
+    index.record_success(
+        SyncResult(
+            candidate_id=CANDIDATE_ID,
+            review_id=OLD_REVIEW_ID,
+            review_version=5,
+            action="ADD",
+            batch_id=BATCH_ID,
+            relative_path=managed,
+            sha256=hashlib.sha256(old_jpg).hexdigest(),
+            perceptual_hash=old_phash,
+        )
+    )
+    verified = download(
+        sync_root,
+        replacement_row,
+        content=new_jpg,
+        phash=new_phash,
+        width=19,
+        height=11,
+    )
+    outside = sync_root.parent / "outside-backups"
+    outside.mkdir()
+    replacement_link = sync_root / "prepared-backup-link"
+    try:
+        os.symlink(outside, replacement_link, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink unavailable: {error}")
+
+    original_link = operations.os.link
+    attempted = False
+    blocked = False
+
+    def swap_parent_then_link(source, destination, *args, **kwargs):
+        nonlocal attempted, blocked
+        destination_path = Path(destination)
+        backup_parent = sync_root / "_removed" / str(BATCH_ID)
+        if destination_path.parent == backup_parent and not attempted:
+            attempted = True
+            parked = backup_parent.with_name(backup_parent.name + ".parked")
+            try:
+                backup_parent.rename(parked)
+                replacement_link.rename(backup_parent)
+            except OSError:
+                blocked = True
+        return original_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(operations.os, "link", swap_parent_then_link)
+    result = apply_add(sync_root, replacement_row, verified, index)
+
+    assert attempted
+    assert blocked
+    assert result.status == "SUCCEEDED"
+    assert target.read_bytes() == new_jpg
+    assert list(outside.iterdir()) == []
+
+
 def test_same_path_replacement_rejects_user_modified_managed_target(
     sync_root: Path,
 ) -> None:
@@ -512,6 +584,127 @@ def test_same_path_replacement_rejects_user_modified_managed_target(
     latest = index.latest_for_candidate(CANDIDATE_ID)
     assert latest is not None
     assert latest.review_version == 5
+
+
+def test_same_path_replacement_rejects_in_place_change_before_owned_unlink(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Device/inode identity alone cannot authorize deleting changed source bytes."""
+
+    index = SyncIndex(sync_root)
+    managed = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    replacement_row = row(
+        review_version=9,
+        target_relative_path=managed,
+        previous_relative_path=managed,
+    )
+    old_jpg, old_phash = encoded_image("JPEG", (13, 9))
+    changed_jpg, _changed_phash = encoded_image("JPEG", (17, 13))
+    new_jpg, new_phash = encoded_image("JPEG", (23, 15))
+    target = write_file(sync_root, managed, old_jpg)
+    index.record_success(
+        SyncResult(
+            candidate_id=CANDIDATE_ID,
+            review_id=OLD_REVIEW_ID,
+            review_version=5,
+            action="ADD",
+            batch_id=BATCH_ID,
+            relative_path=managed,
+            sha256=hashlib.sha256(old_jpg).hexdigest(),
+            perceptual_hash=old_phash,
+        )
+    )
+    verified = download(
+        sync_root,
+        replacement_row,
+        content=new_jpg,
+        phash=new_phash,
+        width=23,
+        height=15,
+    )
+    original_unlink = operations._unlink_owned
+    injected = False
+
+    def mutate_then_unlink(path, owned, code, *args, **kwargs):
+        nonlocal injected
+        if Path(path) == target and not injected:
+            injected = True
+            target.write_bytes(changed_jpg)
+        return original_unlink(path, owned, code, *args, **kwargs)
+
+    monkeypatch.setattr(operations, "_unlink_owned", mutate_then_unlink)
+
+    with pytest.raises(OperationError, match="SOURCE_STATE_MISMATCH"):
+        apply_add(sync_root, replacement_row, verified, index)
+
+    assert injected
+    assert target.read_bytes() == changed_jpg
+    assert verified.staging_path.read_bytes() == new_jpg
+    latest = index.latest_for_candidate(CANDIDATE_ID)
+    assert latest is not None
+    assert latest.review_version == 5
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share ownership pin")
+def test_replacement_blocks_in_place_change_through_unlink_boundary(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final fingerprint remains stable until the owned path is unlinked."""
+
+    index = SyncIndex(sync_root)
+    managed = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    replacement_row = row(
+        review_version=9,
+        target_relative_path=managed,
+        previous_relative_path=managed,
+    )
+    old_jpg, old_phash = encoded_image("JPEG", (13, 9))
+    changed_jpg, _changed_phash = encoded_image("JPEG", (17, 13))
+    new_jpg, new_phash = encoded_image("JPEG", (23, 15))
+    target = write_file(sync_root, managed, old_jpg)
+    index.record_success(
+        SyncResult(
+            candidate_id=CANDIDATE_ID,
+            review_id=OLD_REVIEW_ID,
+            review_version=5,
+            action="ADD",
+            batch_id=BATCH_ID,
+            relative_path=managed,
+            sha256=hashlib.sha256(old_jpg).hexdigest(),
+            perceptual_hash=old_phash,
+        )
+    )
+    verified = download(
+        sync_root,
+        replacement_row,
+        content=new_jpg,
+        phash=new_phash,
+        width=23,
+        height=15,
+    )
+    original_unlink = Path.unlink
+    attempted = False
+    blocked = False
+
+    def mutate_at_unlink(path: Path, *args, **kwargs):
+        nonlocal attempted, blocked
+        if path == target and not attempted:
+            attempted = True
+            try:
+                target.write_bytes(changed_jpg)
+            except PermissionError:
+                blocked = True
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", mutate_at_unlink)
+    result = apply_add(sync_root, replacement_row, verified, index)
+
+    backup = sync_root / "_removed" / str(BATCH_ID) / target.name
+    assert attempted
+    assert blocked
+    assert result.status == "SUCCEEDED"
+    assert target.read_bytes() == new_jpg
+    assert backup.read_bytes() == old_jpg
 
 
 def test_same_path_replacement_rejects_stale_generation_without_touching_files(

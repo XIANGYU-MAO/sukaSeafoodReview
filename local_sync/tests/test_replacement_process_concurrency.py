@@ -261,3 +261,179 @@ print(json.dumps({
     assert canonical[0]["sha256"] == latest.sha256
     assert not list(root.rglob("*.part"))
     assert not list(root.rglob("*.sync-download"))
+
+
+def test_two_real_processes_same_replacement_are_idempotent(tmp_path: Path) -> None:
+    """An exact peer completion after download must become a canonical skip."""
+
+    root = tmp_path / "training"
+    root.mkdir()
+    relative = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    target = root.joinpath(*relative.parts)
+    target.parent.mkdir(parents=True)
+    old_jpg, old_phash = _jpeg((13, 9), (25, 65, 105))
+    new_jpg, new_phash = _jpeg((23, 17), (20, 155, 65))
+    target.write_bytes(old_jpg)
+    SyncIndex(root).record_success(
+        SyncResult(
+            candidate_id=CANDIDATE_ID,
+            review_id=OLD_REVIEW_ID,
+            review_version=5,
+            action="ADD",
+            batch_id=OLD_BATCH_ID,
+            relative_path=relative,
+            sha256=hashlib.sha256(old_jpg).hexdigest(),
+            perceptual_hash=old_phash,
+        )
+    )
+    old_row = _row(
+        batch_id=OLD_BATCH_ID, review_id=OLD_REVIEW_ID, review_version=5
+    )
+    write_canonical_manifest(
+        root,
+        ExportManifest((old_row,), OLD_BATCH_ID, RECEIPT_TOKEN),
+        (
+            ReceiptItem(
+                str(CANDIDATE_ID),
+                str(OLD_REVIEW_ID),
+                5,
+                "SUCCEEDED",
+                hashlib.sha256(old_jpg).hexdigest(),
+                relative.as_posix(),
+                None,
+            ),
+        ),
+    )
+
+    source = tmp_path / "generation-9.jpg"
+    source.write_bytes(new_jpg)
+    ready_dir = tmp_path / "ready"
+    ready_dir.mkdir()
+    batch_id = UUID("50000000-0000-4000-8000-000000000009")
+    review_id = UUID("60000000-0000-4000-8000-000000000009")
+    worker = r'''
+import hashlib
+from io import BytesIO
+import json
+from pathlib import Path, PurePosixPath
+import sys
+import threading
+import time
+from uuid import UUID
+
+import imagehash
+from PIL import Image
+
+from sukaseafood_sync.downloader import DownloadResult
+from sukaseafood_sync.engine import SyncCallbacks, SyncEngine
+from sukaseafood_sync.manifest import ExportManifest, ManifestRow
+
+root = Path(sys.argv[1])
+candidate = UUID(sys.argv[2])
+batch = UUID(sys.argv[3])
+review = UUID(sys.argv[4])
+source = Path(sys.argv[5])
+ready_dir = Path(sys.argv[6])
+worker_id = sys.argv[7]
+relative = PurePosixPath(f"images/SF006/{candidate}.jpg")
+row = ManifestRow(
+    batch_id=batch,
+    action="ADD",
+    candidate_id=candidate,
+    review_id=review,
+    review_version=9,
+    species_code="SF006",
+    target_relative_path=relative,
+    previous_relative_path=relative,
+    preview_url="https://images.example.test/9/preview.jpg",
+    original_url="https://images.example.test/9/original.jpg",
+    source_url="https://catalog.example.test/record/888",
+    creator="Researcher",
+    license="CC BY 4.0",
+    license_url="https://creativecommons.org/licenses/by/4.0/",
+    attribution="Researcher / Catalog",
+)
+
+def download(session, manifest_row, destination, policy, progress, cancelled):
+    del session, manifest_row, policy, progress, cancelled
+    content = source.read_bytes()
+    staging = Path(destination).with_name(Path(destination).name + ".part")
+    staging.write_bytes(content)
+    with Image.open(BytesIO(content)) as decoded:
+        width, height = decoded.size
+        phash = str(imagehash.phash(decoded.convert("RGB"))).lower()
+    (ready_dir / f"{worker_id}.ready").write_text("ready", encoding="ascii")
+    deadline = time.monotonic() + 10
+    while len(list(ready_dir.glob("*.ready"))) < 2:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("peer process did not reach download barrier")
+        time.sleep(0.01)
+    return DownloadResult(
+        staging,
+        hashlib.sha256(content).hexdigest(),
+        phash,
+        len(content),
+        "JPEG",
+        ".jpg",
+        width,
+        height,
+    )
+
+result = SyncEngine(downloader=download).run(
+    ExportManifest((row,), batch, "A" * 20),
+    root,
+    SyncCallbacks(),
+    threading.Event(),
+)
+print(json.dumps({"counts": result.counts, "items": [
+    {"status": item.status, "error": item.error} for item in result.receipt_items
+]}, sort_keys=True))
+'''
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                worker,
+                str(root),
+                str(CANDIDATE_ID),
+                str(batch_id),
+                str(review_id),
+                str(source),
+                str(ready_dir),
+                str(worker_id),
+            ],
+            cwd=Path(__file__).parents[1],
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for worker_id in (1, 2)
+    ]
+    outputs = [process.communicate(timeout=30) for process in processes]
+
+    assert [process.returncode for process in processes] == [0, 0], outputs
+    payloads = [json.loads(stdout) for stdout, _stderr in outputs]
+    assert all(payload["items"] == [{"status": "SUCCEEDED", "error": None}] for payload in payloads)
+    assert sorted(payload["counts"]["succeeded"] for payload in payloads) == [0, 1]
+    assert sorted(payload["counts"]["skipped"] for payload in payloads) == [0, 1]
+    assert all(payload["counts"]["failed"] == 0 for payload in payloads)
+
+    latest = SyncIndex(root).latest_for_candidate(CANDIDATE_ID)
+    assert latest is not None
+    assert latest.review_version == 9
+    assert latest.sha256 == hashlib.sha256(new_jpg).hexdigest()
+    assert latest.perceptual_hash == new_phash
+    assert target.read_bytes() == new_jpg
+    with (root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        canonical = list(csv.DictReader(stream))
+    assert len(canonical) == 1
+    assert canonical[0]["review_version"] == "9"
+    assert canonical[0]["sha256"] == latest.sha256
+    assert not list(root.rglob("*.part"))
+    assert not list(root.rglob("*.sync-download"))
