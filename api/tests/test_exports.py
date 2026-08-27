@@ -586,6 +586,7 @@ def test_metadata_refresh_and_original_url_change_emit_add_but_unchanged_state_d
         assert metadata_rows[0]["action"] == "ADD"
         assert metadata_rows[0]["creator"] == "Corrected Creator"
         assert metadata_rows[0]["target_relative_path"] == local["target_relative_path"]
+        assert metadata_rows[0]["previous_relative_path"] == ""
         done = receipt(
             client,
             metadata_batch.json()["id"],
@@ -607,6 +608,8 @@ def test_metadata_refresh_and_original_url_change_emit_add_but_unchanged_state_d
         url_batch = create_batch(client, seed)
         _, url_rows = download(client, seed, url_batch.json()["id"])
     assert url_rows[0]["action"] == "ADD"
+    assert url_rows[0]["target_relative_path"].endswith(".png")
+    assert url_rows[0]["previous_relative_path"] == local["target_relative_path"]
     assert url_rows[0]["original_url"].endswith("replacement.png")
 
 
