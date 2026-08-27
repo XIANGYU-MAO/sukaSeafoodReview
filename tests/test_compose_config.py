@@ -36,6 +36,15 @@ def test_only_api_and_web_join_external_edge_and_have_health_checks():
     assert all("ports" not in service for service in services.values())
 
 
+def test_web_build_context_contains_published_collector_zip():
+    web_context = compose("docker-compose.production.yml")["services"]["review-web"][
+        "build"
+    ]["context"]
+    assert web_context == "./web"
+    package = ROOT / web_context.removeprefix("./") / "public" / "downloads"
+    assert (package / "sukaseafood-collector.zip").is_file()
+
+
 def test_production_compose_uses_named_data_backup_and_import_storage():
     config = compose("docker-compose.production.yml")
     assert {"review-postgres-data", "review-backups", "review-imports"} <= set(
