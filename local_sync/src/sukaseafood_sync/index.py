@@ -16,7 +16,7 @@ from uuid import UUID
 from .manifest import ManifestError, resolve_inside, validate_relative_path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 INDEX_FILENAME = ".sukaseafood-sync.sqlite3"
 BUSY_TIMEOUT_MS = 5_000
 MAX_SAFE_INTEGER = 2**63 - 1
@@ -69,7 +69,7 @@ CREATE TABLE synced_items (
 )
 """
 
-_CREATE_PENDING_ADDS = """
+_CREATE_PENDING_ADDS_V2 = """
 CREATE TABLE pending_adds (
     candidate_id TEXT NOT NULL,
     review_id TEXT NOT NULL,
@@ -85,6 +85,42 @@ CREATE TABLE pending_adds (
     PRIMARY KEY (candidate_id, review_id, review_version, action)
 )
 """
+
+_CREATE_PENDING_ADDS = """
+CREATE TABLE "pending_adds" (
+    candidate_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    review_version INTEGER NOT NULL CHECK (
+        review_version >= 1 AND review_version <= 9223372036854775807
+    ),
+    action TEXT NOT NULL CHECK (action = 'ADD'),
+    batch_id TEXT NOT NULL,
+    target_relative_path TEXT NOT NULL,
+    actual_relative_path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    perceptual_hash TEXT NOT NULL,
+    prior_relative_path TEXT,
+    prior_sha256 TEXT,
+    backup_relative_path TEXT,
+    CHECK (
+        (
+            prior_relative_path IS NULL
+            AND prior_sha256 IS NULL
+            AND backup_relative_path IS NULL
+        ) OR (
+            prior_relative_path IS NOT NULL
+            AND prior_sha256 IS NOT NULL
+            AND backup_relative_path IS NOT NULL
+            AND prior_sha256 <> sha256
+        )
+    ),
+    PRIMARY KEY (candidate_id, review_id, review_version, action)
+)
+"""
+
+_CREATE_PENDING_ADDS_MIGRATION = _CREATE_PENDING_ADDS.replace(
+    '"pending_adds"', '"pending_adds_v3"', 1
+)
 
 
 def _normalized_sql(value: str) -> str:
@@ -127,6 +163,9 @@ def _normalized_sql(value: str) -> str:
 _SCHEMA_FINGERPRINT = hashlib.sha256(
     _normalized_sql(_CREATE_SYNCED_ITEMS).encode("utf-8")
 ).hexdigest()
+_PENDING_SCHEMA_FINGERPRINT_V2 = hashlib.sha256(
+    _normalized_sql(_CREATE_PENDING_ADDS_V2).encode("utf-8")
+).hexdigest()
 _PENDING_SCHEMA_FINGERPRINT = hashlib.sha256(
     _normalized_sql(_CREATE_PENDING_ADDS).encode("utf-8")
 ).hexdigest()
@@ -138,7 +177,7 @@ _EXPECTED_OBJECTS = _V1_EXPECTED_OBJECTS | {
     ("index", "sqlite_autoindex_pending_adds_1", "pending_adds"),
     ("table", "pending_adds", "pending_adds"),
 }
-_PENDING_COLUMNS = (
+_PENDING_COLUMNS_V2 = (
     "candidate_id",
     "review_id",
     "review_version",
@@ -149,7 +188,7 @@ _PENDING_COLUMNS = (
     "sha256",
     "perceptual_hash",
 )
-_PENDING_COLUMN_SHAPE = (
+_PENDING_COLUMN_SHAPE_V2 = (
     ("candidate_id", "TEXT", 1, 1),
     ("review_id", "TEXT", 1, 2),
     ("review_version", "INTEGER", 1, 3),
@@ -159,6 +198,16 @@ _PENDING_COLUMN_SHAPE = (
     ("actual_relative_path", "TEXT", 1, 0),
     ("sha256", "TEXT", 1, 0),
     ("perceptual_hash", "TEXT", 1, 0),
+)
+_PENDING_COLUMNS = _PENDING_COLUMNS_V2 + (
+    "prior_relative_path",
+    "prior_sha256",
+    "backup_relative_path",
+)
+_PENDING_COLUMN_SHAPE = _PENDING_COLUMN_SHAPE_V2 + (
+    ("prior_relative_path", "TEXT", 0, 0),
+    ("prior_sha256", "TEXT", 0, 0),
+    ("backup_relative_path", "TEXT", 0, 0),
 )
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
@@ -218,6 +267,9 @@ class AddIntent:
     actual_relative_path: PurePosixPath
     sha256: str
     perceptual_hash: str
+    prior_relative_path: PurePosixPath | None = None
+    prior_sha256: str | None = None
+    backup_relative_path: PurePosixPath | None = None
 
 
 def _uuid(value: UUID | str, field_name: str) -> UUID:
@@ -479,6 +531,47 @@ class SyncIndex:
         finally:
             connection.close()
 
+    @staticmethod
+    def _migrate_v2_pending_adds(connection: sqlite3.Connection) -> None:
+        """Replace the v2 intent table only after proving an exact copy."""
+
+        legacy_columns = ", ".join(_PENDING_COLUMNS_V2)
+        connection.execute(_CREATE_PENDING_ADDS_MIGRATION)
+        connection.execute(
+            f'INSERT INTO "pending_adds_v3" ({legacy_columns}) '
+            f"SELECT {legacy_columns} FROM pending_adds"
+        )
+        legacy_count = int(
+            connection.execute("SELECT count(*) FROM pending_adds").fetchone()[0]
+        )
+        migrated_count = int(
+            connection.execute('SELECT count(*) FROM "pending_adds_v3"').fetchone()[0]
+        )
+        missing_from_migration = connection.execute(
+            f"SELECT 1 FROM (SELECT {legacy_columns} FROM pending_adds "
+            f"EXCEPT SELECT {legacy_columns} FROM \"pending_adds_v3\") LIMIT 1"
+        ).fetchone()
+        added_by_migration = connection.execute(
+            f"SELECT 1 FROM (SELECT {legacy_columns} FROM \"pending_adds_v3\" "
+            f"EXCEPT SELECT {legacy_columns} FROM pending_adds) LIMIT 1"
+        ).fetchone()
+        unexpected_evidence = connection.execute(
+            'SELECT 1 FROM "pending_adds_v3" '
+            "WHERE prior_relative_path IS NOT NULL "
+            "OR prior_sha256 IS NOT NULL OR backup_relative_path IS NOT NULL LIMIT 1"
+        ).fetchone()
+        if (
+            legacy_count != migrated_count
+            or missing_from_migration is not None
+            or added_by_migration is not None
+            or unexpected_evidence is not None
+        ):
+            raise SyncIndexError("pending ADD migration verification failed")
+        connection.execute("DROP TABLE pending_adds")
+        connection.execute(
+            'ALTER TABLE "pending_adds_v3" RENAME TO "pending_adds"'
+        )
+
     def _initialize(self) -> None:
         connection = self._open_connection()
         try:
@@ -504,6 +597,10 @@ class SyncIndex:
             elif version == 1:
                 self._verify_schema(connection, version=1)
                 connection.execute(_CREATE_PENDING_ADDS)
+                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            elif version == 2:
+                self._verify_schema(connection, version=2)
+                self._migrate_v2_pending_adds(connection)
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise SyncIndexError(f"unsupported schema version {version}")
@@ -576,7 +673,23 @@ class SyncIndex:
             if row[5]
         )
         integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
-        expected_objects = _V1_EXPECTED_OBJECTS if version == 1 else _EXPECTED_OBJECTS
+        if version == 1:
+            expected_objects = _V1_EXPECTED_OBJECTS
+            expected_pending_fingerprint = None
+            expected_pending_columns: tuple[str, ...] = ()
+            expected_pending_shape: tuple[tuple[str, str, int, int], ...] = ()
+        elif version == 2:
+            expected_objects = _EXPECTED_OBJECTS
+            expected_pending_fingerprint = _PENDING_SCHEMA_FINGERPRINT_V2
+            expected_pending_columns = _PENDING_COLUMNS_V2
+            expected_pending_shape = _PENDING_COLUMN_SHAPE_V2
+        elif version == SCHEMA_VERSION:
+            expected_objects = _EXPECTED_OBJECTS
+            expected_pending_fingerprint = _PENDING_SCHEMA_FINGERPRINT
+            expected_pending_columns = _PENDING_COLUMNS
+            expected_pending_shape = _PENDING_COLUMN_SHAPE
+        else:
+            raise SyncIndexError(f"unsupported schema version {version}")
         if (
             object_keys != expected_objects
             or synced_fingerprint != _SCHEMA_FINGERPRINT
@@ -585,11 +698,11 @@ class SyncIndex:
             or synced_primary_key
             != ("candidate_id", "review_id", "review_version", "action")
             or (
-                version == SCHEMA_VERSION
+                version != 1
                 and (
-                    pending_fingerprint != _PENDING_SCHEMA_FINGERPRINT
-                    or pending_columns != _PENDING_COLUMNS
-                    or pending_shape != _PENDING_COLUMN_SHAPE
+                    pending_fingerprint != expected_pending_fingerprint
+                    or pending_columns != expected_pending_columns
+                    or pending_shape != expected_pending_shape
                     or pending_primary_key
                     != ("candidate_id", "review_id", "review_version", "action")
                 )
@@ -660,7 +773,13 @@ class SyncIndex:
             raise SyncIndexError("stored index row is invalid") from exc
 
     def _validated_add_intent(
-        self, result: SyncResult, target_relative_path: PurePosixPath | str
+        self,
+        result: SyncResult,
+        target_relative_path: PurePosixPath | str,
+        *,
+        prior_relative_path: PurePosixPath | str | None = None,
+        prior_sha256: str | None = None,
+        backup_relative_path: PurePosixPath | str | None = None,
     ) -> AddIntent:
         desired = self._validated_result(result)
         if desired.action != "ADD":
@@ -673,6 +792,44 @@ class SyncIndex:
             or actual.suffix.casefold() not in _ADD_DECODED_SUFFIXES
         ):
             raise SyncIndexError("pending ADD paths are incompatible")
+        replacement_presence = (
+            prior_relative_path is not None,
+            prior_sha256 is not None,
+            backup_relative_path is not None,
+        )
+        if any(replacement_presence) and not all(replacement_presence):
+            raise SyncIndexError("replacement evidence must be all present or all absent")
+        prior: PurePosixPath | None = None
+        prior_digest: str | None = None
+        backup: PurePosixPath | None = None
+        if all(replacement_presence):
+            assert prior_relative_path is not None
+            assert prior_sha256 is not None
+            assert backup_relative_path is not None
+            prior = self._safe_path(prior_relative_path)
+            prior_digest = _hash(prior_sha256, "prior_sha256", _HEX_64)
+            backup = self._safe_path(backup_relative_path)
+            candidate_name = str(desired.candidate_id)
+            if any(
+                path.stem != candidate_name for path in (target, actual, prior, backup)
+            ):
+                raise SyncIndexError(
+                    "replacement paths must identify the same candidate"
+                )
+            if prior.as_posix().casefold() != actual.as_posix().casefold():
+                raise SyncIndexError(
+                    "replacement paths must identify the same managed path"
+                )
+            if (
+                len(backup.parts) != 3
+                or backup.parts[:2] != ("_removed", str(desired.batch_id))
+                or backup.name.casefold() != prior.name.casefold()
+            ):
+                raise SyncIndexError(
+                    "replacement backup path must be inside the batch recovery area"
+                )
+            if prior_digest == desired.sha256:
+                raise SyncIndexError("replacement prior and new sha256 must differ")
         return AddIntent(
             candidate_id=desired.candidate_id,
             review_id=desired.review_id,
@@ -683,6 +840,9 @@ class SyncIndex:
             actual_relative_path=actual,
             sha256=desired.sha256,
             perceptual_hash=desired.perceptual_hash,
+            prior_relative_path=prior,
+            prior_sha256=prior_digest,
+            backup_relative_path=backup,
         )
 
     def _from_intent_row(self, row: sqlite3.Row) -> AddIntent:
@@ -700,7 +860,13 @@ class SyncIndex:
                 sha256=row["sha256"],
                 perceptual_hash=row["perceptual_hash"],
             )
-            return self._validated_add_intent(result, row["target_relative_path"])
+            return self._validated_add_intent(
+                result,
+                row["target_relative_path"],
+                prior_relative_path=row["prior_relative_path"],
+                prior_sha256=row["prior_sha256"],
+                backup_relative_path=row["backup_relative_path"],
+            )
         except (KeyError, TypeError, ValueError) as exc:
             if isinstance(exc, SyncIndexError):
                 raise
@@ -781,11 +947,23 @@ class SyncIndex:
         return self._from_intent_row(row) if row is not None else None
 
     def record_add_intent(
-        self, result: SyncResult, target_relative_path: PurePosixPath | str
+        self,
+        result: SyncResult,
+        target_relative_path: PurePosixPath | str,
+        *,
+        prior_relative_path: PurePosixPath | str | None = None,
+        prior_sha256: str | None = None,
+        backup_relative_path: PurePosixPath | str | None = None,
     ) -> AddIntent:
         """Durably bind an alternate decoded target to one exact ADD operation."""
 
-        desired = self._validated_add_intent(result, target_relative_path)
+        desired = self._validated_add_intent(
+            result,
+            target_relative_path,
+            prior_relative_path=prior_relative_path,
+            prior_sha256=prior_sha256,
+            backup_relative_path=backup_relative_path,
+        )
         key = (
             str(desired.candidate_id),
             str(desired.review_id),
@@ -810,8 +988,9 @@ class SyncIndex:
                 connection.execute(
                     "INSERT INTO pending_adds ("
                     "candidate_id, review_id, review_version, action, batch_id, "
-                    "target_relative_path, actual_relative_path, sha256, perceptual_hash"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "target_relative_path, actual_relative_path, sha256, perceptual_hash, "
+                    "prior_relative_path, prior_sha256, backup_relative_path"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         *key,
                         str(desired.batch_id),
@@ -819,6 +998,17 @@ class SyncIndex:
                         desired.actual_relative_path.as_posix(),
                         desired.sha256,
                         desired.perceptual_hash,
+                        (
+                            desired.prior_relative_path.as_posix()
+                            if desired.prior_relative_path is not None
+                            else None
+                        ),
+                        desired.prior_sha256,
+                        (
+                            desired.backup_relative_path.as_posix()
+                            if desired.backup_relative_path is not None
+                            else None
+                        ),
                     ),
                 )
                 connection.commit()
@@ -844,6 +1034,9 @@ class SyncIndex:
                 perceptual_hash=expected.perceptual_hash,
             ),
             expected.target_relative_path,
+            prior_relative_path=expected.prior_relative_path,
+            prior_sha256=expected.prior_sha256,
+            backup_relative_path=expected.backup_relative_path,
         )
         if desired != expected:
             raise SyncIndexError("expected pending ADD intent is invalid")
@@ -857,6 +1050,17 @@ class SyncIndex:
             desired.actual_relative_path.as_posix(),
             desired.sha256,
             desired.perceptual_hash,
+            (
+                desired.prior_relative_path.as_posix()
+                if desired.prior_relative_path is not None
+                else None
+            ),
+            desired.prior_sha256,
+            (
+                desired.backup_relative_path.as_posix()
+                if desired.backup_relative_path is not None
+                else None
+            ),
         )
         with self.connect() as connection:
             try:
@@ -866,7 +1070,8 @@ class SyncIndex:
                     "AND review_id = ? AND review_version = ? AND action = ? "
                     "AND batch_id = ? AND target_relative_path = ? "
                     "AND actual_relative_path = ? AND sha256 = ? "
-                    "AND perceptual_hash = ?",
+                    "AND perceptual_hash = ? AND prior_relative_path IS ? "
+                    "AND prior_sha256 IS ? AND backup_relative_path IS ?",
                     values,
                 ).rowcount
                 connection.commit()

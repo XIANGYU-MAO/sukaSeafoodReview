@@ -476,6 +476,25 @@ def _record_add_intent(
         raise OperationError("INDEX_WRITE_FAILED") from None
 
 
+def _record_replacement_intent(
+    index: SyncIndex,
+    row: ManifestRow,
+    result: SyncResult,
+    prior: SyncRecord,
+    backup_relative: PurePosixPath,
+) -> AddIntent:
+    try:
+        return index.record_add_intent(
+            result,
+            row.target_relative_path,
+            prior_relative_path=prior.relative_path,
+            prior_sha256=prior.sha256,
+            backup_relative_path=backup_relative,
+        )
+    except Exception:
+        raise OperationError("INDEX_WRITE_FAILED") from None
+
+
 def _clear_add_intent(index: SyncIndex, expected: AddIntent) -> bool:
     try:
         return index.clear_add_intent_if_matches(expected)
@@ -775,6 +794,33 @@ def _validated_download(
     return actual_relative, expected_staging, result.sha256, result.phash, staging_metadata
 
 
+def _apply_managed_replacement(
+    root: Path,
+    row: ManifestRow,
+    result: SyncResult,
+    staging: Path,
+    staging_metadata: os.stat_result,
+    index: SyncIndex,
+) -> None:
+    prior = _latest(index, row)
+    if prior is None or not prior.present or prior.relative_path != result.relative_path:
+        raise OperationError("SOURCE_STATE_MISMATCH")
+    if row.review_version <= prior.review_version:
+        raise OperationError("STALE_GENERATION")
+    target = _resolved_path(root, result.relative_path)
+    target_sha, _target_size, target_owned = _hash_regular(target, "SOURCE_UNSAFE")
+    if target_sha != prior.sha256:
+        raise OperationError("SOURCE_STATE_MISMATCH")
+    backup_relative = PurePosixPath(
+        "_removed", str(row.batch_id), result.relative_path.name
+    )
+    backup = _ensure_parents(root, backup_relative)
+    _record_replacement_intent(index, row, result, prior, backup_relative)
+    _link_no_clobber(target, target_owned, backup, prior.sha256)
+    _unlink_owned(target, target_owned, "FILESYSTEM_OPERATION_FAILED")
+    _link_no_clobber(staging, staging_metadata, target, result.sha256)
+
+
 def _apply_add(
     root: Path, row: ManifestRow, download_result: DownloadResult, index: SyncIndex
 ) -> SyncResult:
@@ -789,11 +835,19 @@ def _apply_add(
         phash,
         staging_metadata,
     ) = _validated_download(root, row, target_relative, download_result)
+    result = _desired_result(row, actual_relative, sha256, phash)
     if row.previous_relative_path is not None and _same_windows_path(
         row.previous_relative_path, actual_relative
     ):
-        raise OperationError("ADD_TARGET_COLLIDES_PREVIOUS")
-    result = _desired_result(row, actual_relative, sha256, phash)
+        _apply_managed_replacement(
+            root, row, result, staging, staging_metadata, index
+        )
+        _record(index, result)
+        try:
+            _unlink_owned(staging, staging_metadata, "FILESYSTEM_OPERATION_FAILED")
+        except OperationError:
+            pass
+        return result
     target = _ensure_parents(root, actual_relative)
     target_metadata = _lstat(target, "TARGET_UNSAFE")
     if target_metadata is not None and (
@@ -836,10 +890,159 @@ def _apply_add(
     return result
 
 
+def _clear_replacement_intent(index: SyncIndex, row: ManifestRow, intent: AddIntent) -> None:
+    if _clear_add_intent(index, intent):
+        return
+    current = _add_intent(index, row)
+    if current is not None:
+        raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+
+
+def _recover_managed_replacement(
+    root: Path,
+    row: ManifestRow,
+    index: SyncIndex,
+    intent: AddIntent,
+) -> SyncResult | None:
+    prior_relative = intent.prior_relative_path
+    prior_sha = intent.prior_sha256
+    backup_relative = intent.backup_relative_path
+    if prior_relative is None or prior_sha is None or backup_relative is None:
+        raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+    if (
+        intent.batch_id != row.batch_id
+        or intent.target_relative_path != row.target_relative_path
+        or row.previous_relative_path is None
+        or not _same_windows_path(row.previous_relative_path, intent.actual_relative_path)
+        or not _same_windows_path(prior_relative, intent.actual_relative_path)
+    ):
+        raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+
+    stored = _index_exact(index, row)
+    if stored is not None:
+        if (
+            stored.batch_id != intent.batch_id
+            or stored.relative_path != intent.actual_relative_path
+            or stored.sha256 != intent.sha256
+            or stored.perceptual_hash != intent.perceptual_hash
+        ):
+            raise OperationError("COMPLETED_STATE_STALE")
+        target = _resolved_path(root, stored.relative_path)
+        target_sha, _target_size, _target_owned = _hash_regular(
+            target, "COMPLETED_STATE_STALE"
+        )
+        if target_sha != stored.sha256:
+            raise OperationError("COMPLETED_STATE_STALE")
+        _clear_replacement_intent(index, row, intent)
+        return _skipped_result(stored)
+
+    prior = _latest(index, row)
+    if prior is None:
+        raise OperationError("SOURCE_STATE_MISMATCH")
+    if row.review_version <= prior.review_version:
+        raise OperationError("STALE_GENERATION")
+    if (
+        not prior.present
+        or prior.relative_path != prior_relative
+        or prior.sha256 != prior_sha
+    ):
+        raise OperationError("SOURCE_STATE_MISMATCH")
+
+    target = _resolved_path(root, intent.actual_relative_path)
+    backup = _ensure_parents(root, backup_relative)
+    staging_relative = intent.target_relative_path.with_name(
+        intent.target_relative_path.name + ".part"
+    )
+    staging_lexical = root.joinpath(*staging_relative.parts)
+
+    target_metadata = _lstat(target, "TARGET_UNSAFE")
+    target_sha: str | None = None
+    target_owned: os.stat_result | None = None
+    if target_metadata is not None:
+        target_sha, _target_size, target_owned = _hash_regular(target, "TARGET_UNSAFE")
+        if target_sha not in {prior_sha, intent.sha256}:
+            raise OperationError("SOURCE_STATE_MISMATCH")
+
+    backup_metadata = _lstat(backup, "SOURCE_UNSAFE")
+    backup_sha: str | None = None
+    if backup_metadata is not None:
+        backup_sha, _backup_size, backup_metadata = _hash_regular(
+            backup, "SOURCE_UNSAFE"
+        )
+        if backup_sha != prior_sha:
+            raise OperationError("SOURCE_STATE_MISMATCH")
+
+    staging_metadata = _lstat(staging_lexical, "STAGING_FILE_UNSAFE")
+    staging: Path | None = None
+    staging_image: tuple[str, str, int, int, int, str, os.stat_result] | None = None
+    if staging_metadata is not None:
+        staging = _resolved_path(root, staging_relative)
+        staging_image = _read_recovery_image(staging, None)
+        if (
+            staging_image[0] != intent.sha256
+            or staging_image[1] != intent.perceptual_hash
+            or _decoded_relative(intent.target_relative_path, staging_image[5])
+            != intent.actual_relative_path
+        ):
+            raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+
+    if target_sha == intent.sha256:
+        if backup_sha != prior_sha:
+            raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+    elif target_sha == prior_sha:
+        assert target_owned is not None
+        if backup_sha is None:
+            backup_metadata = _link_no_clobber(
+                target, target_owned, backup, prior_sha
+            )
+            backup_sha = prior_sha
+        if staging is None or staging_image is None:
+            _clear_replacement_intent(index, row, intent)
+            return None
+        _unlink_owned(target, target_owned, "FILESYSTEM_OPERATION_FAILED")
+        _link_no_clobber(staging, staging_image[6], target, intent.sha256)
+    elif target_sha is None:
+        if backup_sha != prior_sha or backup_metadata is None:
+            raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+        if staging is None or staging_image is None:
+            _link_no_clobber(backup, backup_metadata, target, prior_sha)
+            restored_sha, _restored_size, _restored_owned = _hash_regular(
+                target, "SOURCE_UNSAFE"
+            )
+            if restored_sha != prior_sha:
+                raise OperationError("SOURCE_STATE_MISMATCH")
+            _clear_replacement_intent(index, row, intent)
+            return None
+        _link_no_clobber(staging, staging_image[6], target, intent.sha256)
+    else:
+        raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+
+    installed_sha, _installed_size, _installed_owned = _hash_regular(
+        target, "TARGET_UNSAFE"
+    )
+    if installed_sha != intent.sha256:
+        raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+    result = _desired_result(
+        row, intent.actual_relative_path, intent.sha256, intent.perceptual_hash
+    )
+    _record(index, result)
+    if staging is not None and staging_image is not None:
+        try:
+            _unlink_owned(
+                staging, staging_image[6], "FILESYSTEM_OPERATION_FAILED"
+            )
+        except OperationError:
+            pass
+    return result
+
+
 def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult | None:
     target_relative, _previous = _validated_row_path(row, "ADD")
     stored = _index_exact(index, row)
     intent = _add_intent(index, row)
+
+    if intent is not None and intent.prior_relative_path is not None:
+        return _recover_managed_replacement(root, row, index, intent)
 
     staging_relative = target_relative.with_name(target_relative.name + ".part")
     staging_lexical = root.joinpath(*staging_relative.parts)
@@ -917,7 +1120,8 @@ def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult |
     ):
         if stored is None and intent is None:
             return None
-        raise OperationError("ADD_TARGET_COLLIDES_PREVIOUS")
+        if stored is None:
+            raise OperationError("ADD_TARGET_COLLIDES_PREVIOUS")
 
     sha256, phash, _byte_count, _width, _height, _suffix, _owned = target_image
     if intent is not None and (

@@ -18,6 +18,7 @@ import pytest
 
 from conftest import BATCH_ID, CANDIDATE_ID, RECEIPT_TOKEN, REVIEW_ID
 from sukaseafood_sync.index import (
+    AddIntent,
     IndexConflict,
     IndexNotFound,
     SyncIndex,
@@ -83,7 +84,7 @@ def test_constructing_index_creates_exact_root_database_and_durable_schema(
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] >= 5_000
         assert connection.execute("PRAGMA synchronous").fetchone()[0] >= 2
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         columns = [row[1] for row in connection.execute("PRAGMA table_info(synced_items)")]
         pending_columns = [
             row[1] for row in connection.execute("PRAGMA table_info(pending_adds)")
@@ -110,6 +111,9 @@ def test_constructing_index_creates_exact_root_database_and_durable_schema(
         "actual_relative_path",
         "sha256",
         "perceptual_hash",
+        "prior_relative_path",
+        "prior_sha256",
+        "backup_relative_path",
     ]
     assert not any(
         "token" in column or "url" in column
@@ -126,7 +130,7 @@ def test_connection_context_closes_owned_connection(sync_root: Path) -> None:
         connection.execute("SELECT 1")
 
 
-def test_existing_v1_index_migrates_pending_intents_without_losing_success(
+def test_existing_v1_index_migrates_schema_v3_without_losing_success(
     sync_root: Path,
 ) -> None:
     """Installing intent support must preserve an existing durable completion row."""
@@ -174,10 +178,115 @@ def test_existing_v1_index_migrates_pending_intents_without_losing_success(
     assert stored is not None
     assert stored.sha256 == "a" * 64
     with index.connect() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert connection.execute(
             "SELECT count(*) FROM pending_adds"
         ).fetchone()[0] == 0
+
+
+def test_schema_v3_migrates_v2_rows_without_losing_success_or_pending_intent(
+    sync_root: Path,
+) -> None:
+    """The table replacement must copy both durable completions and v2 intents."""
+
+    pending_candidate = UUID("99999999-9999-4999-8999-999999999999")
+    pending_review = UUID("88888888-8888-4888-8888-888888888888")
+    sync_root.mkdir(parents=True, exist_ok=True)
+    path = sync_root / ".sukaseafood-sync.sqlite3"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE synced_items (
+                candidate_id TEXT NOT NULL,
+                review_id TEXT NOT NULL,
+                review_version INTEGER NOT NULL CHECK (
+                    review_version >= 1 AND review_version <= 9223372036854775807
+                ),
+                action TEXT NOT NULL CHECK (action IN ('ADD', 'MOVE', 'REMOVE')),
+                batch_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                perceptual_hash TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                receipt_submitted_at TEXT,
+                PRIMARY KEY (candidate_id, review_id, review_version, action)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE pending_adds (
+                candidate_id TEXT NOT NULL,
+                review_id TEXT NOT NULL,
+                review_version INTEGER NOT NULL CHECK (
+                    review_version >= 1 AND review_version <= 9223372036854775807
+                ),
+                action TEXT NOT NULL CHECK (action = 'ADD'),
+                batch_id TEXT NOT NULL,
+                target_relative_path TEXT NOT NULL,
+                actual_relative_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                perceptual_hash TEXT NOT NULL,
+                PRIMARY KEY (candidate_id, review_id, review_version, action)
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO synced_items VALUES (?, ?, 5, 'ADD', ?, ?, ?, ?, ?, NULL)",
+            (
+                str(CANDIDATE_ID),
+                str(REVIEW_ID),
+                str(BATCH_ID),
+                f"images/SF006/{CANDIDATE_ID}.jpg",
+                "1" * 64,
+                "0123456789abcdef",
+                "2026-08-27T00:00:00.000000+00:00",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO pending_adds VALUES (?, ?, 7, 'ADD', ?, ?, ?, ?, ?)",
+            (
+                str(pending_candidate),
+                str(pending_review),
+                str(BATCH_ID),
+                f"images/SF006/{pending_candidate}.image",
+                f"images/SF006/{pending_candidate}.jpg",
+                "2" * 64,
+                "fedcba9876543210",
+            ),
+        )
+        connection.execute("PRAGMA user_version = 2")
+        connection.commit()
+
+    index = SyncIndex(sync_root)
+
+    latest = index.latest_for_candidate(CANDIDATE_ID)
+    assert latest is not None
+    assert latest.review_version == 5
+    assert latest.sha256 == "1" * 64
+    pending = index.get_add_intent(pending_candidate, pending_review, 7, "ADD")
+    assert pending == AddIntent(
+        candidate_id=pending_candidate,
+        review_id=pending_review,
+        review_version=7,
+        action="ADD",
+        batch_id=BATCH_ID,
+        target_relative_path=PurePosixPath(
+            f"images/SF006/{pending_candidate}.image"
+        ),
+        actual_relative_path=PurePosixPath(
+            f"images/SF006/{pending_candidate}.jpg"
+        ),
+        sha256="2" * 64,
+        perceptual_hash="fedcba9876543210",
+    )
+    with index.connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        migrated = connection.execute(
+            "SELECT prior_relative_path, prior_sha256, backup_relative_path "
+            "FROM pending_adds"
+        ).fetchone()
+    assert tuple(migrated) == (None, None, None)
 
 
 def test_rejects_index_symlink_outside_root_without_touching_target(
@@ -701,7 +810,7 @@ def test_concurrent_first_initialization_is_serialized_and_idempotent(
     expected = root.resolve() / ".sukaseafood-sync.sqlite3"
     assert paths == [expected] * worker_count
     with closing(sqlite3.connect(expected)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         objects = connection.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
@@ -779,6 +888,112 @@ def test_pending_add_compare_and_delete_requires_every_expected_value(
     assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 1, "ADD") == changed
     assert index.clear_add_intent_if_matches(changed)
     assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 1, "ADD") is None
+
+
+def test_replacement_intent_round_trips_all_recovery_evidence(sync_root: Path) -> None:
+    index = SyncIndex(sync_root)
+    managed = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    backup = PurePosixPath(f"_removed/{BATCH_ID}/{CANDIDATE_ID}.jpg")
+
+    stored = index.record_add_intent(
+        result(review_version=9, relative_path=managed, sha256="b" * 64),
+        managed,
+        prior_relative_path=managed,
+        prior_sha256="a" * 64,
+        backup_relative_path=backup,
+    )
+
+    assert stored == AddIntent(
+        candidate_id=CANDIDATE_ID,
+        review_id=REVIEW_ID,
+        review_version=9,
+        action="ADD",
+        batch_id=BATCH_ID,
+        target_relative_path=managed,
+        actual_relative_path=managed,
+        sha256="b" * 64,
+        perceptual_hash="abcdef0123456789",
+        prior_relative_path=managed,
+        prior_sha256="a" * 64,
+        backup_relative_path=backup,
+    )
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 9, "ADD") == stored
+
+
+@pytest.mark.parametrize(
+    "replacement_fields",
+    [
+        {"prior_relative_path": PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")},
+        {"prior_sha256": "a" * 64},
+        {
+            "backup_relative_path": PurePosixPath(
+                f"_removed/{BATCH_ID}/{CANDIDATE_ID}.jpg"
+            )
+        },
+    ],
+    ids=["prior-path-only", "prior-sha-only", "backup-path-only"],
+)
+def test_replacement_intent_rejects_partial_recovery_evidence(
+    sync_root: Path, replacement_fields: dict[str, object]
+) -> None:
+    index = SyncIndex(sync_root)
+    managed = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+
+    with pytest.raises(SyncIndexError, match="replacement"):
+        index.record_add_intent(
+            result(review_version=9, relative_path=managed, sha256="b" * 64),
+            managed,
+            **replacement_fields,
+        )
+
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 9, "ADD") is None
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (
+            {
+                "prior_relative_path": PurePosixPath(
+                    "images/SF006/99999999-9999-4999-8999-999999999999.jpg"
+                )
+            },
+            "candidate",
+        ),
+        (
+            {
+                "backup_relative_path": PurePosixPath(
+                    f"_removed/99999999-9999-4999-8999-999999999999/{CANDIDATE_ID}.jpg"
+                )
+            },
+            "backup",
+        ),
+        ({"prior_sha256": "b" * 64}, "differ"),
+    ],
+    ids=["different-candidate", "different-batch", "same-sha"],
+)
+def test_replacement_intent_rejects_inconsistent_recovery_evidence(
+    sync_root: Path, change: dict[str, object], message: str
+) -> None:
+    index = SyncIndex(sync_root)
+    managed = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    fields: dict[str, object] = {
+        "prior_relative_path": managed,
+        "prior_sha256": "a" * 64,
+        "backup_relative_path": PurePosixPath(
+            f"_removed/{BATCH_ID}/{CANDIDATE_ID}.jpg"
+        ),
+    }
+    fields.update(change)
+
+    with pytest.raises(SyncIndexError, match=message):
+        index.record_add_intent(
+            result(review_version=9, relative_path=managed, sha256="b" * 64),
+            managed,
+            **fields,
+        )
+
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 9, "ADD") is None
 
 
 def test_two_real_processes_clear_at_most_one_exact_pending_add_intent(

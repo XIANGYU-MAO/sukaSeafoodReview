@@ -414,6 +414,148 @@ def test_composite_add_precommit_failure_preserves_previous(sync_root: Path) -> 
     assert target.read_bytes() == b"conflict"
 
 
+def test_same_path_replacement_installs_new_managed_jpg_generation(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    managed = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    replacement_row = row(
+        review_version=9,
+        target_relative_path=managed,
+        previous_relative_path=managed,
+    )
+    old_jpg, old_phash = encoded_image("JPEG", (13, 9))
+    new_jpg, new_phash = encoded_image("JPEG", (19, 11))
+    old_sha = hashlib.sha256(old_jpg).hexdigest()
+    new_sha = hashlib.sha256(new_jpg).hexdigest()
+    target = write_file(sync_root, managed, old_jpg)
+    index.record_success(
+        SyncResult(
+            candidate_id=CANDIDATE_ID,
+            review_id=OLD_REVIEW_ID,
+            review_version=5,
+            action="ADD",
+            batch_id=BATCH_ID,
+            relative_path=managed,
+            sha256=old_sha,
+            perceptual_hash=old_phash,
+        )
+    )
+    verified = download(
+        sync_root,
+        replacement_row,
+        content=new_jpg,
+        phash=new_phash,
+        width=19,
+        height=11,
+    )
+
+    prior = index.latest_for_candidate(CANDIDATE_ID)
+    assert prior is not None
+    assert prior.sha256 == old_sha
+    result = apply_add(sync_root, replacement_row, verified, index)
+
+    assert result.sha256 == new_sha
+    assert target.read_bytes() == new_jpg
+    backup = sync_root / "_removed" / str(BATCH_ID) / target.name
+    assert backup.read_bytes() == old_jpg
+    latest = index.latest_for_candidate(CANDIDATE_ID)
+    assert latest is not None
+    assert latest.review_version == 9
+    assert latest.sha256 == new_sha
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 9, "ADD") is None
+    assert not verified.staging_path.exists()
+
+
+def test_same_path_replacement_rejects_user_modified_managed_target(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    managed = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    replacement_row = row(
+        review_version=9,
+        target_relative_path=managed,
+        previous_relative_path=managed,
+    )
+    indexed_jpg, indexed_phash = encoded_image("JPEG", (13, 9))
+    modified_jpg, _modified_phash = encoded_image("JPEG", (17, 13))
+    new_jpg, new_phash = encoded_image("JPEG", (23, 15))
+    target = write_file(sync_root, managed, modified_jpg)
+    index.record_success(
+        SyncResult(
+            candidate_id=CANDIDATE_ID,
+            review_id=OLD_REVIEW_ID,
+            review_version=5,
+            action="ADD",
+            batch_id=BATCH_ID,
+            relative_path=managed,
+            sha256=hashlib.sha256(indexed_jpg).hexdigest(),
+            perceptual_hash=indexed_phash,
+        )
+    )
+    verified = download(
+        sync_root,
+        replacement_row,
+        content=new_jpg,
+        phash=new_phash,
+        width=23,
+        height=15,
+    )
+
+    with pytest.raises(OperationError, match="SOURCE_STATE_MISMATCH"):
+        apply_add(sync_root, replacement_row, verified, index)
+
+    assert target.read_bytes() == modified_jpg
+    assert verified.staging_path.read_bytes() == new_jpg
+    assert not (sync_root / "_removed" / str(BATCH_ID) / target.name).exists()
+    assert index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 9, "ADD") is None
+    latest = index.latest_for_candidate(CANDIDATE_ID)
+    assert latest is not None
+    assert latest.review_version == 5
+
+
+def test_same_path_replacement_rejects_stale_generation_without_touching_files(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    managed = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    stale_row = row(
+        review_version=5,
+        target_relative_path=managed,
+        previous_relative_path=managed,
+    )
+    old_jpg, old_phash = encoded_image("JPEG", (13, 9))
+    new_jpg, new_phash = encoded_image("JPEG", (19, 11))
+    target = write_file(sync_root, managed, old_jpg)
+    index.record_success(
+        SyncResult(
+            candidate_id=CANDIDATE_ID,
+            review_id=OLD_REVIEW_ID,
+            review_version=5,
+            action="ADD",
+            batch_id=BATCH_ID,
+            relative_path=managed,
+            sha256=hashlib.sha256(old_jpg).hexdigest(),
+            perceptual_hash=old_phash,
+        )
+    )
+    verified = download(
+        sync_root,
+        stale_row,
+        content=new_jpg,
+        phash=new_phash,
+        width=19,
+        height=11,
+    )
+
+    with pytest.raises(OperationError, match="STALE_GENERATION"):
+        apply_add(sync_root, stale_row, verified, index)
+
+    assert target.read_bytes() == old_jpg
+    assert verified.staging_path.read_bytes() == new_jpg
+    assert not (sync_root / "_removed" / str(BATCH_ID) / target.name).exists()
+
+
 @pytest.mark.parametrize("action", ["MOVE", "REMOVE"])
 def test_move_and_remove_link_to_exact_target_then_remove_previous(
     sync_root: Path, action: str
