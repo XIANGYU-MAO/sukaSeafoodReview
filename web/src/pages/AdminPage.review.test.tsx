@@ -72,6 +72,17 @@ it("blocks configuration download until at least one active species is available
   expect(screen.getByText("请先在鱼种管理中新增并启用鱼种。")).toBeInTheDocument();
 });
 
+it("blocks configuration download when every listed species is inactive", async () => {
+  const user = userEvent.setup();
+  const inactive = { ...speciesFixture.items[0], active: false };
+  mockAdmin((url, init) => url.includes("/admin/species?") && !init?.method ? jsonResponse({ total: 1, items: [inactive] }) : undefined);
+  renderWithAuth(<App />, "/admin");
+  await user.click(await screen.findByRole("tab", { name: "采集与导入" }));
+
+  expect(screen.getByRole("button", { name: "下载最新鱼种配置" })).toBeDisabled();
+  expect(screen.getByText("请先在鱼种管理中新增并启用鱼种。")).toBeInTheDocument();
+});
+
 it("loads every species directory page with URLSearchParams and exposes the 101st species", async () => {
   const many = Array.from({ length: 101 }, (_, index) => ({
     ...speciesItems[0],

@@ -10,7 +10,8 @@ Species parsing now requires and validates all four nullable source overrides. T
 
 ## Verification
 
-- `npm test -- --run src/pages/AdminPage.test.tsx src/pages/AdminPage.review.test.tsx src/admin/types.review.test.ts src/deployment.test.ts` — 4 files, 55 tests passed
+- `npx vitest run src/pages/AdminPage.review.test.tsx -t "every listed species is inactive"` — RED before the fix: an all-inactive directory rendered the config link
+- `npm test -- --run src/pages/AdminPage.test.tsx src/pages/AdminPage.review.test.tsx src/admin/types.review.test.ts src/deployment.test.ts` — 4 files, 56 tests passed
 - `npm run typecheck` — passed
 - `git diff --check` — passed
 
@@ -18,6 +19,8 @@ Species parsing now requires and validates all four nullable source overrides. T
 
 `feat(web): guide dynamic candidate collection`
 
+Follow-up fix: `fix(web): gate collector config on active species`
+
 ## Concerns
 
-None.
+The configuration download is intentionally gated by at least one active species, matching the API export contract.
