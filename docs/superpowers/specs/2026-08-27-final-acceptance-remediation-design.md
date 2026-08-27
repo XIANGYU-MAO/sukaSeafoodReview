@@ -2,7 +2,7 @@
 
 Date: 2026-08-27
 
-Status: awaiting user review
+Status: approved by user
 
 ## Purpose
 
@@ -22,7 +22,7 @@ A new Alembic migration will make the semantic transition safe:
 
 1. Acquire a database lock covering export creation and candidate-generation migration.
 2. For every candidate, calculate the greatest historical value appearing in its reviews, review revisions where applicable, and export items.
-3. Set `Candidate.version` to a value strictly greater than that maximum and its current value, with a checked 64-bit upper bound.
+3. Set `Candidate.version` to a value strictly greater than that maximum and its current value, with an explicit check against the database column's integer upper bound.
 4. Expire all pending export batches created under the former semantic epoch so they cannot mix old and new generation meanings.
 5. Record the transition deterministically and make the migration idempotent through normal Alembic revision tracking.
 
