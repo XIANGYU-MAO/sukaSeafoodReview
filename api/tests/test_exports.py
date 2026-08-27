@@ -944,9 +944,175 @@ def test_export_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(t
     command.upgrade(pg, "head", sql=True)
     ddl = output.getvalue()
     assert "20260827_06" in ddl
+    assert "20260827_07" in ddl
     assert "CREATE UNIQUE INDEX uq_export_batches_pending_scope" in ddl
     assert "DROP INDEX uq_export_batches_pending_scope" in ddl
     assert "original_fingerprint" in ddl
+
+
+def test_generation_epoch_raises_candidate_above_historical_sync_values_and_expires_batches(tmp_path):
+    from alembic import command
+    from alembic.config import Config
+
+    api_root = Path(__file__).parents[1]
+    database = tmp_path / "generation-epoch.sqlite3"
+    database_url = f"sqlite+aiosqlite:///{database.as_posix()}"
+    config = Config(api_root / "alembic.ini")
+    config.set_main_option("script_location", str(api_root / "alembic"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "20260827_06")
+    user_id, species_id, candidate_id, review_id = (uuid4() for _ in range(4))
+    batch_ids = [uuid4(), uuid4()]
+
+    async def seed_and_read():
+        engine = create_async_engine(database_url)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO users (id, name, role, password_hash, must_change_password, active, "
+                    "failed_login_count, password_version) "
+                    "VALUES (:id, 'Mao', 'admin', 'hash', 0, 1, 0, 1)"
+                ),
+                {"id": user_id.hex},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO species (id, code, name_zh, name_en, scientific_name, active, sort_order) "
+                    "VALUES (:id, 'SF001', '鱼', 'Fish', 'Piscis', 1, 1)"
+                ),
+                {"id": species_id.hex},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO candidates (id, species_id, source_dataset, source_record_id, preview_url, "
+                    "original_url, source_url, license, attribution, metadata_json, active, version) "
+                    "VALUES (:id, :species_id, 'SOURCE', 'candidate-1', 'https://preview', 'https://original', "
+                    "'https://source', 'CC-BY', 'Creator', '{}', 1, 3)"
+                ),
+                {"id": candidate_id.hex, "species_id": species_id.hex},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO reviews (id, candidate_id, reviewer_id, decision, is_current, version) "
+                    "VALUES (:id, :candidate_id, :reviewer_id, 'APPROVED', 1, 5)"
+                ),
+                {"id": review_id.hex, "candidate_id": candidate_id.hex, "reviewer_id": user_id.hex},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO review_revisions (id, candidate_id, review_id, reviewer_id, actor_id, decision, "
+                    "is_current, review_version, snapshot_json) "
+                    "VALUES (:id, :candidate_id, :review_id, :user_id, :user_id, 'APPROVED', 1, 5, '{}')"
+                ),
+                {"id": uuid4().hex, "candidate_id": candidate_id.hex, "review_id": review_id.hex, "user_id": user_id.hex},
+            )
+            for position, batch_id in enumerate(batch_ids):
+                await connection.execute(
+                    text(
+                        "INSERT INTO export_batches (id, created_by_id, species_id, scope_key, receipt_token_hash, "
+                        "status, expires_at) VALUES (:id, :user_id, :species_id, 'ALL', :digest, 'pending', "
+                        "'2099-01-01 00:00:00')"
+                    ),
+                    {"id": batch_id.hex, "user_id": user_id.hex, "species_id": species_id.hex, "digest": f"{position + 1:064x}"},
+                )
+            await connection.execute(
+                text(
+                    "INSERT INTO export_items (id, batch_id, candidate_id, review_id, review_version, "
+                    "candidate_version, action, status, target_relative_path, species_code, preview_url, original_url, "
+                    "source_url, license, attribution, original_fingerprint, metadata_fingerprint) "
+                    "VALUES (:id, :batch_id, :candidate_id, :review_id, 8, 3, 'ADD', 'pending', 'SF001/fish.jpg', "
+                    "'SF001', 'https://preview', 'https://original', 'https://source', 'CC-BY', 'Creator', :digest, :digest)"
+                ),
+                {"id": uuid4().hex, "batch_id": batch_ids[0].hex, "candidate_id": candidate_id.hex, "review_id": review_id.hex, "digest": "0" * 64},
+            )
+        await engine.dispose()
+
+    async def values():
+        engine = create_async_engine(database_url)
+        async with engine.connect() as connection:
+            candidate_version = await connection.scalar(
+                text("SELECT version FROM candidates WHERE id = :id"), {"id": candidate_id.hex}
+            )
+            batch_statuses = list((await connection.scalars(
+                text("SELECT status FROM export_batches ORDER BY id")
+            )).all())
+        await engine.dispose()
+        return candidate_version, batch_statuses
+
+    asyncio.run(seed_and_read())
+    command.upgrade(config, "20260827_07")
+    candidate_version, batch_statuses = asyncio.run(values())
+    assert candidate_version == 9
+    assert batch_statuses == ["expired", "expired"]
+
+
+def test_populated_chunking_downgrade_keeps_oldest_pending_batch_per_scope(tmp_path):
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect
+
+    api_root = Path(__file__).parents[1]
+    database = tmp_path / "chunking-downgrade.sqlite3"
+    database_url = f"sqlite+aiosqlite:///{database.as_posix()}"
+    config = Config(api_root / "alembic.ini")
+    config.set_main_option("script_location", str(api_root / "alembic"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "20260827_06")
+    user_id, species_id = uuid4(), uuid4()
+    oldest_batch_id, newer_batch_id = uuid4(), uuid4()
+
+    async def seed_and_read():
+        engine = create_async_engine(database_url)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO users (id, name, role, password_hash, must_change_password, active, "
+                    "failed_login_count, password_version) "
+                    "VALUES (:id, 'Mao', 'admin', 'hash', 0, 1, 0, 1)"
+                ),
+                {"id": user_id.hex},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO species (id, code, name_zh, name_en, scientific_name, active, sort_order) "
+                    "VALUES (:id, 'SF001', '鱼', 'Fish', 'Piscis', 1, 1)"
+                ),
+                {"id": species_id.hex},
+            )
+            for batch_id, created_at, digest in (
+                (oldest_batch_id, "2026-01-01 00:00:00", "1" * 64),
+                (newer_batch_id, "2026-01-02 00:00:00", "2" * 64),
+            ):
+                await connection.execute(
+                    text(
+                        "INSERT INTO export_batches (id, created_by_id, species_id, scope_key, receipt_token_hash, "
+                        "status, expires_at, created_at) VALUES (:id, :user_id, :species_id, 'ALL', :digest, "
+                        "'pending', '2099-01-01 00:00:00', :created_at)"
+                    ),
+                    {"id": batch_id.hex, "user_id": user_id.hex, "species_id": species_id.hex, "digest": digest, "created_at": created_at},
+                )
+        await engine.dispose()
+
+    async def downgraded_state():
+        engine = create_async_engine(database_url)
+        async with engine.connect() as connection:
+            pending_after_downgrade = [
+                str(UUID(value))
+                for value in (await connection.scalars(
+                    text("SELECT id FROM export_batches WHERE status = 'pending' ORDER BY created_at, id")
+                )).all()
+            ]
+            index_names = await connection.run_sync(
+                lambda sync: {index["name"] for index in inspect(sync).get_indexes("export_batches")}
+            )
+        await engine.dispose()
+        return pending_after_downgrade, index_names
+
+    asyncio.run(seed_and_read())
+    command.downgrade(config, "20260826_05")
+    pending_after_downgrade, index_names = asyncio.run(downgraded_state())
+    assert pending_after_downgrade == [str(oldest_batch_id)]
+    assert "uq_export_batches_pending_scope" in index_names
 
 
 def test_populated_revision_04_backfills_canonical_scope_and_reuses_after_reupgrade(tmp_path):
@@ -1019,14 +1185,14 @@ def test_populated_revision_04_backfills_canonical_scope_and_reuses_after_reupgr
         return scope, reused
 
     asyncio.run(seed_revision_04())
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260827_06")
     first_scope, first_reuse = asyncio.run(scope_and_reuse())
     assert first_scope == str(species_id)
     assert first_reuse.batch.id == batch_id
     assert first_reuse.created is False
 
     command.downgrade(config, "20260826_04")
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260827_06")
     second_scope, second_reuse = asyncio.run(scope_and_reuse())
     assert second_scope == str(species_id)
     assert second_reuse.batch.id == batch_id

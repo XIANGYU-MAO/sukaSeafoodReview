@@ -24,10 +24,10 @@ from app.models import (
 from app.services.auth import utc_now
 
 
-POSTGRES_URL = os.getenv("TEST_POSTGRES_URL")
+POSTGRES_URL = os.getenv("TEST_POSTGRES_DSN") or os.getenv("TEST_POSTGRES_URL")
 pytestmark = pytest.mark.skipif(
     not POSTGRES_URL,
-    reason="TEST_POSTGRES_URL is required for real PostgreSQL export races",
+    reason="TEST_POSTGRES_DSN is required for real PostgreSQL export races",
 )
 SECRET = "postgres-export-receipt-secret-is-unique-and-long"
 

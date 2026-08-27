@@ -22,6 +22,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(
+        sa.text(
+            "WITH ranked AS ("
+            "SELECT id, ROW_NUMBER() OVER ("
+            "PARTITION BY scope_key ORDER BY created_at, id"
+            ") AS pending_rank "
+            "FROM export_batches WHERE status = 'pending'"
+            ") "
+            "UPDATE export_batches "
+            "SET status = 'expired', expired_at = COALESCE(expired_at, CURRENT_TIMESTAMP) "
+            "WHERE id IN (SELECT id FROM ranked WHERE pending_rank > 1)"
+        )
+    )
     op.create_index(
         "uq_export_batches_pending_scope",
         "export_batches",
