@@ -17,6 +17,7 @@ import {
   parseAuthState,
 } from "../api/types";
 import type { MessageKey } from "../i18n/catalog";
+import { resetReviewGuidelines } from "../review/guidelinesSession";
 
 type AuthStatus = "booting" | "anonymous" | "authenticated" | "service-error";
 
@@ -87,6 +88,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
     const authenticated = parseAuthState(response);
     if (generation !== authGeneration.current) return;
+    resetReviewGuidelines(authenticated.id);
     setSuccessMessageKey(null);
     setUser(authenticated);
     setStatus("authenticated");

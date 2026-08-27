@@ -1,10 +1,16 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { authState, jsonResponse, renderWithAuth } from "./test/helpers";
 import { historyFixture, progressFixture } from "./test/task11Fixtures";
+import { markReviewGuidelinesSeen } from "./review/guidelinesSession";
+
+beforeEach(() => {
+  sessionStorage.clear();
+  markReviewGuidelinesSeen(authState.id);
+});
 
 describe("authenticated review integration", () => {
   it("wires the root to the bilingual review page while retaining shell actions", async () => {

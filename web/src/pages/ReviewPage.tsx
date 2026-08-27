@@ -10,8 +10,13 @@ import {
 import { DecisionPanel } from "../components/DecisionPanel";
 import { ImageStage } from "../components/ImageStage";
 import { ProgressSummary } from "../components/ProgressSummary";
+import { ReviewGuidelinesDialog } from "../components/ReviewGuidelinesDialog";
 import { sourceLabel } from "../i18n/catalog";
 import { useI18n } from "../i18n/I18nProvider";
+import {
+  hasSeenReviewGuidelines,
+  markReviewGuidelinesSeen,
+} from "../review/guidelinesSession";
 
 interface ReviewPageProps {
   csrfToken: string;
@@ -41,6 +46,9 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
   const [retryPayload, setRetryPayload] = useState<DecisionPayload | null>(null);
   const [sessionCompleted, setSessionCompleted] = useState(0);
   const [panelResetSignal, setPanelResetSignal] = useState(0);
+  const [showGuidelines, setShowGuidelines] = useState(
+    () => !hasSeenReviewGuidelines(reviewerId),
+  );
   const currentGeneration = useRef(0);
   const currentController = useRef<AbortController | null>(null);
   const decisionGeneration = useRef(0);
@@ -189,6 +197,25 @@ export function ReviewPage({ csrfToken, reviewerId, retryBootstrap }: ReviewPage
       setRetryPayload(null);
       setDecisionError(null);
     }
+  }
+
+  function confirmGuidelines() {
+    markReviewGuidelinesSeen(reviewerId);
+    setShowGuidelines(false);
+  }
+
+  if (showGuidelines) {
+    return (
+      <main className="review-workspace">
+        <div className="review-heading">
+          <div>
+            <p className="eyebrow">SukaSeafood</p>
+            <h1>{t("reviewTitle")}</h1>
+          </div>
+        </div>
+        <ReviewGuidelinesDialog onConfirm={confirmGuidelines} />
+      </main>
+    );
   }
 
   const selectedPayload = operation?.payload ?? retryPayload;

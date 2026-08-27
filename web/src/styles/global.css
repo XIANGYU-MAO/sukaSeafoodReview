@@ -66,6 +66,74 @@ a:focus-visible {
   margin-bottom: 0.75rem;
 }
 
+.guidelines-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  overflow-y: auto;
+  background: rgba(3, 35, 45, 0.68);
+}
+
+.guidelines-dialog {
+  width: min(54rem, 100%);
+  max-height: calc(100vh - 2rem);
+  padding: clamp(1.25rem, 3vw, 2rem);
+  overflow-y: auto;
+  border-radius: 1.25rem;
+  background: #fff;
+  box-shadow: 0 1.5rem 5rem rgba(0, 24, 32, 0.35);
+}
+
+.guidelines-dialog__toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.guidelines-dialog h2 {
+  margin: 0 0 1.25rem;
+  color: #073b4c;
+}
+
+.guidelines-dialog__sections {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.guidelines-list {
+  padding: 1rem;
+  border-radius: 1rem;
+}
+
+.guidelines-list--approve {
+  background: #eaf7f5;
+}
+
+.guidelines-list--reject {
+  background: #fff0ed;
+}
+
+.guidelines-list h3 {
+  margin: 0 0 0.7rem;
+  color: #073b4c;
+}
+
+.guidelines-list ul {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  padding-left: 1.25rem;
+  line-height: 1.55;
+}
+
+.guidelines-confirm {
+  width: 100%;
+  margin-top: 1.25rem;
+}
+
 .brand-mark {
   display: grid;
   width: 3.25rem;
@@ -1134,6 +1202,10 @@ h1 {
 }
 
 @media (max-width: 42rem) {
+  .guidelines-dialog__sections {
+    grid-template-columns: 1fr;
+  }
+
   .pill-group {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

@@ -1,10 +1,11 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { I18nProvider } from "../i18n/I18nProvider";
 import { jsonResponse } from "../test/helpers";
 import { reviewerId } from "../test/task11Fixtures";
 import { ReviewPage } from "./ReviewPage";
+import { markReviewGuidelinesSeen } from "../review/guidelinesSession";
 
 const candidate = {
   id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -22,6 +23,11 @@ const candidate = {
   observed_on: null,
   metadata: {},
 };
+
+beforeEach(() => {
+  sessionStorage.clear();
+  markReviewGuidelinesSeen(reviewerId);
+});
 
 describe("ReviewPage progress isolation", () => {
   it("does not fetch or render team progress on the review route", async () => {

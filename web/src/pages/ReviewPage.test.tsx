@@ -1,12 +1,16 @@
 import { StrictMode } from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { I18nProvider } from "../i18n/I18nProvider";
 import { deferred, jsonResponse } from "../test/helpers";
-import { progressFixture } from "../test/task11Fixtures";
 import { ReviewPage } from "./ReviewPage";
+import {
+  hasSeenReviewGuidelines,
+  markReviewGuidelinesSeen,
+  resetReviewGuidelines,
+} from "../review/guidelinesSession";
 
 const reviewerId = "8de1871b-677f-4ea8-8e11-1f4d49a88c86";
 const candidate = {
@@ -31,6 +35,11 @@ const candidate = {
   metadata: { source_observation_quality: "research" },
 };
 
+beforeEach(() => {
+  sessionStorage.clear();
+  markReviewGuidelinesSeen(reviewerId);
+});
+
 function decisionResponse(
   payload: { decision: string; rejection_reason: string | null; notes: string | null },
   candidateId = candidate.id,
@@ -53,12 +62,6 @@ function renderPage(
   retryBootstrap = vi.fn(async () => undefined),
   strict = false,
 ) {
-  const suppliedFetch = globalThis.fetch;
-  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) =>
-    String(input).endsWith("/progress")
-      ? Promise.resolve(jsonResponse(progressFixture))
-      : suppliedFetch(input, init),
-  );
   const page = (
     <I18nProvider initialLocale="zh">
       <ReviewPage
@@ -143,6 +146,35 @@ describe("ReviewPage current candidate", () => {
 
     await waitFor(() => expect(retryBootstrap).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("button", { name: "重试载入" })).not.toBeInTheDocument();
+  });
+});
+
+describe("ReviewPage guideline gate", () => {
+  it("blocks decision controls until confirmation and remembers it across a remount", async () => {
+    resetReviewGuidelines(reviewerId);
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(candidate)));
+    const user = userEvent.setup();
+    const first = renderPage();
+
+    const dialog = await screen.findByRole("dialog", { name: "审核标准" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(screen.queryByRole("button", { name: "保留 (K)" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "拒绝 (R)" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "不确定 (U)" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "我知道了，开始审核" }));
+    expect(hasSeenReviewGuidelines(reviewerId)).toBe(true);
+    expect(await screen.findByRole("button", { name: "保留 (K)" })).toBeInTheDocument();
+
+    first.unmount();
+    const second = renderPage();
+    expect(await screen.findByRole("button", { name: "保留 (K)" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    second.unmount();
+    resetReviewGuidelines(reviewerId);
+    renderPage();
+    expect(await screen.findByRole("dialog", { name: "审核标准" })).toBeInTheDocument();
   });
 });
 

@@ -1,6 +1,6 @@
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
 import {
@@ -10,6 +10,12 @@ import {
   renderWithAuth,
   renderWithStrictAuth,
 } from "../test/helpers";
+import {
+  hasSeenReviewGuidelines,
+  markReviewGuidelinesSeen,
+} from "../review/guidelinesSession";
+
+beforeEach(() => sessionStorage.clear());
 
 describe("authentication bootstrap", () => {
   it("shows a stable accessible loading state then restores a refresh session", async () => {
@@ -109,6 +115,59 @@ describe("authentication bootstrap", () => {
     expect(bootstrapSignals[0]).toBeInstanceOf(AbortSignal);
     expect(bootstrapSignals[0].aborted).toBe(true);
     expect(screen.getByRole("button", { name: "修改密码" })).toBeInTheDocument();
+  });
+
+  it("resets guidelines only after a successful explicit login", async () => {
+    markReviewGuidelinesSeen(authState.id);
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse({}, 401));
+      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+      if (url.endsWith("/auth/login")) return Promise.resolve(jsonResponse(authState));
+      if (url.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    }));
+    const user = userEvent.setup();
+    renderWithAuth(<App />);
+
+    await user.click(await screen.findByRole("radio", { name: "Hassan" }));
+    await user.type(screen.getByLabelText("密码"), "temporary-password");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+    await screen.findByRole("button", { name: "修改密码" });
+    expect(hasSeenReviewGuidelines(authState.id)).toBe(false);
+  });
+
+  it("preserves guidelines when restoring an existing authenticated session", async () => {
+    markReviewGuidelinesSeen(authState.id);
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
+      if (url.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    }));
+    renderWithAuth(<App />);
+
+    await screen.findByRole("button", { name: "修改密码" });
+    expect(hasSeenReviewGuidelines(authState.id)).toBe(true);
+  });
+
+  it("preserves guidelines after a failed explicit login", async () => {
+    markReviewGuidelinesSeen(authState.id);
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse({}, 401));
+      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+      if (url.endsWith("/auth/login")) return Promise.resolve(jsonResponse({}, 401));
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    }));
+    const user = userEvent.setup();
+    renderWithAuth(<App />);
+
+    await user.click(await screen.findByRole("radio", { name: "Hassan" }));
+    await user.type(screen.getByLabelText("密码"), "wrong-password");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("姓名或密码不正确。");
+    expect(hasSeenReviewGuidelines(authState.id)).toBe(true);
   });
 });
 

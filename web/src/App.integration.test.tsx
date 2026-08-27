@@ -1,11 +1,12 @@
 import { act, fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { authState, deferred, jsonResponse, renderWithStrictAuth } from "./test/helpers";
 import { historyFixture, progressFixture, reviewerId } from "./test/task11Fixtures";
 import { defaultAdminResponse, maoAuth } from "./test/task12Fixtures";
+import { markReviewGuidelinesSeen } from "./review/guidelinesSession";
 
 const fixedNames = ["Hassan", "Mao", "Xinhui", "Wahid", "Sharmaa", "Yiming"].map((name) => ({ name }));
 const candidate = {
@@ -28,6 +29,8 @@ const candidate = {
 function pathOf(input: RequestInfo | URL): string {
   return new URL(String(input), "https://review.test").pathname;
 }
+
+beforeEach(() => sessionStorage.clear());
 
 describe("production-shell integration", () => {
   it("logs in from a fresh 401, confirms KEEP in the database, then opens private history", async () => {
@@ -76,6 +79,7 @@ describe("production-shell integration", () => {
     await user.click(await screen.findByRole("radio", { name: "Hassan" }));
     await user.type(screen.getByLabelText("密码"), "temporary-password");
     await user.click(screen.getByRole("button", { name: "登录" }));
+    await user.click(await screen.findByRole("button", { name: "我知道了，开始审核" }));
 
     const image = await screen.findByRole("img", { name: "测试鱼 (Piscis probatio)" });
     expect(screen.getByRole("status", { name: "正在加载图片" })).toBeInTheDocument();
@@ -146,6 +150,7 @@ describe("production-shell integration", () => {
   });
 
   it("restores an authenticated refresh directly to the current candidate", async () => {
+    markReviewGuidelinesSeen(authState.id);
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = pathOf(input);
       if (path.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
