@@ -133,6 +133,21 @@ def test_readmes_describe_implemented_sync_envelope_storage_and_release_truth():
     assert "seven-field CSV" not in english
 
 
+def test_readmes_define_the_candidate_synchronization_generation_epoch():
+    chinese = README_ZH.read_text(encoding="utf-8")
+    english = README_EN.read_text(encoding="utf-8")
+
+    assert "candidate synchronization generation" in english
+    assert "候选图片同步代次" in chinese
+    assert "review generation" not in english.lower()
+    assert "审核代次" not in chinese
+    for text in (chinese, english):
+        assert "`review_version`" in text
+        assert "`20260827_07`" in text
+    assert "pending pre-revision batches" in english
+    assert "修订前的待处理批次" in chinese
+
+
 def test_readmes_show_the_exact_locked_clean_windows_build_command():
     chinese = README_ZH.read_text(encoding="utf-8")
     english = README_EN.read_text(encoding="utf-8")

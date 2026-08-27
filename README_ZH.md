@@ -39,7 +39,7 @@ Set-Location .\sukaSeafoodReview
 - Windows PowerShell 7（Windows PowerShell 5.1 也可执行下列基础命令）。
 - Python 3.12。
 - Node.js 22.12 或更高版本，配套 npm。
-- API 测试/开发可使用 SQLite；生产业务数据库只使用 PostgreSQL。本地同步器另有一个小型 SQLite 恢复索引，只保存操作键、相对路径、哈希和回执状态，不保存图片字节、原图 URL 或批次 token。
+- API 测试/开发可使用 SQLite；生产业务数据库只使用 PostgreSQL。本地同步器另有一个小型 SQLite 恢复索引，只保存候选图片同步代次、相对路径、哈希、回执状态和恢复意图，不保存图片字节、原图 URL 或批次 token。
 - 生产必须使用 PostgreSQL 16、HTTPS，并把 `SECURE_COOKIE` 设为 `true`。生产配置会拒绝 SQLite 和不安全 Cookie。
 
 如需运行真实 PostgreSQL 并发测试，请准备一个可清空的独立 PostgreSQL 16 测试数据库。绝不能把测试指向生产数据库。
@@ -134,11 +134,13 @@ dry-run 不写候选、不生成可提交预览令牌。确认报告后，Mao �
 
 ## 增量 CSV 与本地下载边界
 
-服务器按一个统一封套生成增量批次：每批最多 10,000 行，精确 16 列 CSV 序列化后最多 20 MiB，在线回执与离线回执上传也最多 20 MiB。超过 10,000 个待处理项会被拆成互不重叠的后续批次；任意一行本身导致超限时会在持久化批次前失败。CSV 按同一 PostgreSQL 快照产生 ADD、REMOVE 或 MOVE，并携带服务器决定的精确目标相对路径和单调审核版本。CSV 下载是同源认证、`no-store` 的附件响应；回执是有界 `application/json` POST。
+服务器按一个统一封套生成增量批次：每批最多 10,000 行，精确 16 列 CSV 序列化后最多 20 MiB，在线回执与离线回执上传也最多 20 MiB。超过 10,000 个待处理项会被拆成互不重叠的后续批次；任意一行本身导致超限时会在持久化批次前失败。CSV 按同一 PostgreSQL 快照产生 ADD、REMOVE 或 MOVE，并携带服务器决定的精确目标相对路径和单调的**候选图片同步代次**。为兼容现有格式，CSV 固定列名仍为 `review_version`；它表示候选图片同步代次，不是审核成员的编辑次数。CSV 下载是同源认证、`no-store` 的附件响应；回执是有界 `application/json` POST。
+
+Alembic 修订 `20260827_07` 在创建导出所使用的同一 PostgreSQL 串行化边界内开启新的同步纪元。它把每个候选的代次提高到大于该候选当前值以及审核、审核修订和导出项中的全部历史值；整数空间耗尽时拒绝迁移，并使所有修订前的待处理批次过期，避免同一批次混用新旧语义。已有本地训练集无需破坏性重置：升级后的第一个代次自然大于任何合法的升级前本地值。
 
 独立 `local_sync` 包、CLI/Tkinter 和 Windows 可执行文件已经实现。工具在 Mao 的电脑上直接访问每个获准的 `original_url`，验证每次重定向、图片内容和哈希，使用 `.part` 加原子改名幂等续跑，并把 REMOVE 移到可恢复 `_removed` 路径。只允许配置的精确主机/域名后缀；可用 `IMAGE_ORIGIN_ALLOWLIST` 配置服务器，用 `SUKASEAFOOD_IMAGE_ORIGIN_ALLOWLIST` 配置本机同步器。禁止 localhost、IP 字面量和未批准来源。配置代理只代表信任该代理去连接经过批准的主机名；工具不会把 Cookie 或凭据发送到图片来源。中国服务器从不向图片来源发起 HEAD/GET，也没有图片缓存或代理。
 
-取消或网络中断时，已经安全完成的操作会留在本地索引；工具保存 `download_receipt-{batch_id}.json` 离线回执，网络恢复后可重传。旧版本重放不能覆盖较新审核结果；具体操作和安全恢复流程见 [`local_sync/README_ZH.md`](local_sync/README_ZH.md)。不要手工伪造成功回执。
+取消或网络中断时，已经安全完成的操作会留在本地索引；工具保存 `download_receipt-{batch_id}.json` 离线回执，网络恢复后可重传。较旧的候选图片同步代次重放不能覆盖较新的图片、索引行或规范清单行。本地 SQLite schema v3 只记录同步代次、哈希、路径和有界的替换恢复意图。同路径替换只有在 SQLite 证明候选拥有该精确路径、且磁盘 SHA-256 仍与上一代次一致时才允许；否则工具保持文件不变并报告冲突。中断后，工具会利用已验证的暂存图片和 `_removed/{batch_id}/` 备份继续恢复；新暂存不可用时则恢复经过验证的旧图片。具体操作和安全恢复流程见 [`local_sync/README_ZH.md`](local_sync/README_ZH.md)。不要手工伪造成功回执。
 
 ## 验证命令
 
@@ -185,7 +187,7 @@ Set-Location ..
 powershell -NoProfile -ExecutionPolicy Bypass -File local_sync/scripts/build_windows.ps1
 ```
 
-生产构建资产必须保持在 `/sukaseafood/review/assets/`。部署构件已实现并在本机验证，但未执行生产 SSH 部署或公开验收；上线、Caddy reload、六账号浏览器验收和回滚演练都需要显式授权。
+生产构建资产必须保持在 `/sukaseafood/review/assets/`。部署构件已实现并在本机验证，但未执行生产 SSH 部署或公开验收。未执行线上部署；上线、Caddy reload、六账号浏览器验收和回滚演练都需要显式授权。
 
 ## 故障排查
 

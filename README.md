@@ -39,7 +39,7 @@ The system exposes no image-upload, original-image proxy, or original-image down
 - Windows PowerShell 7; Windows PowerShell 5.1 can also run the basic commands below.
 - Python 3.12.
 - Node.js 22.12 or later, with npm.
-- API tests/development may use SQLite; production business data uses PostgreSQL only. The local sync tool has a separate small SQLite recovery index containing operation keys, relative paths, hashes, and receipt state; it stores no image bytes, original URLs, or batch tokens.
+- API tests/development may use SQLite; production business data uses PostgreSQL only. The local sync tool has a separate small SQLite recovery index containing candidate synchronization generations, relative paths, hashes, receipt state, and recovery intent; it stores no image bytes, original URLs, or batch tokens.
 - Production requires PostgreSQL 16, HTTPS, and `SECURE_COOKIE=true`. Production configuration rejects SQLite and insecure cookies.
 
 To run the real PostgreSQL concurrency tests, prepare a separate PostgreSQL 16 test database that may be erased. Never point tests at production.
@@ -134,11 +134,13 @@ Browser-based admin mutations require Mao's session, CSRF, and the confirmations
 
 ## Incremental CSV and local downloader boundary
 
-The server uses one envelope for incremental batches: at most 10,000 rows per batch, at most 20 MiB after serializing the exact 16-column CSV, and at most 20 MiB for an online or offline receipt upload. More than 10,000 eligible operations are split into later, non-overlapping batches; a single row that breaches the byte limit fails before any batch is persisted. ADD, REMOVE, and MOVE rows come from one coherent PostgreSQL snapshot and carry the server-selected exact relative path and a monotonic review generation. CSV download is an authenticated same-origin, `no-store` attachment; receipt submission is a bounded `application/json` POST.
+The server uses one envelope for incremental batches: at most 10,000 rows per batch, at most 20 MiB after serializing the exact 16-column CSV, and at most 20 MiB for an online or offline receipt upload. More than 10,000 eligible operations are split into later, non-overlapping batches; a single row that breaches the byte limit fails before any batch is persisted. ADD, REMOVE, and MOVE rows come from one coherent PostgreSQL snapshot and carry the server-selected exact relative path and a monotonic **candidate synchronization generation**. The fixed wire column remains named `review_version` for compatibility; its value is the candidate's synchronization generation, not a reviewer's edit count. CSV download is an authenticated same-origin, `no-store` attachment; receipt submission is a bounded `application/json` POST.
+
+Alembic revision `20260827_07` starts the new synchronization epoch under the same PostgreSQL serialization boundary used by export creation. It raises each candidate's generation above its current value and every historical value for that candidate in reviews, review revisions, and export items; it refuses integer exhaustion and expires all pending pre-revision batches so one batch cannot mix the former and current meanings. Existing local roots do not need a destructive reset: the first post-upgrade generation is newer than every legitimate pre-upgrade local value.
 
 The independent `local_sync` package, CLI/Tkinter UI, and Windows executable are implemented. Mao's computer contacts each approved `original_url` directly, validates every redirect, verifies image content and hashes, uses `.part` plus atomic rename for idempotent resume, and moves REMOVE targets into recoverable `_removed` paths. Exact hosts/domain suffixes are configurable with `IMAGE_ORIGIN_ALLOWLIST` on the server and `SUKASEAFOOD_IMAGE_ORIGIN_ALLOWLIST` in the local tool. Localhost, IP literals, and unapproved sources are rejected. A configured proxy is trusted only to connect to an already approved hostname; the downloader sends no cookies or credentials to image sources. The China server never issues image HEAD/GET requests and has no image cache or proxy.
 
-If cancellation or connectivity interrupts submission, safely completed operations remain in the local index and the tool writes `download_receipt-{batch_id}.json` as an offline receipt for later submission. Replaying an older generation cannot overwrite a newer review result. See [`local_sync/README_ZH.md`](local_sync/README_ZH.md) for commands and recovery; never fabricate successful receipts manually.
+If cancellation or connectivity interrupts submission, safely completed operations remain in the local index and the tool writes `download_receipt-{batch_id}.json` as an offline receipt for later submission. Replaying an older candidate synchronization generation cannot overwrite a newer file, index row, or canonical manifest row. Local SQLite schema v3 records synchronization generations, hashes, paths, and bounded replacement-recovery intent. A same-path replacement is allowed only when SQLite owns the exact existing path and its on-disk SHA-256 still matches the prior generation; otherwise the tool leaves the file untouched and reports a conflict. An interruption recovers from the verified staged image and `_removed/{batch_id}/` backup, or restores the old verified image when the new stage is unavailable. See [`local_sync/README_ZH.md`](local_sync/README_ZH.md) for commands and recovery; never fabricate successful receipts manually.
 
 ## Verification commands
 
@@ -185,7 +187,7 @@ Set-Location ..
 powershell -NoProfile -ExecutionPolicy Bypass -File local_sync/scripts/build_windows.ps1
 ```
 
-Production assets must remain under `/sukaseafood/review/assets/`. The deployment artifacts are implemented and locally verified, but no production SSH deployment or public acceptance has been executed. Going live, reloading Caddy, six-account browser acceptance, and rollback exercises all require explicit authorization.
+Production assets must remain under `/sukaseafood/review/assets/`. The deployment artifacts are implemented and locally verified, but no production SSH deployment or public acceptance has been executed. No live deployment occurred. Going live, reloading Caddy, six-account browser acceptance, and rollback exercises all require explicit authorization.
 
 ## Troubleshooting
 
