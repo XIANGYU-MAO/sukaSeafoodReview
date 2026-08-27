@@ -1,0 +1,4 @@
+requests>=2.31,<3
+Pillow>=10,<13
+ImageHash>=4.3,<5
+pytest>=8,<10

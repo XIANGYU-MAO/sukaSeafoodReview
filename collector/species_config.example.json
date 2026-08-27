@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-27T10:00:00Z",
+  "species": [
+    {
+      "seafood_code": "FISH_A",
+      "name_zh": "示例鱼甲",
+      "name_en": "Example fish A",
+      "scientific_name": "Piscis alpha",
+      "inat_taxon_id": null,
+      "gbif_taxon_key": null,
+      "commons_category": null,
+      "fish_vista_filter": null
+    },
+    {
+      "seafood_code": "FISH_B",
+      "name_zh": "示例鱼乙",
+      "name_en": "Example fish B",
+      "scientific_name": "Piscis beta",
+      "inat_taxon_id": null,
+      "gbif_taxon_key": null,
+      "commons_category": null,
+      "fish_vista_filter": null
+    }
+  ]
+}
