@@ -34,6 +34,7 @@ def test_only_api_and_web_join_external_edge_and_have_health_checks():
     assert "sukaseafood-edge" not in services["review-postgres"]["networks"]
     assert all("healthcheck" in service for service in services.values())
     assert all("ports" not in service for service in services.values())
+    assert "/tmp:size=32m,mode=1777" in services["review-web"]["tmpfs"]
 
 
 def test_web_build_context_contains_published_collector_zip():
