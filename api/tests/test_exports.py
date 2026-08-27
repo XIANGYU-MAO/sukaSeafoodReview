@@ -950,6 +950,38 @@ def test_export_migration_upgrade_downgrade_reupgrade_and_postgres_offline_ddl(t
     assert "original_fingerprint" in ddl
 
 
+def test_epoch_and_chunking_offline_ddl_emit_postgres_locks_and_integer_guards():
+    from alembic import command
+    from alembic.config import Config
+    import io
+
+    api_root = Path(__file__).parents[1]
+    postgres_output = io.StringIO()
+    postgres = Config(api_root / "alembic.ini", output_buffer=postgres_output)
+    postgres.set_main_option("script_location", str(api_root / "alembic"))
+    postgres.set_main_option("sqlalchemy.url", "postgresql://review:password@db/review")
+    command.upgrade(postgres, "head", sql=True)
+    postgres_ddl = postgres_output.getvalue()
+    assert "LOCK TABLE export_batches IN SHARE ROW EXCLUSIVE MODE" in postgres_ddl
+    assert "candidate synchronization generation exhausted" in postgres_ddl
+
+    downgrade_output = io.StringIO()
+    downgrade = Config(api_root / "alembic.ini", output_buffer=downgrade_output)
+    downgrade.set_main_option("script_location", str(api_root / "alembic"))
+    downgrade.set_main_option("sqlalchemy.url", "postgresql://review:password@db/review")
+    command.downgrade(downgrade, "20260827_06:20260826_05", sql=True)
+    assert "LOCK TABLE export_batches IN SHARE UPDATE EXCLUSIVE MODE" in downgrade_output.getvalue()
+
+    sqlite_output = io.StringIO()
+    sqlite = Config(api_root / "alembic.ini", output_buffer=sqlite_output)
+    sqlite.set_main_option("script_location", str(api_root / "alembic"))
+    sqlite.set_main_option("sqlalchemy.url", "sqlite:///offline.sqlite3")
+    command.upgrade(sqlite, "20260827_06:20260827_07", sql=True)
+    sqlite_ddl = sqlite_output.getvalue()
+    assert "CREATE TEMPORARY TABLE _sync_generation_guard" in sqlite_ddl
+    assert "CHECK (value = 0)" in sqlite_ddl
+
+
 def test_generation_epoch_raises_candidate_above_historical_sync_values_and_expires_batches(tmp_path):
     from alembic import command
     from alembic.config import Config
@@ -1044,6 +1076,74 @@ def test_generation_epoch_raises_candidate_above_historical_sync_values_and_expi
     candidate_version, batch_statuses = asyncio.run(values())
     assert candidate_version == 9
     assert batch_statuses == ["expired", "expired"]
+
+
+@pytest.mark.parametrize(
+    ("starting_version", "expected_version", "raises"),
+    [
+        (2_147_483_646, 2_147_483_647, False),
+        (2_147_483_647, None, True),
+    ],
+)
+def test_generation_epoch_integer_boundaries_on_sqlite(tmp_path, starting_version, expected_version, raises):
+    from alembic import command
+    from alembic.config import Config
+
+    api_root = Path(__file__).parents[1]
+    database = tmp_path / "generation-epoch-boundary.sqlite3"
+    database_url = f"sqlite+aiosqlite:///{database.as_posix()}"
+    config = Config(api_root / "alembic.ini")
+    config.set_main_option("script_location", str(api_root / "alembic"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "20260827_06")
+    user_id, species_id, candidate_id = uuid4(), uuid4(), uuid4()
+
+    async def seed_boundary():
+        engine = create_async_engine(database_url)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO users (id, name, role, password_hash, must_change_password, active, "
+                    "failed_login_count, password_version) "
+                    "VALUES (:id, 'Mao', 'admin', 'hash', 0, 1, 0, 1)"
+                ),
+                {"id": user_id.hex},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO species (id, code, name_zh, name_en, scientific_name, active, sort_order) "
+                    "VALUES (:id, 'SF001', '鱼', 'Fish', 'Piscis', 1, 1)"
+                ),
+                {"id": species_id.hex},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO candidates (id, species_id, source_dataset, source_record_id, preview_url, "
+                    "original_url, source_url, license, attribution, metadata_json, active, version) "
+                    "VALUES (:id, :species_id, 'SOURCE', 'candidate-boundary', 'https://preview', "
+                    "'https://original', 'https://source', 'CC-BY', 'Creator', '{}', 1, :version)"
+                ),
+                {"id": candidate_id.hex, "species_id": species_id.hex, "version": starting_version},
+            )
+        await engine.dispose()
+
+    asyncio.run(seed_boundary())
+    if raises:
+        with pytest.raises(RuntimeError, match="candidate synchronization generation exhausted"):
+            command.upgrade(config, "20260827_07")
+    else:
+        command.upgrade(config, "20260827_07")
+
+        async def version_after_upgrade():
+            engine = create_async_engine(database_url)
+            async with engine.connect() as connection:
+                result = await connection.scalar(
+                    text("SELECT version FROM candidates WHERE id = :id"), {"id": candidate_id.hex}
+                )
+            await engine.dispose()
+            return result
+
+        assert asyncio.run(version_after_upgrade()) == expected_version
 
 
 def test_populated_chunking_downgrade_keeps_oldest_pending_batch_per_scope(tmp_path):

@@ -19,6 +19,43 @@ depends_on: str | Sequence[str] | None = None
 MAX_DB_INTEGER = 2_147_483_647
 
 
+def _historical_values_sql() -> str:
+    return (
+        "SELECT version AS v FROM candidates "
+        "UNION ALL SELECT version FROM reviews "
+        "UNION ALL SELECT review_version FROM review_revisions "
+        "UNION ALL SELECT review_version FROM export_items"
+    )
+
+
+def _offline_exhaustion_guard(dialect: str) -> tuple[sa.TextClause, ...]:
+    historical = _historical_values_sql()
+    if dialect == "postgresql":
+        return (
+            sa.text(
+                "DO $$ BEGIN "
+                "IF EXISTS (SELECT 1 FROM ("
+                f"{historical}"
+                f") AS historical WHERE v >= {MAX_DB_INTEGER}) THEN "
+                "RAISE EXCEPTION 'candidate synchronization generation exhausted'; "
+                "END IF; END $$"
+            ),
+        )
+    return (
+        sa.text(
+            "CREATE TEMPORARY TABLE _sync_generation_guard ("
+            "value INTEGER NOT NULL CHECK (value = 0))"
+        ),
+        sa.text(
+            "INSERT INTO _sync_generation_guard (value) "
+            "SELECT CASE WHEN EXISTS (SELECT 1 FROM ("
+            f"{historical}"
+            f") AS historical WHERE v >= {MAX_DB_INTEGER}) THEN 1 ELSE 0 END"
+        ),
+        sa.text("DROP TABLE _sync_generation_guard"),
+    )
+
+
 def _candidate_epoch_update_sql(dialect: str) -> sa.TextClause:
     maximum = "GREATEST" if dialect == "postgresql" else "MAX"
     return sa.text(
@@ -45,23 +82,22 @@ def _expire_pending_batches() -> None:
 
 def upgrade() -> None:
     dialect = context.get_context().dialect.name
+    if dialect == "postgresql":
+        op.execute(
+            sa.text("LOCK TABLE export_batches IN SHARE ROW EXCLUSIVE MODE")
+        )
     if context.is_offline_mode():
+        for guard in _offline_exhaustion_guard(dialect):
+            op.execute(guard)
         op.execute(_candidate_epoch_update_sql(dialect))
         _expire_pending_batches()
         return
 
     bind = op.get_bind()
-    if dialect == "postgresql":
-        op.execute(
-            sa.text("LOCK TABLE export_batches IN SHARE UPDATE EXCLUSIVE MODE")
-        )
     maximum = bind.execute(
         sa.text(
             "SELECT MAX(v) FROM ("
-            "SELECT version AS v FROM candidates "
-            "UNION ALL SELECT version FROM reviews "
-            "UNION ALL SELECT review_version FROM review_revisions "
-            "UNION ALL SELECT review_version FROM export_items"
+            f"{_historical_values_sql()}"
             ") AS historical"
         )
     ).scalar()

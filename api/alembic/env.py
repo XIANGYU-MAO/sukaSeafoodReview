@@ -3,7 +3,7 @@ from logging.config import fileConfig
 import os
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -36,6 +36,10 @@ def run_migrations_offline() -> None:
 
 
 def configure_and_run(connection: Connection) -> None:
+    migration_schema = config.get_main_option("migration_schema")
+    if migration_schema:
+        quoted_schema = connection.dialect.identifier_preparer.quote(migration_schema)
+        connection.execute(text(f"SET search_path TO {quoted_schema}"))
     context.configure(
         connection=connection,
         target_metadata=target_metadata,

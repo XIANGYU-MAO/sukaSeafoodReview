@@ -7,7 +7,7 @@ Create Date: 2026-08-27
 
 from collections.abc import Sequence
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -22,6 +22,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if context.get_context().dialect.name == "postgresql":
+        op.execute(
+            sa.text("LOCK TABLE export_batches IN SHARE UPDATE EXCLUSIVE MODE")
+        )
     op.execute(
         sa.text(
             "WITH ranked AS ("
