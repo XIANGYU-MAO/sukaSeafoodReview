@@ -6,10 +6,11 @@ import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { LoginPage } from "./pages/LoginPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { ReviewPage } from "./pages/ReviewPage";
+import { TeamProgressPage } from "./pages/TeamProgressPage";
 import { AdminPage } from "./pages/AdminPage";
 import { useI18n } from "./i18n/I18nProvider";
 
-export const APP_PATHS = ["/", "/history", "/admin"] as const;
+export const APP_PATHS = ["/", "/history", "/progress", "/admin"] as const;
 
 export function App() {
   const auth = useAuth();
@@ -85,6 +86,19 @@ export function App() {
           }
         />
         <Route
+          path="/progress"
+          element={
+            <AuthenticatedShell
+              name={authenticatedUser.name}
+              isAdmin={authenticatedUser.role === "admin"}
+              onChangePassword={() => setChangingPassword(true)}
+              onLogout={auth.logout}
+            >
+              <TeamProgressPage retryBootstrap={auth.retryBootstrap} />
+            </AuthenticatedShell>
+          }
+        />
+        <Route
           path="/admin"
           element={
             authenticatedUser.name === "Mao" && authenticatedUser.role === "admin" ? <AuthenticatedShell
@@ -139,6 +153,7 @@ function AuthenticatedShell({ name, isAdmin, onChangePassword, onLogout, childre
         <nav className="shell-navigation" aria-label={t("shellTitle")}>
           <NavLink to="/" end>{t("navReview")}</NavLink>
           <NavLink to="/history">{t("navHistory")}</NavLink>
+          <NavLink to="/progress">{t("navProgress")}</NavLink>
           {isAdmin ? <NavLink to="/admin">{t("navAdmin")}</NavLink> : null}
         </nav>
         <div className="user-actions">

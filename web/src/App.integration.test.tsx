@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -30,10 +30,9 @@ function pathOf(input: RequestInfo | URL): string {
 }
 
 describe("production-shell integration", () => {
-  it("logs in from a fresh 401, confirms KEEP in the database, refreshes progress, then opens private history", async () => {
+  it("logs in from a fresh 401, confirms KEEP in the database, then opens private history", async () => {
     let accepted = false;
     let currentCalls = 0;
-    let progressCalls = 0;
     const decisionReceipt = deferred<Response>();
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -53,11 +52,6 @@ describe("production-shell integration", () => {
         expect(init?.method).toBe("POST");
         expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-csrf-token");
         return Promise.resolve(accepted ? new Response(null, { status: 204 }) : jsonResponse(candidate));
-      }
-      if (path.endsWith("/progress")) {
-        progressCalls += 1;
-        expect(init?.method).toBeUndefined();
-        return Promise.resolve(jsonResponse({ ...progressFixture, reviewed: accepted ? 8 : 7 }));
       }
       if (path.endsWith(`/reviews/${candidate.id}/decision`)) {
         expect(init?.method).toBe("POST");
@@ -112,10 +106,43 @@ describe("production-shell integration", () => {
         }, 201)));
 
     expect(await screen.findByRole("status")).toHaveTextContent("No images are waiting right now");
-    await waitFor(() => expect(progressCalls).toBeGreaterThanOrEqual(2));
     await user.click(screen.getByRole("link", { name: "History" }));
     expect(await screen.findByRole("heading", { name: "My review history" })).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([input]) => pathOf(input).endsWith("/history"))).toBe(true);
+  });
+
+  it("places Team progress immediately after History in the top navigation", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const path = pathOf(input);
+      if (path.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
+      if (path.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+      return Promise.reject(new Error(`Unexpected request: ${String(input)}`));
+    }));
+    renderWithStrictAuth(<App />);
+
+    const nav = await screen.findByRole("navigation", { name: "协作审核" });
+    expect(Array.from(nav.querySelectorAll("a")).map((link) => link.textContent)).toEqual([
+      "审核", "历史记录", "团队记录",
+    ]);
+  });
+
+  it("opens aggregate progress at /progress without exposing review history details", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = pathOf(input);
+      if (path.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
+      if (path.endsWith("/progress")) return Promise.resolve(jsonResponse(progressFixture));
+      return Promise.reject(new Error(`Unexpected request: ${String(input)}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithStrictAuth(<App />, "/progress");
+
+    expect(await screen.findByRole("heading", { name: "团队进度" })).toBeInTheDocument();
+    for (const name of fixedNames.map(({ name }) => name)) {
+      expect(screen.getByRole("rowheader", { name })).toBeInTheDocument();
+    }
+    expect(screen.queryByText("Piscis probatio")).not.toBeInTheDocument();
+    expect(screen.queryByText("page:1:File:Fish.jpg")).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.every(([input]) => !pathOf(input).endsWith("/history"))).toBe(true);
   });
 
   it("restores an authenticated refresh directly to the current candidate", async () => {

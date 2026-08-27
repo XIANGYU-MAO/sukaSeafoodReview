@@ -627,11 +627,10 @@ h1 {
   resize: vertical;
 }
 
-.review-progress-region {
-  margin-top: 1.5rem;
-}
-
 .progress-loading {
+  display: grid;
+  justify-items: center;
+  gap: 0.75rem;
   padding: 2rem;
 }
 
@@ -727,7 +726,8 @@ h1 {
   line-height: 1.55;
 }
 
-.history-workspace {
+.history-workspace,
+.team-progress-workspace {
   width: min(82rem, calc(100% - 2rem));
   margin: 0 auto;
   padding: clamp(1.4rem, 4vw, 3rem) 0 4rem;
