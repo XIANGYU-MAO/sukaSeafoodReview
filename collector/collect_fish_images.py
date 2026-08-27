@@ -791,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
                     found = []
                 rows.extend(found)
                 print(f"  -> {len(found)} usable licensed candidate rows", file=sys.stderr)
-            except (requests.RequestException, ValueError, AttributeError) as exc:
+            except (requests.RequestException, ValueError, AttributeError, TypeError) as exc:
                 print(f"!! {species['seafood_code']} {source} failed: {exc}", file=sys.stderr)
 
     rows = merge_resume_rows(existing_rows, rows) if args.resume else dedupe_metadata(rows)
