@@ -59,6 +59,7 @@ export function ImportsTab(props: AdminTabProps) {
   const [platform, setPlatform] = useState<CommandPlatform>("windows");
   const [collectionMode, setCollectionMode] = useState<CollectionMode>("initial");
   const [maxPerSpecies, setMaxPerSpecies] = useState(100);
+  const [minimumPerSpecies, setMinimumPerSpecies] = useState(300);
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const generation = useRef(0);
   const operationKind = useRef<"preview" | "commit" | null>(null);
@@ -72,8 +73,8 @@ export function ImportsTab(props: AdminTabProps) {
     const python = platform === "windows" ? "python" : "python3";
     const separator = platform === "windows" ? ".\\" : "./";
     const resume = collectionMode === "replenish" ? " --resume" : "";
-    return `${python} ${separator}collect_fish_images.py --config ${separator}species_config.json --source all --max-per-species ${maxPerSpecies}${resume}`;
-  }, [collectionMode, maxPerSpecies, platform]);
+    return `${python} ${separator}collect_fish_images.py --config ${separator}species_config.json --source all --max-per-species ${maxPerSpecies} --minimum-total-per-species ${minimumPerSpecies}${resume}`;
+  }, [collectionMode, maxPerSpecies, minimumPerSpecies, platform]);
 
   useEffect(() => {
     mounted.current = true;
@@ -272,8 +273,13 @@ export function ImportsTab(props: AdminTabProps) {
           <button type="button" className={`pill-choice${collectionMode === "initial" ? " pill-choice--selected" : ""}`} aria-pressed={collectionMode === "initial"} onClick={() => setCollectionMode("initial")}>首次采集</button>
           <button type="button" className={`pill-choice${collectionMode === "replenish" ? " pill-choice--selected" : ""}`} aria-pressed={collectionMode === "replenish"} onClick={() => setCollectionMode("replenish")}>数量不足时补采</button>
         </div></fieldset>
+        <div className="command-number-field command-number-field--target"><div className="admin-field-label"><label htmlFor="collector-minimum">每个鱼种候选数至少达到</label><HelpHint context="字段" label="最低候选目标">这是服务器中每个鱼种希望达到的候选图片总数。最新鱼种配置会记录当前数量；采集器只补不足的鱼种，达到目标的会跳过。来源图片可能不足或被系统判重，所以一次未达到时，先导入 CSV，再重新下载最新配置继续补采。</HelpHint></div><input id="collector-minimum" type="number" min="1" max="10000" value={minimumPerSpecies} onChange={(event) => setMinimumPerSpecies(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></div>
         <div className="command-number-field"><div className="admin-field-label"><label htmlFor="collector-max">每个鱼种、每个来源最多采集</label><HelpHint context="字段" label="采集数量参数">这是每个鱼种在每个来源尝试收集的上限，不是最终保证数量。审核后不够时，调大这个数字并选择“数量不足时补采”；采集器保留旧 CSV，导入时系统也会按来源身份和原图地址自动去重。</HelpHint></div><input id="collector-max" type="number" min="1" max="10000" value={maxPerSpecies} onChange={(event) => setMaxPerSpecies(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></div>
       </div>
+      {activeSpecies.length ? <ul className="collector-shortfalls" aria-label="鱼种候选缺口">{activeSpecies.map((species) => {
+        const shortfall = Math.max(0, minimumPerSpecies - species.candidate_count);
+        return <li key={species.id} className={shortfall === 0 ? "collector-shortfalls__reached" : ""}><strong>{species.code}</strong><span>{species.name_zh}</span><span>当前 {species.candidate_count}</span><span>{shortfall ? `还差 ${shortfall}` : "已达到"}</span></li>;
+      })}</ul> : null}
       <p className="collector-command"><code>{command}</code></p>
       <button type="button" className="secondary-button" onClick={() => void copyCommand()}>复制命令</button>
       <p>输出文件为 <code>output/candidates.csv</code>。审核后数量不够时，不用清空或重做：提高参数后补采，再导入新 CSV，重复图片会自动跳过。</p>

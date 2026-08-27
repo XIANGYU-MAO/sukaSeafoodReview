@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Species
+from app.models import Candidate, Species
 from app.schemas.collector import CollectorConfig, CollectorSpecies
 
 
@@ -23,6 +23,14 @@ async def build_collector_config(session: AsyncSession) -> CollectorConfig:
     )
     if not rows:
         raise NoActiveSpecies
+    candidate_counts = dict(
+        (
+            await session.execute(
+                select(Candidate.species_id, func.count(Candidate.id))
+                .group_by(Candidate.species_id)
+            )
+        ).all()
+    )
     return CollectorConfig(
         generated_at=datetime.now(timezone.utc),
         species=[
@@ -31,6 +39,7 @@ async def build_collector_config(session: AsyncSession) -> CollectorConfig:
                 name_zh=row.name_zh,
                 name_en=row.name_en,
                 scientific_name=row.scientific_name,
+                candidate_count=int(candidate_counts.get(row.id, 0)),
                 inat_taxon_id=row.inat_taxon_id,
                 gbif_taxon_key=row.gbif_taxon_key,
                 commons_category=row.commons_category,

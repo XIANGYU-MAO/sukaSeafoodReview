@@ -60,7 +60,7 @@ GBIF_OCC_API = "https://api.gbif.org/v1/occurrence/search"
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 
 ALLOWED_LICENSES = {"CC0", "CC-BY", "CC-BY-SA", "CC-BY-NC", "CC-BY-NC-SA", "PUBLIC-DOMAIN"}
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
 MAX_CONFIG_TEXT_LENGTH = 500
 MAX_COMMONS_CATEGORY_LENGTH = 512
 MAX_FISH_VISTA_FILTER_LENGTH = 255
@@ -70,6 +70,7 @@ CONFIG_SPECIES_KEYS = {
     "name_zh",
     "name_en",
     "scientific_name",
+    "candidate_count",
     "inat_taxon_id",
     "gbif_taxon_key",
     "commons_category",
@@ -626,13 +627,19 @@ def _positive_integer_override(value: Any, field_name: str) -> int | None:
     return value
 
 
+def _nonnegative_integer(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value
+
+
 def normalize_species_config(raw: Any) -> dict[str, Any]:
     if (
         not isinstance(raw, dict)
         or type(raw.get("schema_version")) is not int
         or raw["schema_version"] != CONFIG_SCHEMA_VERSION
     ):
-        raise ValueError("collector config schema_version must be 1")
+        raise ValueError(f"collector config schema_version must be {CONFIG_SCHEMA_VERSION}")
     unknown_top_level = set(raw) - CONFIG_TOP_LEVEL_KEYS
     if unknown_top_level:
         raise ValueError(f"unknown collector config key(s): {', '.join(sorted(unknown_top_level))}")
@@ -675,6 +682,7 @@ def normalize_species_config(raw: Any) -> dict[str, Any]:
                 "name_en": name_en,
                 "app_label": name_en,
                 "scientific_name": scientific_name,
+                "candidate_count": _nonnegative_integer(item.get("candidate_count"), "candidate_count"),
                 "inat_taxon_id": _positive_integer_override(item.get("inat_taxon_id"), "inat_taxon_id"),
                 "gbif_taxon_key": _positive_integer_override(item.get("gbif_taxon_key"), "gbif_taxon_key"),
                 "commons_category": commons_category or f"Category:{scientific_name}",
@@ -764,6 +772,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--source", choices=["all", "fish-vista", "inat", "gbif", "commons"], default="all")
     p.add_argument("--species", action="append", help="Seafood code, e.g. FISH_A. Repeat for multiple. Default: all configured species.")
     p.add_argument("--max-per-species", type=int, default=100, help="Maximum candidate rows per species per source (default 100).")
+    p.add_argument("--minimum-total-per-species", type=int, help="Collect only the shortfall needed for each species to reach this server candidate total.")
     p.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument("--download-images", action="store_true", help="Download image bytes after metadata collection. Default is metadata-only.")
     p.add_argument("--resume", action="store_true", help="Merge newly collected rows into an existing output/candidates.csv instead of overwriting it.")
@@ -774,6 +783,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.max_per_species < 1:
         raise SystemExit("--max-per-species must be >= 1")
+    if args.minimum_total_per_species is not None and args.minimum_total_per_species < 1:
+        raise SystemExit("--minimum-total-per-species must be >= 1")
     cfg = load_config(args.config)
     selected = set(args.species or [])
     species_list = [x for x in cfg["species"] if not selected or x["seafood_code"] in selected]
@@ -796,22 +807,53 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Resume mode: no existing manifest found at {manifest}; starting from empty", file=sys.stderr)
 
     rows: list[dict[str, str]] = []
+    seen_rows = {
+        (row.get("seafood_code", ""), row.get("image_url", "") or row.get("source_record_id", ""))
+        for row in existing_rows
+    }
     for species in species_list:
+        remaining = None
+        if args.minimum_total_per_species is not None:
+            remaining = max(0, args.minimum_total_per_species - species["candidate_count"])
+            if remaining == 0:
+                print(
+                    f"[{species['seafood_code']}] already has {species['candidate_count']} server candidates; target reached, skipping",
+                    file=sys.stderr,
+                )
+                continue
+            print(
+                f"[{species['seafood_code']}] server has {species['candidate_count']}; collecting up to {remaining} new candidates",
+                file=sys.stderr,
+            )
         for source in sources:
+            if remaining == 0:
+                break
+            source_limit = args.max_per_species if remaining is None else min(args.max_per_species, remaining)
             print(f"[{species['seafood_code']}] collecting {source} metadata...", file=sys.stderr)
             try:
                 if source == "fish-vista":
-                    found = collector.collect_fish_vista(species, args.max_per_species)
+                    found = collector.collect_fish_vista(species, source_limit)
                 elif source == "inat":
-                    found = collector.collect_inat(species, args.max_per_species)
+                    found = collector.collect_inat(species, source_limit)
                 elif source == "gbif":
-                    found = collector.collect_gbif(species, args.max_per_species)
+                    found = collector.collect_gbif(species, source_limit)
                 elif source == "commons":
-                    found = collector.collect_commons(species, args.max_per_species)
+                    found = collector.collect_commons(species, source_limit)
                 else:  # pragma: no cover
                     found = []
-                rows.extend(found)
-                print(f"  -> {len(found)} usable licensed candidate rows", file=sys.stderr)
+                accepted = []
+                for row in found:
+                    key = (row.get("seafood_code", ""), row.get("image_url", "") or row.get("source_record_id", ""))
+                    if key in seen_rows:
+                        continue
+                    seen_rows.add(key)
+                    accepted.append(row)
+                    if remaining is not None and len(accepted) >= remaining:
+                        break
+                rows.extend(accepted)
+                if remaining is not None:
+                    remaining -= len(accepted)
+                print(f"  -> {len(accepted)} new usable licensed candidate rows", file=sys.stderr)
             except requests.RequestException as exc:
                 print(
                     f"!! {species['seafood_code']} {source} failed: {exc}; retry later with --resume",

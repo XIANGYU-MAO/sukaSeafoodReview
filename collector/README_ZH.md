@@ -8,12 +8,13 @@ Commons 收集带许可证的候选图片 metadata，并写入稳定的
 
 ## 配置当前鱼种目录
 
-采集器只支持 schema version `1`。先复制受跟踪的示例配置，再把虚构条目替换为
+采集器只支持 schema version `2`。管理后台下载的最新配置会同时写入每个鱼种当前的
+`candidate_count`。先复制受跟踪的示例配置，再把虚构条目替换为
 当前目录中的鱼种：
 
 ```powershell
 Copy-Item .\species_config.example.json .\species_config.json
-python .\collect_fish_images.py --config .\species_config.json --source all --max-per-species 100
+python .\collect_fish_images.py --config .\species_config.json --source all --max-per-species 100 --minimum-total-per-species 300
 python .\collect_fish_images.py --config .\species_config.json --source commons --species FISH_A --resume
 ```
 
@@ -23,7 +24,7 @@ python .\collect_fish_images.py --config .\species_config.json --source commons 
 override。`commons_category` 默认是 `Category:<scientific_name>`，
 `fish_vista_filter` 默认是 scientific name。
 
-未知字段、空文本、重复 code、非正数 override 和非 version 1 的 schema 都会在
+未知字段、空文本、重复 code、负数 `candidate_count`、非正数 override 和非 version 2 的 schema 都会在
 采集开始前被拒绝。
 
 ## 安装和采集
@@ -39,6 +40,11 @@ py -m pip install -r requirements.txt
 `--source` 可选 `all`、`fish-vista`、`inat`、`gbif` 或 `commons`。没有
 `--species` 时，会采集所有已配置鱼种。`--resume` 会把后续结果合并进已有 manifest，
 不会覆盖现有候选行。默认只收 metadata；`--download-images` 为可选项。
+
+`--minimum-total-per-species 300` 表示服务器中每个鱼种至少希望有 300 个候选。采集器
+根据配置中的 `candidate_count` 跳过已达标鱼种，只采集未达标鱼种的缺口，并在缺口
+填满时停止。来源图片不足或导入判重时，一次采集可能仍未达标；先导入 CSV，再从
+管理后台重新下载最新配置继续补采即可。
 
 ## 来源与许可证规则
 

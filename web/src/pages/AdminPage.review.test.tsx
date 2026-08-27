@@ -71,9 +71,13 @@ it("switches command syntax for Unix replenishment and accepts a CSV dropped ont
 
   await user.click(screen.getByRole("button", { name: "macOS / Linux" }));
   await user.click(screen.getByRole("button", { name: "数量不足时补采" }));
+  const minimum = screen.getByRole("spinbutton", { name: "每个鱼种候选数至少达到" });
+  fireEvent.change(minimum, { target: { value: "300" } });
+  expect(screen.getByRole("list", { name: "鱼种候选缺口" })).toHaveTextContent("SF001测试鱼当前 2还差 298");
+  expect(screen.getByRole("list", { name: "鱼种候选缺口" })).toHaveTextContent("SF002其他鱼当前 1还差 299");
   const limit = screen.getByRole("spinbutton", { name: "每个鱼种、每个来源最多采集" });
   fireEvent.change(limit, { target: { value: "250" } });
-  expect(screen.getByText(/python3 \.\/collect_fish_images\.py.*--max-per-species 250 --resume/)).toBeInTheDocument();
+  expect(screen.getByText(/python3 \.\/collect_fish_images\.py.*--max-per-species 250 --minimum-total-per-species 300 --resume/)).toBeInTheDocument();
 
   const dropped = new File(["seafood_code\nSF001"], "dropped.csv", { type: "text/csv" });
   const dropZone = screen.getByText("把候选 CSV 拖到这里").closest(".csv-drop-zone");

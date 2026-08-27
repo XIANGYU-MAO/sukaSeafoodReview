@@ -363,7 +363,7 @@ export function HistoryPage({ csrfToken, reviewerId, retryBootstrap }: HistoryPa
         {history?.items.map((item) => (
           <article className="history-card" key={item.id}>
             <button
-              className="history-thumbnail-viewer"
+              className="history-thumbnail-viewer history-thumbnail-viewer--cropped"
               type="button"
               aria-label={t("viewFullImage")}
               onClick={() => setPreviewItem(item)}

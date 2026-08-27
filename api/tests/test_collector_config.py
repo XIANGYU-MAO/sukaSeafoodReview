@@ -31,8 +31,8 @@ async def configure_catalog(settings) -> None:
     await engine.dispose()
 
 
-def test_mao_downloads_only_active_species_in_deterministic_order(settings):
-    seed = asyncio.run(seed_admin_database(settings, candidate_count=0))
+def test_admin_downloads_active_species_with_current_candidate_counts(settings):
+    seed = asyncio.run(seed_admin_database(settings, candidate_count=5))
     asyncio.run(configure_catalog(settings))
 
     with TestClient(create_app(settings)) as client:
@@ -48,7 +48,7 @@ def test_mao_downloads_only_active_species_in_deterministic_order(settings):
     assert response.headers["content-type"] == "application/json; charset=utf-8"
     assert response.headers["cache-control"] == "no-store"
     assert set(payload) == {"schema_version", "generated_at", "species"}
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert datetime.fromisoformat(payload["generated_at"].replace("Z", "+00:00")).tzinfo
     assert payload["species"] == [
         {
@@ -56,6 +56,7 @@ def test_mao_downloads_only_active_species_in_deterministic_order(settings):
             "name_zh": "其他鱼",
             "name_en": "Other fish",
             "scientific_name": "Piscis alter",
+            "candidate_count": 1,
             "inat_taxon_id": 123,
             "gbif_taxon_key": None,
             "commons_category": None,
@@ -66,6 +67,7 @@ def test_mao_downloads_only_active_species_in_deterministic_order(settings):
             "name_zh": "测试鱼",
             "name_en": "Test fish",
             "scientific_name": "Piscis probatio",
+            "candidate_count": 4,
             "inat_taxon_id": None,
             "gbif_taxon_key": None,
             "commons_category": None,

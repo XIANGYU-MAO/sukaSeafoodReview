@@ -82,10 +82,10 @@ export function CandidatesTab(props: AdminTabProps) {
       <label>预览图地址<input aria-label="预览图地址" value={draft.preview_url} onChange={(event) => setDraft({ ...draft, preview_url: event.target.value })} /></label>
       <label>原图地址<input aria-label="原图地址" value={draft.original_url} onChange={(event) => setDraft({ ...draft, original_url: event.target.value })} /></label>
       <label>所属鱼种<select aria-label="所属鱼种" value={draft.species_id} onChange={(event) => setDraft({ ...draft, species_id: event.target.value, confirm: false, target: "" })}>{props.species.filter((item) => item.active).map((item) => <option key={item.id} value={item.id}>{item.code} · {item.name_zh}</option>)}</select></label>
-      <label className="check-label"><input type="checkbox" checked={draft.active} onChange={(event) => setDraft({ ...draft, active: event.target.checked })} />启用</label>
+      <div className="admin-check-field"><label className="check-label"><input type="checkbox" checked={draft.active} onChange={(event) => setDraft({ ...draft, active: event.target.checked })} /><span>启用</span></label></div>
       {draft.confirm ? <div className="notice notice--error"><p>旧审核记录保留为历史，当前结果会失效，候选将重新分配。</p><label>新审核人<select aria-label="新审核人" value={draft.target} onChange={(event) => setDraft({ ...draft, target: event.target.value })}><option value="">请选择</option>{props.users.filter((item) => item.active && item.role === "reviewer" && item.id !== editing.current_review?.reviewer.id).map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}</select></label></div> : null}
       <label>候选修改原因<textarea aria-label="候选修改原因" value={draft.reason} onChange={(event) => setDraft({ ...draft, reason: event.target.value })} /></label>
-      <div className="inline-actions"><button disabled={pending} type="button" className="primary-button compact-button" onClick={() => void save()}>{pending ? "保存中…" : draft.confirm ? "确认失效并保存" : "保存候选"}</button><button type="button" className="secondary-button" disabled={pending} onClick={() => { setEditing(null); setDraft(null); }}>取消</button></div>
+      <div className="inline-actions equal-action-row" role="group" aria-label="候选表单操作"><button disabled={pending} type="button" className="primary-button compact-button" onClick={() => void save()}>{pending ? "保存中…" : draft.confirm ? "确认失效并保存" : "保存候选"}</button><button type="button" className="secondary-button" disabled={pending} onClick={() => { setEditing(null); setDraft(null); }}>取消</button></div>
     </section></fieldset> : null}
   </div>;
 }
@@ -115,8 +115,8 @@ function CandidateCard({ item, disabled, onEdit }: { item: AdminCandidate; disab
             <button disabled={disabled} type="button" className="secondary-button" onClick={onEdit}>编辑候选</button>
             <a href={item.original_url} target="_blank" rel="noopener noreferrer">查看原图</a>
           </div>
-          <a className="admin-review-source-link" href={item.source_url} target="_blank" rel="noopener noreferrer" aria-label={`打开 ${source} 来源页`}>
-            <span>{source}</span>
+          <a className="admin-review-source-link" href={item.source_url} target="_blank" rel="noopener noreferrer" aria-label={`打开 ${source} 来源页`} title={source}>
+            <span className="admin-review-source-link__label">{source}</span>
             <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false"><path d="M14 4h6v6M20 4l-9 9M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6" /></svg>
           </a>
         </footer>

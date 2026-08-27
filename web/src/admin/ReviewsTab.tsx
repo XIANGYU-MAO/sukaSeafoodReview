@@ -507,8 +507,9 @@ function ReviewCard({
             target="_blank"
             rel="noopener noreferrer"
             aria-label={`打开 ${source} 来源页`}
+            title={source}
           >
-            <span>{source}</span>
+            <span className="admin-review-source-link__label">{source}</span>
             <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
               <path d="M14 4h6v6M20 4l-9 9M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6" />
             </svg>

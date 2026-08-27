@@ -510,7 +510,7 @@ h1 {
 .candidate-card {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(22rem, 0.8fr);
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid rgba(7, 59, 76, 0.14);
   border-radius: 1.5rem;
   background: rgba(255, 255, 255, 0.92);
@@ -518,9 +518,12 @@ h1 {
 }
 
 .candidate-visual {
+  position: sticky;
+  top: max(1rem, calc(50vh - min(34vh, 23rem)));
   min-width: 0;
   align-self: start;
   padding: clamp(0.75rem, 2vw, 1.25rem);
+  border-radius: 1.5rem 0 0 1.5rem;
   background: #092e38;
 }
 
@@ -923,7 +926,7 @@ h1 {
 .history-thumbnail {
   width: 100%;
   height: 100%;
-  min-height: 12rem;
+  min-height: 0;
   object-fit: cover;
   background: #092e38;
 }
@@ -932,7 +935,8 @@ h1 {
   position: relative;
   display: block;
   min-width: 0;
-  min-height: 12rem;
+  height: 13rem;
+  min-height: 0;
   overflow: hidden;
   padding: 0;
   border: 0;
@@ -1217,6 +1221,16 @@ h1 {
   gap: 0.35rem;
 }
 
+.admin-table-heading {
+  display: inline-flex;
+  width: max-content;
+  max-width: 100%;
+  align-items: center;
+  line-height: 1.2;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
 .admin-field-label label {
   display: inline;
 }
@@ -1250,6 +1264,7 @@ h1 {
   display: inline-flex;
   flex: 0 0 auto;
   font-style: normal;
+  vertical-align: middle;
 }
 
 .help-hint__trigger {
@@ -1581,13 +1596,12 @@ h1 {
 
 .admin-review-card__background {
   object-fit: cover;
-  transform: scale(1.06);
-  filter: blur(2px) saturate(0.82);
+  transform: scale(1.015);
+  filter: saturate(0.92) brightness(0.96);
 }
 
 .admin-review-card__overlay {
-  background: rgba(247, 252, 251, 0.78);
-  backdrop-filter: blur(3px);
+  background: rgba(247, 252, 251, 0.52);
 }
 
 .admin-review-card__content {
@@ -1606,6 +1620,7 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+  min-width: 0;
 }
 
 .admin-review-card__reviewer,
@@ -1677,8 +1692,16 @@ h1 {
 
 .admin-review-card__actions {
   display: flex;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 0.5rem;
+}
+
+.admin-review-card__actions > :is(a, button) {
+  min-height: 2.85rem;
+  margin-top: 0;
+  white-space: nowrap;
 }
 
 .admin-review-card__actions a {
@@ -1690,7 +1713,9 @@ h1 {
 
 .admin-review-source-link {
   display: inline-flex;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-end;
   align-items: center;
   gap: 0.35rem;
   color: #075d6b;
@@ -1698,7 +1723,15 @@ h1 {
   text-decoration: none;
 }
 
+.admin-review-source-link__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .admin-review-source-link svg {
+  flex: 0 0 auto;
   width: 1.1rem;
   height: 1.1rem;
   fill: none;
@@ -1822,6 +1855,46 @@ h1 {
   display: grid;
   align-content: start;
   gap: 0.45rem;
+}
+
+.collector-shortfalls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+  gap: 0.55rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.collector-shortfalls li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #b6d3d3;
+  border-radius: 0.7rem;
+  background: #f5fbfa;
+}
+
+.collector-shortfalls li span:nth-last-child(1) {
+  color: #9b6511;
+  font-weight: 850;
+}
+
+.collector-shortfalls li.collector-shortfalls__reached {
+  background: #e4f7f1;
+}
+
+.collector-shortfalls li span:nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collector-shortfalls li.collector-shortfalls__reached span:nth-last-child(1) {
+  color: #087556;
 }
 
 .collector-command {
@@ -1997,6 +2070,12 @@ h1 {
 
   .candidate-card {
     grid-template-columns: 1fr;
+    overflow: hidden;
+  }
+
+  .candidate-visual {
+    position: static;
+    border-radius: 0;
   }
 
   .image-stage,

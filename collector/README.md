@@ -9,12 +9,14 @@ not training-approved automatically.
 
 ## Configure the active catalog
 
-The collector supports configuration schema version `1` only. Start from the
+The collector supports configuration schema version `2` only. The latest
+configuration downloaded from the admin page includes each species' current
+`candidate_count`. Start from the
 tracked example, then replace its fictional entries with the active catalog:
 
 ```powershell
 Copy-Item .\species_config.example.json .\species_config.json
-python .\collect_fish_images.py --config .\species_config.json --source all --max-per-species 100
+python .\collect_fish_images.py --config .\species_config.json --source all --max-per-species 100 --minimum-total-per-species 300
 python .\collect_fish_images.py --config .\species_config.json --source commons --species FISH_A --resume
 ```
 
@@ -41,7 +43,12 @@ py -m pip install -r requirements.txt
 Use `--source` to choose `all`, `fish-vista`, `inat`, `gbif`, or `commons`.
 With no `--species` arguments, every configured species is collected. Use
 `--resume` to merge later collection runs into the existing manifest without
-overwriting existing candidate rows. `--download-images` is optional; metadata
+overwriting existing candidate rows. `--minimum-total-per-species 300` skips
+species already at 300 server candidates and collects only each remaining
+shortfall, stopping once it is filled. A source may not have enough usable
+images, and import deduplication can leave the server below the target; import
+the CSV, download a fresh configuration, and run replenishment again.
+`--download-images` is optional; metadata
 collection is the default.
 
 ## Source and license policy

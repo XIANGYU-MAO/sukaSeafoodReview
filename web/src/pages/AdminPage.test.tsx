@@ -178,6 +178,7 @@ describe("progress/current and candidate safety", () => {
       candidateFixture.preview_url,
     );
     expect(within(candidateCard).getByText("Hassan")).toHaveClass("admin-review-card__reviewer");
+    expect(within(candidateCard).getByRole("link", { name: /来源页/ })).toHaveAttribute("title");
     expect(within(candidateCard).getByText("保留")).toHaveClass("admin-review-result--approved");
     expect(within(candidateCard).getByText("测试鱼")).toBeInTheDocument();
     expect(within(candidateCard).getByRole("link", { name: "打开 iNaturalist 来源页" }))
@@ -191,6 +192,10 @@ describe("progress/current and candidate safety", () => {
       return url.includes("/admin/candidates?") && url.includes("reviewed=true") && url.includes("search=obs%3A1");
     })).toBe(true));
     await user.click(screen.getByRole("button", { name: "编辑候选" }));
+    const enabledCheckbox = screen.getByRole("checkbox", { name: "启用" });
+    expect(enabledCheckbox.closest(".admin-check-field")).not.toBeNull();
+    const candidateActions = screen.getByRole("group", { name: "候选表单操作" });
+    expect(candidateActions).toHaveClass("equal-action-row");
     await user.clear(screen.getByLabelText("预览图地址"));
     await user.type(screen.getByLabelText("预览图地址"), "http://unsafe.example/fish.jpg");
     await user.type(screen.getByLabelText("候选修改原因"), "修正图片");
@@ -390,6 +395,7 @@ describe("species and review administration", () => {
       reviewItem.candidate.preview_url,
     );
     expect(within(reviewCard).getByText("Hassan")).toHaveClass("admin-review-card__reviewer");
+    expect(within(reviewCard).getByRole("link", { name: /来源页/ })).toHaveAttribute("title");
     expect(within(reviewCard).getByText("保留")).toHaveClass("admin-review-result--approved");
     expect(within(reviewCard).getByText("测试鱼")).toBeInTheDocument();
     expect(within(reviewCard).getByRole("link", { name: "打开 iNaturalist 来源页" }))

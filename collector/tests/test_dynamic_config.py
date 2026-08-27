@@ -6,7 +6,7 @@ from collector.collect_fish_images import Collector, normalize_species_config
 
 def dynamic_config():
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": "2026-08-27T10:00:00Z",
         "species": [
             {
@@ -14,6 +14,7 @@ def dynamic_config():
                 "name_zh": "测试鱼甲",
                 "name_en": "Test fish A",
                 "scientific_name": "Piscis alpha",
+                "candidate_count": 10,
                 "inat_taxon_id": None,
                 "gbif_taxon_key": None,
                 "commons_category": None,
@@ -24,6 +25,7 @@ def dynamic_config():
                 "name_zh": "测试鱼乙",
                 "name_en": "Test fish B",
                 "scientific_name": "Piscis beta",
+                "candidate_count": 3,
                 "inat_taxon_id": 123,
                 "gbif_taxon_key": 456,
                 "commons_category": "Category:Custom beta",
@@ -39,6 +41,7 @@ def test_config_accepts_any_positive_species_count_and_applies_defaults():
     assert parsed["species"][0]["commons_category"] == "Category:Piscis alpha"
     assert parsed["species"][0]["fish_vista_filter"] == "Piscis alpha"
     assert parsed["species"][1]["inat_taxon_id"] == 123
+    assert parsed["species"][0]["candidate_count"] == 10
 
 
 @pytest.mark.parametrize("species", [[], [dynamic_config()["species"][0]] * 2])
@@ -54,6 +57,7 @@ def test_config_rejects_empty_or_duplicate_species(species):
         {**dynamic_config(), "schema_version": True},
         {**dynamic_config(), "unexpected": True},
         {**dynamic_config(), "species": [{**dynamic_config()["species"][0], "inat_taxon_id": 0}]},
+        {**dynamic_config(), "species": [{**dynamic_config()["species"][0], "candidate_count": -1}]},
         {**dynamic_config(), "species": [{**dynamic_config()["species"][0], "mistyped_key": "value"}]},
     ],
 )

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "generated_at": "2026-08-27T10:00:00Z",
   "species": [
     {
@@ -7,6 +7,7 @@
       "name_zh": "示例鱼甲",
       "name_en": "Example fish A",
       "scientific_name": "Piscis alpha",
+      "candidate_count": 0,
       "inat_taxon_id": null,
       "gbif_taxon_key": null,
       "commons_category": null,
@@ -17,6 +18,7 @@
       "name_zh": "示例鱼乙",
       "name_en": "Example fish B",
       "scientific_name": "Piscis beta",
+      "candidate_count": 0,
       "inat_taxon_id": null,
       "gbif_taxon_key": null,
       "commons_category": null,

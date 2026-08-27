@@ -217,6 +217,7 @@ describe("HistoryPage links, privacy, and editing", () => {
     expect(card.querySelector(".history-card__body")).toBeInTheDocument();
     const opener = within(card).getByRole("button", { name: "查看完整图片" });
     expect(opener).toHaveClass("history-thumbnail-viewer");
+    expect(opener).toHaveClass("history-thumbnail-viewer--cropped");
     expect(within(opener).getByRole("img")).toHaveAttribute("src", historyItem.preview_url);
     expect(opener.querySelector(".history-enlarge-icon")).toBeInTheDocument();
 

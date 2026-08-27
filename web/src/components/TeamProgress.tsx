@@ -54,7 +54,6 @@ export function TeamProgress({ data }: { data: ProgressResponse }) {
           </tbody>
         </table>
       </div>
-      <p className="progress-explanation">{t("progressExplanation")}</p>
     </section>
   );
 }

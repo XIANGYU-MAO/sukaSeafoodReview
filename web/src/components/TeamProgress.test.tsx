@@ -32,13 +32,13 @@ describe("TeamProgress", () => {
       }
     }
     expect(screen.queryByText("private review note")).not.toBeInTheDocument();
-    expect(screen.getByText(/成员数据按提交的审核尝试计数/)).toBeInTheDocument();
+    expect(screen.queryByText(/成员数据按提交的审核尝试计数/)).not.toBeInTheDocument();
   });
 
-  it("fully localizes the explanation and headings in English", () => {
+  it("fully localizes the headings in English without the removed explanation", () => {
     renderProgress("en");
     expect(screen.getByRole("heading", { name: "Team progress" })).toBeInTheDocument();
-    expect(screen.getByText(/Member totals count submitted review attempts/)).toBeInTheDocument();
+    expect(screen.queryByText(/Member totals count submitted review attempts/)).not.toBeInTheDocument();
     expect(screen.getByText("Reviewed today: 3")).toBeInTheDocument();
   });
 });

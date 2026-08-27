@@ -1,3 +1,4 @@
+import csv
 import json
 from pathlib import Path
 
@@ -187,7 +188,7 @@ def test_stable_image_id_is_repeatable_and_species_scoped():
 
 def dynamic_config():
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": "2026-08-27T10:00:00Z",
         "species": [
             {
@@ -195,6 +196,7 @@ def dynamic_config():
                 "name_zh": "测试鱼甲",
                 "name_en": "Test fish A",
                 "scientific_name": "Piscis alpha",
+                "candidate_count": 10,
                 "inat_taxon_id": None,
                 "gbif_taxon_key": None,
                 "commons_category": None,
@@ -205,6 +207,7 @@ def dynamic_config():
                 "name_zh": "测试鱼乙",
                 "name_en": "Test fish B",
                 "scientific_name": "Piscis beta",
+                "candidate_count": 3,
                 "inat_taxon_id": 123,
                 "gbif_taxon_key": 456,
                 "commons_category": "Category:Custom beta",
@@ -212,6 +215,57 @@ def dynamic_config():
             },
         ],
     }
+
+
+def test_main_collects_only_each_species_shortfall_until_minimum(monkeypatch, tmp_path):
+    config = tmp_path / "species_config.json"
+    config.write_text(json.dumps(dynamic_config()), encoding="utf-8")
+    calls = []
+
+    def rows(species, source, amount):
+        return [
+            {
+                "seafood_code": species["seafood_code"],
+                "source": source,
+                "source_record_id": f"{source}-{index}",
+                "image_url": f"https://example.test/{species['seafood_code']}/{source}-{index}.jpg",
+            }
+            for index in range(amount)
+        ]
+
+    class FakeCollector:
+        def __init__(self, **_kwargs):
+            pass
+
+        def collect_fish_vista(self, species, max_rows):
+            calls.append((species["seafood_code"], "fish-vista", max_rows))
+            return rows(species, "fish-vista", min(2, max_rows))
+
+        def collect_inat(self, species, max_rows):
+            calls.append((species["seafood_code"], "inat", max_rows))
+            return rows(species, "inat", max_rows)
+
+        def collect_gbif(self, species, max_rows):
+            calls.append((species["seafood_code"], "gbif", max_rows))
+            return rows(species, "gbif", max_rows)
+
+        def collect_commons(self, species, max_rows):
+            calls.append((species["seafood_code"], "commons", max_rows))
+            return rows(species, "commons", max_rows)
+
+    monkeypatch.setattr(collector_module, "Collector", FakeCollector)
+    result = collector_module.main([
+        "--config", str(config),
+        "--source", "all",
+        "--max-per-species", "5",
+        "--minimum-total-per-species", "10",
+        "--output-dir", str(tmp_path / "output"),
+    ])
+
+    assert result == 0
+    assert calls == [("FISH_B", "fish-vista", 5), ("FISH_B", "inat", 5)]
+    with (tmp_path / "output" / "candidates.csv").open(encoding="utf-8-sig", newline="") as handle:
+        assert len(list(csv.DictReader(handle))) == 7
 
 
 def test_main_selects_all_configured_species_without_fixed_default(monkeypatch, tmp_path):
