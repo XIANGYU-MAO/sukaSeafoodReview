@@ -31,6 +31,7 @@ $Archive = Join-Path $TempDirectory "review.tar"
 
 New-Item -ItemType Directory -Path $TempDirectory | Out-Null
 try {
+    Invoke-Native "ssh" @($SshOptions + @($SshHost, "sudo -n true"))
     Push-Location $RepoRoot
     try {
         $Revision = (& git rev-parse HEAD).Trim()
@@ -57,6 +58,7 @@ try {
     if ($RemoteSha -ne $LocalSha) { throw "Uploaded archive SHA-256 mismatch" }
 
     $RemoteCommand = @"
+sudo -n bash -s <<'SUKASEAFOOD_DEPLOY'
 set -Eeuo pipefail
 case '$RemoteStage' in
     /tmp/sukaseafood-review-stage-$Revision) ;;
@@ -83,6 +85,7 @@ chmod 700 '$RemoteRoot/deploy/scripts/'*.sh
 cleanup_review_stage
 trap - EXIT HUP INT TERM
 test ! -e '$RemoteStage'
+SUKASEAFOOD_DEPLOY
 "@
     Invoke-Native "ssh" @($SshOptions + @($SshHost, $RemoteCommand))
     Write-Output "Review revision $Revision deployed and verified."

@@ -61,6 +61,8 @@ def test_windows_deploy_has_safe_ssh_hash_stage_and_preserves_state():
     for protected in ("deploy/.env", "backups", "imports"):
         assert f"--exclude={protected}" in script
     assert "deploy_cloud.sh" in script
+    assert '"sudo -n true"' in script
+    assert "sudo -n bash -s <<'SUKASEAFOOD_DEPLOY'" in script
     assert "test ! -e '$RemoteStage'" in script
     assert "find '$RemoteStage' -xdev -depth -delete" in script
     assert "Remove-Item -Recurse" not in script
