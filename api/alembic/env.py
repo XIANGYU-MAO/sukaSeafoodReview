@@ -40,6 +40,7 @@ def configure_and_run(connection: Connection) -> None:
     if migration_schema:
         quoted_schema = connection.dialect.identifier_preparer.quote(migration_schema)
         connection.execute(text(f"SET search_path TO {quoted_schema}"))
+        connection.commit()
     context.configure(
         connection=connection,
         target_metadata=target_metadata,

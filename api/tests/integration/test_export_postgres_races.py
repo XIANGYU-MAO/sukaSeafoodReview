@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models import (
@@ -69,10 +69,19 @@ def migration_config(schema):
 
 
 def migration_engine(schema):
-    return create_async_engine(
+    quoted_schema = '"' + schema.replace('"', '""') + '"'
+    engine = create_async_engine(
         POSTGRES_URL,
-        connect_args={"server_settings": {"search_path": schema}},
+        connect_args={"server_settings": {"search_path": quoted_schema}},
     )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def set_schema_search_path(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f"SET search_path TO {quoted_schema}")
+        cursor.close()
+
+    return engine
 
 
 async def install_update_delay(schema, table):
@@ -474,11 +483,12 @@ def test_postgres_epoch_migration_serializes_against_receipt_completion():
                     relative_path=item.target_relative_path,
                 )
                 token = receipt_token(batch_id, SECRET)
-            await install_update_delay(schema, "candidates")
+            await install_update_delay(schema, "export_batches")
             migration = asyncio.create_task(
                 asyncio.to_thread(command.upgrade, config, "20260827_07")
             )
             await wait_for_export_batches_lock(schema, "ShareRowExclusiveLock")
+            await wait_for_export_batches_lock(schema, "RowExclusiveLock")
             async with factory() as receipt_db:
                 receipt_result = await asyncio.gather(
                     apply_receipt(receipt_db, batch_id, [payload], raw_token=token),
@@ -507,30 +517,25 @@ def test_postgres_chunking_downgrade_serializes_against_export_creation():
             engine = migration_engine(schema)
             mao_id, _ = await seed(engine)
             factory = async_sessionmaker(engine, expire_on_commit=False)
-            oldest_id, newer_id = uuid4(), uuid4()
+            newer_id = uuid4()
             async with factory() as db:
                 now = utc_now()
-                db.add_all(
-                    [
-                        ExportBatch(
-                            id=oldest_id,
-                            created_by_id=mao_id,
-                            scope_key="ALL",
-                            receipt_token_hash="1" * 64,
-                            status="pending",
-                            expires_at=now + timedelta(days=1),
-                            created_at=now,
-                        ),
-                        ExportBatch(
-                            id=newer_id,
-                            created_by_id=mao_id,
-                            scope_key="ALL",
-                            receipt_token_hash="2" * 64,
-                            status="pending",
-                            expires_at=now + timedelta(days=1),
-                            created_at=now + timedelta(seconds=1),
-                        ),
-                    ]
+                created = await create_export_batch(db, mao_id, None, SECRET)
+                assert created.batch is not None
+                oldest_id = created.batch.id
+                oldest = await db.get(ExportBatch, oldest_id)
+                assert oldest is not None
+                oldest.created_at = now
+                db.add(
+                    ExportBatch(
+                        id=newer_id,
+                        created_by_id=mao_id,
+                        scope_key="ALL",
+                        receipt_token_hash="2" * 64,
+                        status="pending",
+                        expires_at=now + timedelta(days=1),
+                        created_at=now + timedelta(seconds=1),
+                    )
                 )
                 await db.commit()
             await install_update_delay(schema, "export_batches")
