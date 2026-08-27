@@ -602,12 +602,18 @@ class SyncEngine:
                                 )
                                 operation_started = False
                                 if result is not None:
-                                    _discard_isolated_staging(
-                                        safe_root,
-                                        row,
-                                        downloaded,
-                                        download_destination,
-                                    )
+                                    try:
+                                        _discard_isolated_staging(
+                                            safe_root,
+                                            row,
+                                            downloaded,
+                                            download_destination,
+                                        )
+                                    except OperationError:
+                                        # Recovery already proved the managed
+                                        # target and durable generation exact;
+                                        # preserve an unowned private-path race.
+                                        pass
                                     write_canonical_manifest_locked(
                                         safe_root,
                                         manifest,

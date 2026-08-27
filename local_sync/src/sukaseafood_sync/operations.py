@@ -430,6 +430,7 @@ def _pin_owned_file(
     code: str,
     *,
     delete_access: bool = False,
+    share_delete: bool = True,
 ) -> Iterator[int | None]:
     """Deny new Windows writers while an owned leaf is proved and used."""
 
@@ -479,7 +480,7 @@ def _pin_owned_file(
     handle = create_file(
         str(path),
         0x80000000 | (0x00010000 if delete_access else 0),  # READ [+ DELETE]
-        0x0001 | 0x0004,  # share read/delete, intentionally not write
+        0x0001 | (0x0004 if share_delete else 0),  # share read [+ delete]
         None,
         3,  # OPEN_EXISTING
         0x00200000,  # FILE_FLAG_OPEN_REPARSE_POINT
@@ -517,7 +518,7 @@ def _unlink_windows_file_handle(handle: int, code: str) -> None:
     from ctypes import wintypes
 
     class _FileDispositionInfo(ctypes.Structure):
-        _fields_ = [("delete_file", wintypes.BOOL)]
+        _fields_ = [("delete_file", ctypes.c_ubyte)]
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     set_information = kernel32.SetFileInformationByHandle
@@ -528,7 +529,7 @@ def _unlink_windows_file_handle(handle: int, code: str) -> None:
         wintypes.DWORD,
     )
     set_information.restype = wintypes.BOOL
-    information = _FileDispositionInfo(True)
+    information = _FileDispositionInfo(1)
     if not set_information(
         handle,
         4,  # FileDispositionInfo
@@ -536,6 +537,38 @@ def _unlink_windows_file_handle(handle: int, code: str) -> None:
         ctypes.sizeof(information),
     ):
         raise OperationError(code)
+
+
+def _windows_file_handle_path(handle: int, code: str) -> Path:
+    """Return the normalized DOS path currently naming a Windows file handle."""
+
+    if os.name != "nt":
+        raise OperationError(code)
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    )
+    get_final_path.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = int(get_final_path(handle, buffer, len(buffer), 0))
+    if length == 0 or length >= len(buffer):
+        raise OperationError(code)
+    value = buffer.value
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    try:
+        return Path(value).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise OperationError(code) from None
 
 
 def _hash_windows_file_handle(handle: int, expected_size: int, code: str) -> str:
@@ -736,6 +769,7 @@ def _unlink_owned(
 
 
 def _unlink_owned_exact_leaf(
+    root: Path,
     path: Path,
     owned: os.stat_result,
     code: str,
@@ -744,12 +778,20 @@ def _unlink_owned_exact_leaf(
 ) -> None:
     """Remove the verified leaf itself even if its pathname is concurrently reused."""
 
+    safe_root = _validated_root(root)
+    try:
+        lexical_relative = path.relative_to(safe_root)
+        relative = PurePosixPath(*lexical_relative.parts)
+    except ValueError:
+        raise OperationError(code) from None
+    if _resolved_path(safe_root, relative) != path:
+        raise OperationError(code)
     current = _lstat(path, code)
     if current is None:
         return
     if not _regular(current) or not _same_file(current, owned):
         raise OperationError(code)
-    with _pin_owned_file(path, owned, code, delete_access=True) as handle:
+    with _pin_owned_file(path, owned, code) as handle:
         if expected_sha is not None:
             if os.name == "nt":
                 assert handle is not None
@@ -763,7 +805,24 @@ def _unlink_owned_exact_leaf(
         with _pin_link_parents(path, path):
             if os.name == "nt":
                 assert handle is not None
-                _unlink_windows_file_handle(handle, code)
+                final_path = _windows_file_handle_path(handle, code)
+                try:
+                    final_lexical_relative = final_path.relative_to(safe_root)
+                    final_relative = PurePosixPath(*final_lexical_relative.parts)
+                except ValueError:
+                    raise OperationError(code) from None
+                if _resolved_path(safe_root, final_relative) != final_path:
+                    raise OperationError(code)
+                with _pin_link_parents(final_path, final_path):
+                    with _pin_owned_file(
+                        final_path,
+                        owned,
+                        code,
+                        delete_access=True,
+                        share_delete=False,
+                    ) as destructive_handle:
+                        assert destructive_handle is not None
+                        _unlink_windows_file_handle(destructive_handle, code)
             else:
                 try:
                     path.unlink()
@@ -1367,6 +1426,7 @@ def discard_isolated_staging(
         isolated_staging_path=expected,
     )
     _unlink_owned_exact_leaf(
+        safe_root,
         staging,
         owned,
         "STAGING_FILE_UNSAFE",
@@ -1414,6 +1474,7 @@ def promote_isolated_staging(
     ):
         raise OperationError("STAGING_CONTENT_MISMATCH")
     _unlink_owned_exact_leaf(
+        safe_root,
         source,
         source_owned,
         "STAGING_FILE_UNSAFE",
@@ -1966,6 +2027,30 @@ def _reconcile_superseded_ordinary_add_intent(
     except Exception:
         raise OperationError("INDEX_READ_FAILED") from None
 
+    prior_state: tuple[Path, os.stat_result, str] | None = None
+    if stored is None and latest_before is not None:
+        if latest_before.review_version >= intent.review_version:
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+        if (
+            latest_before.present
+            and not _same_windows_path(
+                latest_before.relative_path, intent.actual_relative_path
+            )
+        ):
+            prior_lexical = root.joinpath(*latest_before.relative_path.parts)
+            prior_metadata = _lstat(prior_lexical, "ADD_RECOVERY_STATE_CHANGED")
+            if prior_metadata is not None:
+                try:
+                    prior_path = _resolved_path(root, latest_before.relative_path)
+                    prior_sha, _prior_size, prior_owned = _hash_regular(
+                        prior_path, "ADD_RECOVERY_STATE_CHANGED"
+                    )
+                except OperationError:
+                    raise OperationError("ADD_RECOVERY_STATE_CHANGED") from None
+                if prior_sha != latest_before.sha256:
+                    raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+                prior_state = (prior_path, prior_owned, prior_sha)
+
     target_state = _ordinary_intent_image(
         root,
         intent,
@@ -2030,9 +2115,12 @@ def _reconcile_superseded_ordinary_add_intent(
     elif target_state is None:
         assert staging_state is not None
         target = _ensure_parents(root, intent.actual_relative_path)
-        _link_no_clobber(
-            staging_state[0], staging_state[1][6], target, intent.sha256
-        )
+        try:
+            _link_no_clobber_exact_source(
+                staging_state[0], staging_state[1][6], target, intent.sha256
+            )
+        except OperationError:
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED") from None
         target_state = _ordinary_intent_image(
             root,
             intent,
@@ -2043,29 +2131,74 @@ def _reconcile_superseded_ordinary_add_intent(
             raise OperationError("ADD_RECOVERY_STATE_CHANGED")
 
     if staging_state is not None:
-        _unlink_owned(
-            staging_state[0],
-            staging_state[1][6],
-            "ADD_RECOVERY_STATE_CHANGED",
-            expected_sha=intent.sha256,
-        )
+        try:
+            _unlink_owned_exact_leaf(
+                root,
+                staging_state[0],
+                staging_state[1][6],
+                "ADD_RECOVERY_STATE_CHANGED",
+                expected_sha=intent.sha256,
+            )
+        except OperationError:
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED") from None
+        if _lstat(staging_state[0], "ADD_RECOVERY_STATE_CHANGED") is not None:
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED")
 
-    if stored is None:
-        _record(
-            index,
-            SyncResult(
-                candidate_id=intent.candidate_id,
-                review_id=intent.review_id,
-                review_version=intent.review_version,
-                action=intent.action,
-                batch_id=intent.batch_id,
-                relative_path=intent.actual_relative_path,
-                sha256=intent.sha256,
-                perceptual_hash=intent.perceptual_hash,
-            ),
-        )
-    elif not _clear_add_intent(index, intent):
-        raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+    if stored is None and prior_state is not None:
+        try:
+            _unlink_owned_exact_leaf(
+                root,
+                prior_state[0],
+                prior_state[1],
+                "ADD_RECOVERY_STATE_CHANGED",
+                expected_sha=prior_state[2],
+            )
+        except OperationError:
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED") from None
+        if _lstat(prior_state[0], "ADD_RECOVERY_STATE_CHANGED") is not None:
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+
+    assert target_state is not None
+    target_path, target_image = target_state
+    target_owned = target_image[6]
+    with _pin_owned_file(
+        target_path,
+        target_owned,
+        "ADD_RECOVERY_STATE_CHANGED",
+        share_delete=False,
+    ) as target_handle:
+        if os.name == "nt":
+            assert target_handle is not None
+            target_sha = _hash_windows_file_handle(
+                target_handle,
+                target_owned.st_size,
+                "ADD_RECOVERY_STATE_CHANGED",
+            )
+        else:
+            target_sha, _target_size, current_target = _hash_regular(
+                target_path, "ADD_RECOVERY_STATE_CHANGED"
+            )
+            if not _same_file(current_target, target_owned):
+                raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+        if target_sha != intent.sha256:
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+
+        if stored is None:
+            _record(
+                index,
+                SyncResult(
+                    candidate_id=intent.candidate_id,
+                    review_id=intent.review_id,
+                    review_version=intent.review_version,
+                    action=intent.action,
+                    batch_id=intent.batch_id,
+                    relative_path=intent.actual_relative_path,
+                    sha256=intent.sha256,
+                    perceptual_hash=intent.perceptual_hash,
+                ),
+            )
+        elif not _clear_add_intent(index, intent):
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED")
 
 
 def reconcile_older_add_intents(

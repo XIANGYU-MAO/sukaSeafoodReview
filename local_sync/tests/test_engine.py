@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
 from dataclasses import fields, replace
 import hashlib
 from io import BytesIO
 import json
+import os
 from pathlib import Path, PurePosixPath
 import queue
 import sys
@@ -894,6 +896,344 @@ def test_newer_action_clears_ordinary_intent_left_before_shared_promotion(
             == generation_10.target_relative_path.as_posix()
         )
         assert canonical[0]["sha256"] == SHA256
+
+
+def test_failed_newer_action_does_not_publish_recovered_ordinary_generation(
+    sync_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sukaseafood_sync.engine as engine_module
+
+    sync_root.mkdir()
+    initial = replace(
+        row(80, species_code="OLD"),
+        review_id=candidate(8005),
+        review_version=5,
+    )
+    first = SyncEngine(
+        session=Session(), downloader=fake_download(sync_root, [])
+    ).run(
+        ExportManifest((initial,), initial.batch_id, RECEIPT_TOKEN),
+        sync_root,
+        SyncCallbacks(),
+        threading.Event(),
+    )
+    assert first.counts == {"succeeded": 1, "failed": 0, "skipped": 0}
+    canonical_before = (sync_root / "canonical_manifest.csv").read_bytes()
+
+    generation_9_jpg, generation_9_phash, generation_9_sha = jpeg_variant(
+        (19, 13), (130, 40, 190)
+    )
+    generation_9 = replace(
+        row(80, species_code="MIDDLE"),
+        batch_id=candidate(8009),
+        review_id=candidate(9009),
+        review_version=9,
+        previous_relative_path=initial.target_relative_path,
+    )
+
+    def download_generation_9(
+        session, manifest_row, destination, policy, progress, cancel
+    ):
+        del session, manifest_row, policy, progress, cancel
+        staging = Path(destination).with_name(Path(destination).name + ".part")
+        staging.write_bytes(generation_9_jpg)
+        return DownloadResult(
+            staging,
+            generation_9_sha,
+            generation_9_phash,
+            len(generation_9_jpg),
+            "JPEG",
+            ".jpg",
+            19,
+            13,
+        )
+
+    class SimulatedProcessDeath(BaseException):
+        pass
+
+    original_promote = engine_module._promote_isolated_staging
+
+    def die_after_shared_promotion(*args, **kwargs):
+        original_promote(*args, **kwargs)
+        raise SimulatedProcessDeath
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(
+            engine_module, "_promote_isolated_staging", die_after_shared_promotion
+        )
+        with pytest.raises(SimulatedProcessDeath):
+            SyncEngine(session=Session(), downloader=download_generation_9).run(
+                ExportManifest(
+                    (generation_9,), generation_9.batch_id, RECEIPT_TOKEN
+                ),
+                sync_root,
+                SyncCallbacks(),
+                threading.Event(),
+            )
+
+    generation_9_target = local(sync_root, generation_9.target_relative_path)
+    shared_stage = generation_9_target.with_name(generation_9_target.name + ".part")
+    assert not generation_9_target.exists()
+    assert shared_stage.read_bytes() == generation_9_jpg
+    assert local(sync_root, initial.target_relative_path).read_bytes() == JPEG
+
+    generation_10 = replace(
+        row(80, "MOVE", species_code="NEW"),
+        batch_id=candidate(8010),
+        review_id=candidate(9010),
+        review_version=10,
+        previous_relative_path=generation_9.target_relative_path,
+    )
+    generation_10_target = local(sync_root, generation_10.target_relative_path)
+    generation_10_target.parent.mkdir(parents=True, exist_ok=True)
+    unowned = b"unowned newer target conflict"
+    generation_10_target.write_bytes(unowned)
+
+    outcome = SyncEngine(session=Session()).run(
+        ExportManifest((generation_10,), generation_10.batch_id, RECEIPT_TOKEN),
+        sync_root,
+        SyncCallbacks(),
+        threading.Event(),
+    )
+
+    index = SyncIndex(sync_root)
+    latest = index.latest_for_candidate(generation_9.candidate_id)
+    assert outcome.counts == {"succeeded": 0, "failed": 1, "skipped": 0}
+    assert outcome.receipt_items == (
+        ReceiptItem(
+            candidate_id=str(generation_10.candidate_id),
+            review_id=str(generation_10.review_id),
+            review_version=10,
+            status="FAILED",
+            sha256=None,
+            relative_path=None,
+            error="FILESYSTEM_ERROR",
+        ),
+    )
+    assert latest is not None
+    assert latest.review_version == 9
+    assert latest.relative_path == generation_9.target_relative_path
+    assert latest.sha256 == generation_9_sha
+    assert index.get_completed(
+        generation_10.candidate_id,
+        generation_10.review_id,
+        generation_10.review_version,
+        generation_10.action,
+    ) is None
+    assert index.get_add_intent(
+        generation_9.candidate_id,
+        generation_9.review_id,
+        generation_9.review_version,
+        "ADD",
+    ) is None
+    assert not local(sync_root, initial.target_relative_path).exists()
+    assert generation_9_target.read_bytes() == generation_9_jpg
+    assert generation_10_target.read_bytes() == unowned
+    assert not shared_stage.exists()
+    assert (sync_root / "canonical_manifest.csv").read_bytes() == canonical_before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows engine promotion leaf race")
+def test_engine_promotion_source_replacement_preserves_durable_state(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_root.mkdir()
+    manifest_row = replace(
+        row(81, species_code="RACE"),
+        review_id=candidate(8102),
+        review_version=2,
+    )
+    target = local(sync_root, manifest_row.target_relative_path)
+    shared_stage = target.with_name(target.name + ".part")
+    captured_private: list[Path] = []
+
+    def download(session, item, destination, policy, progress, cancel):
+        del session, item, policy, progress, cancel
+        private = Path(destination).with_name(Path(destination).name + ".part")
+        private.write_bytes(JPEG)
+        captured_private.append(private)
+        return DownloadResult(
+            private, SHA256, PHASH, len(JPEG), "JPEG", ".jpg", 11, 7
+        )
+
+    outside = sync_root.parent / "engine-promotion-outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel.write_bytes(b"outside remains unchanged")
+    original_pin = operations._pin_link_parents
+    parked: list[Path] = []
+    unowned = b"unowned private replacement"
+
+    @contextmanager
+    def replace_private_at_link(source: Path, destination: Path):
+        with original_pin(source, destination):
+            if (
+                captured_private
+                and source == captured_private[0]
+                and destination == shared_stage
+                and not parked
+            ):
+                parked_path = source.with_name(source.name + ".parked")
+                source.rename(parked_path)
+                source.write_bytes(unowned)
+                parked.append(parked_path)
+            yield
+
+    monkeypatch.setattr(operations, "_pin_link_parents", replace_private_at_link)
+
+    outcome = SyncEngine(session=Session(), downloader=download).run(
+        ExportManifest((manifest_row,), manifest_row.batch_id, RECEIPT_TOKEN),
+        sync_root,
+        SyncCallbacks(),
+        threading.Event(),
+    )
+
+    index = SyncIndex(sync_root)
+    assert outcome.counts == {"succeeded": 0, "failed": 1, "skipped": 0}
+    assert outcome.receipt_items == (
+        ReceiptItem(
+            candidate_id=str(manifest_row.candidate_id),
+            review_id=str(manifest_row.review_id),
+            review_version=manifest_row.review_version,
+            status="FAILED",
+            sha256=None,
+            relative_path=None,
+            error="FILESYSTEM_ERROR",
+        ),
+    )
+    assert len(captured_private) == len(parked) == 1
+    assert captured_private[0].read_bytes() == unowned
+    assert parked[0].read_bytes() == JPEG
+    assert shared_stage.exists()
+    assert shared_stage.samefile(parked[0])
+    assert not shared_stage.samefile(captured_private[0])
+    assert not target.exists()
+    assert index.get_completed(
+        manifest_row.candidate_id,
+        manifest_row.review_id,
+        manifest_row.review_version,
+        manifest_row.action,
+    ) is None
+    assert index.get_add_intent(
+        manifest_row.candidate_id,
+        manifest_row.review_id,
+        manifest_row.review_version,
+        manifest_row.action,
+    ) is not None
+    assert not (sync_root / "canonical_manifest.csv").exists()
+    assert sentinel.read_bytes() == b"outside remains unchanged"
+    assert list(outside.iterdir()) == [sentinel]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows engine discard leaf race")
+def test_engine_discard_refuses_cross_root_relocation_without_losing_success(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sync_root.mkdir()
+    manifest_row = replace(
+        row(82, species_code="RACE"),
+        review_id=candidate(8202),
+        review_version=2,
+    )
+    target = local(sync_root, manifest_row.target_relative_path)
+    captured_private: list[Path] = []
+    index = SyncIndex(sync_root)
+
+    def download(session, item, destination, policy, progress, cancel):
+        del session, policy, progress, cancel
+        private = Path(destination).with_name(Path(destination).name + ".part")
+        private.write_bytes(JPEG)
+        captured_private.append(private)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(JPEG)
+        index.record_success(
+            SyncResult(
+                candidate_id=item.candidate_id,
+                review_id=item.review_id,
+                review_version=item.review_version,
+                action=item.action,
+                batch_id=item.batch_id,
+                relative_path=item.target_relative_path,
+                sha256=SHA256,
+                perceptual_hash=PHASH,
+            )
+        )
+        return DownloadResult(
+            private, SHA256, PHASH, len(JPEG), "JPEG", ".jpg", 11, 7
+        )
+
+    outside = sync_root.parent / "engine-discard-outside"
+    outside.mkdir()
+    relocated = outside / "relocated-owned-stage.jpg"
+    original_pin = operations._pin_link_parents
+    unowned = b"unowned private replacement"
+    injected = False
+
+    @contextmanager
+    def relocate_private_at_disposition(source: Path, destination: Path):
+        nonlocal injected
+        with original_pin(source, destination):
+            if (
+                captured_private
+                and source == captured_private[0]
+                and destination == source
+                and not injected
+            ):
+                source.rename(relocated)
+                source.write_bytes(unowned)
+                injected = True
+            yield
+
+    monkeypatch.setattr(
+        operations, "_pin_link_parents", relocate_private_at_disposition
+    )
+
+    outcome = SyncEngine(session=Session(), downloader=download).run(
+        ExportManifest((manifest_row,), manifest_row.batch_id, RECEIPT_TOKEN),
+        sync_root,
+        SyncCallbacks(),
+        threading.Event(),
+    )
+
+    assert injected
+    assert outcome.counts == {"succeeded": 0, "failed": 0, "skipped": 1}
+    assert outcome.receipt_items == (
+        ReceiptItem(
+            candidate_id=str(manifest_row.candidate_id),
+            review_id=str(manifest_row.review_id),
+            review_version=manifest_row.review_version,
+            status="SUCCEEDED",
+            sha256=SHA256,
+            relative_path=manifest_row.target_relative_path.as_posix(),
+            error=None,
+        ),
+    )
+    assert captured_private[0].read_bytes() == unowned
+    assert relocated.read_bytes() == JPEG
+    assert target.read_bytes() == JPEG
+    completed = index.get_completed(
+        manifest_row.candidate_id,
+        manifest_row.review_id,
+        manifest_row.review_version,
+        manifest_row.action,
+    )
+    assert completed is not None
+    assert completed.sha256 == SHA256
+    assert index.get_add_intent(
+        manifest_row.candidate_id,
+        manifest_row.review_id,
+        manifest_row.review_version,
+        manifest_row.action,
+    ) is None
+    with (sync_root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        canonical = list(csv.DictReader(stream))
+    assert len(canonical) == 1
+    assert canonical[0]["review_version"] == "2"
+    assert canonical[0]["relative_path"] == manifest_row.target_relative_path.as_posix()
+    assert canonical[0]["sha256"] == SHA256
 
 
 def test_concurrent_old_and_new_replay_cannot_invert_candidate_state(

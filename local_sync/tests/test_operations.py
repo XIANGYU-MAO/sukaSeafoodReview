@@ -18,7 +18,7 @@ from PIL import Image
 from conftest import BATCH_ID, CANDIDATE_ID, RECEIPT_TOKEN, REVIEW_ID
 import sukaseafood_sync.operations as operations
 from sukaseafood_sync.downloader import DownloadResult
-from sukaseafood_sync.index import SyncIndex, SyncResult
+from sukaseafood_sync.index import AddIntent, SyncIndex, SyncResult
 from sukaseafood_sync.manifest import ManifestRow
 from sukaseafood_sync.operations import (
     OperationError,
@@ -1654,6 +1654,364 @@ def test_stale_add_intent_changed_during_cas_is_not_deleted(
     current = index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 2, "ADD")
     assert current is not None
     assert current.sha256 == changed_sha
+
+
+def ordinary_recovery_state(
+    sync_root: Path,
+) -> tuple[
+    SyncIndex,
+    AddIntent,
+    bytes,
+    Path,
+    Path,
+    ManifestRow,
+]:
+    index = SyncIndex(sync_root)
+    content, phash = encoded_image("JPEG", (19, 13))
+    older = row(review_id=OLD_REVIEW_ID, review_version=9)
+    intent = index.record_add_intent(
+        SyncResult(
+            candidate_id=older.candidate_id,
+            review_id=older.review_id,
+            review_version=older.review_version,
+            action="ADD",
+            batch_id=older.batch_id,
+            relative_path=older.target_relative_path,
+            sha256=hashlib.sha256(content).hexdigest(),
+            perceptual_hash=phash,
+        ),
+        older.target_relative_path,
+    )
+    target = local_path(sync_root, intent.actual_relative_path)
+    shared_stage = local_path(
+        sync_root,
+        intent.target_relative_path.with_name(intent.target_relative_path.name + ".part"),
+    )
+    newer = row(
+        "MOVE",
+        review_id=REVIEW_ID,
+        review_version=10,
+        previous_relative_path=older.target_relative_path,
+    )
+    return index, intent, content, target, shared_stage, newer
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ordinary source-leaf race")
+def test_reconcile_ordinary_shared_source_replacement_never_links_unowned_leaf(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index, intent, content, target, shared_stage, newer = ordinary_recovery_state(
+        sync_root
+    )
+    write_file(
+        sync_root,
+        PurePosixPath(*shared_stage.relative_to(sync_root).parts),
+        content,
+    )
+    parked = shared_stage.with_name(shared_stage.name + ".parked")
+    unowned = b"unowned ordinary source replacement"
+    original_pin = operations._pin_link_parents
+    injected = False
+
+    @contextmanager
+    def replace_source_at_link(source: Path, destination: Path):
+        nonlocal injected
+        with original_pin(source, destination):
+            if source == shared_stage and destination == target and not injected:
+                shared_stage.rename(parked)
+                shared_stage.write_bytes(unowned)
+                injected = True
+            yield
+
+    monkeypatch.setattr(operations, "_pin_link_parents", replace_source_at_link)
+
+    with pytest.raises(OperationError):
+        operations.reconcile_older_add_intents(sync_root, newer, index)
+
+    assert injected
+    assert shared_stage.read_bytes() == unowned
+    assert parked.read_bytes() == content
+    if target.exists():
+        assert target.samefile(parked)
+        assert not target.samefile(shared_stage)
+    assert index.get_completed(
+        intent.candidate_id, intent.review_id, intent.review_version, "ADD"
+    ) is None
+    assert index.get_add_intent(
+        intent.candidate_id, intent.review_id, intent.review_version, "ADD"
+    ) == intent
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ordinary target-leaf race")
+def test_reconcile_ordinary_target_replacement_before_commit_fails_closed(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index, intent, content, target, _shared_stage, newer = ordinary_recovery_state(
+        sync_root
+    )
+    write_file(
+        sync_root,
+        PurePosixPath(*target.relative_to(sync_root).parts),
+        content,
+    )
+    parked = target.with_name(target.name + ".parked")
+    unowned = b"unowned ordinary target replacement"
+    original_pin = operations._pin_owned_file
+    injected = False
+
+    @contextmanager
+    def replace_target_before_pin(path, owned, code, *args, **kwargs):
+        nonlocal injected
+        if Path(path) == target and code == "ADD_RECOVERY_STATE_CHANGED" and not injected:
+            target.rename(parked)
+            target.write_bytes(unowned)
+            injected = True
+        with original_pin(path, owned, code, *args, **kwargs) as handle:
+            yield handle
+
+    monkeypatch.setattr(operations, "_pin_owned_file", replace_target_before_pin)
+
+    with pytest.raises(OperationError, match="ADD_RECOVERY_STATE_CHANGED"):
+        operations.reconcile_older_add_intents(sync_root, newer, index)
+
+    assert injected
+    assert target.read_bytes() == unowned
+    assert parked.read_bytes() == content
+    assert index.get_completed(
+        intent.candidate_id, intent.review_id, intent.review_version, "ADD"
+    ) is None
+    assert index.get_add_intent(
+        intent.candidate_id, intent.review_id, intent.review_version, "ADD"
+    ) == intent
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ordinary commit pin")
+def test_reconcile_ordinary_target_stays_pinned_through_index_commit(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index, intent, content, target, _shared_stage, newer = ordinary_recovery_state(
+        sync_root
+    )
+    write_file(
+        sync_root,
+        PurePosixPath(*target.relative_to(sync_root).parts),
+        content,
+    )
+    parked = target.with_name(target.name + ".parked")
+    unowned = b"must never replace target before commit"
+    original_record = SyncIndex.record_success
+    attempted = False
+    blocked = False
+
+    def replace_target_during_record(self: SyncIndex, result: SyncResult):
+        nonlocal attempted, blocked
+        attempted = True
+        try:
+            target.rename(parked)
+        except OSError:
+            blocked = True
+        else:
+            target.write_bytes(unowned)
+        return original_record(self, result)
+
+    monkeypatch.setattr(SyncIndex, "record_success", replace_target_during_record)
+
+    operations.reconcile_older_add_intents(sync_root, newer, index)
+
+    assert attempted
+    assert blocked
+    assert target.read_bytes() == content
+    assert not parked.exists()
+    completed = index.get_completed(
+        intent.candidate_id, intent.review_id, intent.review_version, "ADD"
+    )
+    assert completed is not None
+    assert completed.sha256 == intent.sha256
+    assert index.get_add_intent(
+        intent.candidate_id, intent.review_id, intent.review_version, "ADD"
+    ) is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ordinary cleanup race")
+def test_reconcile_ordinary_cleanup_replacement_survives_and_fails_closed(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index, intent, content, target, shared_stage, newer = ordinary_recovery_state(
+        sync_root
+    )
+    for durable in (target, shared_stage):
+        write_file(
+            sync_root,
+            PurePosixPath(*durable.relative_to(sync_root).parts),
+            content,
+        )
+    parked = shared_stage.with_name(shared_stage.name + ".parked")
+    unowned = b"unowned ordinary cleanup replacement"
+    original_pin = operations._pin_link_parents
+    injected = False
+
+    @contextmanager
+    def replace_stage_at_cleanup(source: Path, destination: Path):
+        nonlocal injected
+        with original_pin(source, destination):
+            if source == shared_stage and destination == shared_stage and not injected:
+                shared_stage.rename(parked)
+                shared_stage.write_bytes(unowned)
+                injected = True
+            yield
+
+    monkeypatch.setattr(operations, "_pin_link_parents", replace_stage_at_cleanup)
+
+    with pytest.raises(OperationError, match="ADD_RECOVERY_STATE_CHANGED"):
+        operations.reconcile_older_add_intents(sync_root, newer, index)
+
+    assert injected
+    assert target.read_bytes() == content
+    assert shared_stage.read_bytes() == unowned
+    assert not parked.exists()
+    assert index.get_completed(
+        intent.candidate_id, intent.review_id, intent.review_version, "ADD"
+    ) is None
+    assert index.get_add_intent(
+        intent.candidate_id, intent.review_id, intent.review_version, "ADD"
+    ) == intent
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ordinary prior cleanup race")
+def test_reconcile_ordinary_cleanup_failure_preserves_prior_generation(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = SyncIndex(sync_root)
+    prior_content, prior_phash = encoded_image("JPEG", (13, 9))
+    intent_content, intent_phash = encoded_image("JPEG", (19, 13))
+    prior_relative = PurePosixPath(f"images/PRIOR/{CANDIDATE_ID}.jpg")
+    intent_row = row(
+        review_version=9,
+        previous_relative_path=prior_relative,
+    )
+    prior_path = write_file(sync_root, prior_relative, prior_content)
+    index.record_success(
+        SyncResult(
+            candidate_id=intent_row.candidate_id,
+            review_id=OLD_REVIEW_ID,
+            review_version=5,
+            action="ADD",
+            batch_id=intent_row.batch_id,
+            relative_path=prior_relative,
+            sha256=hashlib.sha256(prior_content).hexdigest(),
+            perceptual_hash=prior_phash,
+        )
+    )
+    intent = index.record_add_intent(
+        SyncResult(
+            candidate_id=intent_row.candidate_id,
+            review_id=intent_row.review_id,
+            review_version=intent_row.review_version,
+            action="ADD",
+            batch_id=intent_row.batch_id,
+            relative_path=intent_row.target_relative_path,
+            sha256=hashlib.sha256(intent_content).hexdigest(),
+            perceptual_hash=intent_phash,
+        ),
+        intent_row.target_relative_path,
+    )
+    target = write_file(sync_root, intent.actual_relative_path, intent_content)
+    shared_relative = intent.target_relative_path.with_name(
+        intent.target_relative_path.name + ".part"
+    )
+    shared_stage = write_file(sync_root, shared_relative, intent_content)
+    parked = shared_stage.with_name(shared_stage.name + ".parked")
+    unowned = b"unowned ordinary cleanup replacement"
+    newer = row(
+        "MOVE",
+        review_id=UUID("77777777-7777-4777-8777-777777777777"),
+        review_version=10,
+        previous_relative_path=intent.actual_relative_path,
+    )
+    original_pin = operations._pin_link_parents
+    injected = False
+
+    @contextmanager
+    def replace_stage_at_cleanup(source: Path, destination: Path):
+        nonlocal injected
+        with original_pin(source, destination):
+            if source == shared_stage and destination == shared_stage and not injected:
+                shared_stage.rename(parked)
+                shared_stage.write_bytes(unowned)
+                injected = True
+            yield
+
+    monkeypatch.setattr(operations, "_pin_link_parents", replace_stage_at_cleanup)
+
+    with pytest.raises(OperationError, match="ADD_RECOVERY_STATE_CHANGED"):
+        operations.reconcile_older_add_intents(sync_root, newer, index)
+
+    assert injected
+    assert prior_path.read_bytes() == prior_content
+    assert target.read_bytes() == intent_content
+    assert shared_stage.read_bytes() == unowned
+    assert not parked.exists()
+    assert index.latest_for_candidate(intent.candidate_id).review_version == 5
+    assert index.get_completed(
+        intent.candidate_id, intent.review_id, intent.review_version, "ADD"
+    ) is None
+    assert index.get_add_intent(
+        intent.candidate_id, intent.review_id, intent.review_version, "ADD"
+    ) == intent
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows canonical path identity")
+def test_reconcile_ordinary_case_only_path_does_not_delete_target(
+    sync_root: Path,
+) -> None:
+    index = SyncIndex(sync_root)
+    content, phash = encoded_image("JPEG", (19, 13))
+    prior_relative = PurePosixPath(f"images/sf006/{CANDIDATE_ID}.jpg")
+    target_relative = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    target = write_file(sync_root, prior_relative, content)
+    index.record_success(
+        SyncResult(
+            candidate_id=CANDIDATE_ID,
+            review_id=OLD_REVIEW_ID,
+            review_version=5,
+            action="ADD",
+            batch_id=BATCH_ID,
+            relative_path=prior_relative,
+            sha256=hashlib.sha256(content).hexdigest(),
+            perceptual_hash=phash,
+        )
+    )
+    intent = index.record_add_intent(
+        SyncResult(
+            candidate_id=CANDIDATE_ID,
+            review_id=REVIEW_ID,
+            review_version=9,
+            action="ADD",
+            batch_id=BATCH_ID,
+            relative_path=target_relative,
+            sha256=hashlib.sha256(content).hexdigest(),
+            perceptual_hash=phash,
+        ),
+        target_relative,
+    )
+    newer = row(
+        "MOVE",
+        review_id=UUID("77777777-7777-4777-8777-777777777778"),
+        review_version=10,
+        previous_relative_path=target_relative,
+    )
+
+    operations.reconcile_older_add_intents(sync_root, newer, index)
+
+    assert target.read_bytes() == content
+    latest = index.latest_for_candidate(CANDIDATE_ID)
+    assert latest is not None
+    assert latest.review_version == 9
+    assert latest.relative_path == target_relative
+    assert latest.sha256 == intent.sha256
+    assert index.get_add_intent(
+        intent.candidate_id, intent.review_id, intent.review_version, "ADD"
+    ) is None
 
 
 @pytest.mark.parametrize("durable_location", ["target", "shared-stage"])

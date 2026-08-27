@@ -60,13 +60,20 @@ def _row(
     )
 
 
-def _newer_row(*, action: str, batch_id: UUID, review_id: UUID) -> ManifestRow:
-    previous = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
-    if action == "ADD":
+def _newer_row(
+    *,
+    action: str,
+    batch_id: UUID,
+    review_id: UUID,
+    previous: PurePosixPath | None = None,
+    add_target: PurePosixPath | None = None,
+) -> ManifestRow:
+    previous = previous or PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    if action == "ADD" and add_target is None:
         return _row(batch_id=batch_id, review_id=review_id, review_version=10)
-    if action == "MOVE":
-        target = PurePosixPath(f"images/SF010/{CANDIDATE_ID}.jpg")
-        species_code = "SF010"
+    if action in {"ADD", "MOVE"}:
+        target = add_target or PurePosixPath(f"images/SF010/{CANDIDATE_ID}.jpg")
+        species_code = target.parts[1]
     else:
         target = PurePosixPath(f"_removed/{batch_id}/{CANDIDATE_ID}.jpg")
         species_code = "SF006"
@@ -90,9 +97,11 @@ def _newer_row(*, action: str, batch_id: UUID, review_id: UUID) -> ManifestRow:
 
 
 @pytest.mark.parametrize("newer_action", ["ADD", "MOVE", "REMOVE"])
+@pytest.mark.parametrize("interrupted_shape", ["same-path", "path-changing"])
 def test_newer_action_reconciles_older_intent_after_real_process_death(
     tmp_path: Path,
     newer_action: str,
+    interrupted_shape: str,
 ) -> None:
     root = tmp_path / "training"
     root.mkdir()
@@ -134,6 +143,11 @@ def test_newer_action_reconciles_older_intent_after_real_process_death(
         ),
     )
 
+    generation_9_relative = (
+        relative
+        if interrupted_shape == "same-path"
+        else PurePosixPath(f"images/SF009/{CANDIDATE_ID}.jpg")
+    )
     source_9 = tmp_path / "generation-9.jpg"
     source_9.write_bytes(generation_9_jpg)
     batch_9 = UUID("50000000-0000-4000-8000-000000000009")
@@ -160,16 +174,17 @@ candidate = UUID(sys.argv[2])
 batch = UUID(sys.argv[3])
 review = UUID(sys.argv[4])
 source = Path(sys.argv[5])
-relative = PurePosixPath(f"images/SF006/{candidate}.jpg")
+relative = PurePosixPath(sys.argv[6])
+previous = PurePosixPath(sys.argv[7])
 row = ManifestRow(
     batch_id=batch,
     action="ADD",
     candidate_id=candidate,
     review_id=review,
     review_version=9,
-    species_code="SF006",
+    species_code=relative.parts[1],
     target_relative_path=relative,
-    previous_relative_path=relative,
+    previous_relative_path=previous,
     preview_url="https://images.example.test/9/preview.jpg",
     original_url="https://images.example.test/9/original.jpg",
     source_url="https://catalog.example.test/record/888",
@@ -216,6 +231,8 @@ SyncEngine(downloader=download).run(
             str(batch_9),
             str(review_9),
             str(source_9),
+            generation_9_relative.as_posix(),
+            relative.as_posix(),
         ],
         cwd=Path(__file__).parents[1],
         env=environment,
@@ -230,7 +247,15 @@ SyncEngine(downloader=download).run(
     batch_10 = UUID("50000000-0000-4000-8000-000000000010")
     review_10 = UUID("60000000-0000-4000-8000-000000000010")
     generation_10 = _newer_row(
-        action=newer_action, batch_id=batch_10, review_id=review_10
+        action=newer_action,
+        batch_id=batch_10,
+        review_id=review_10,
+        previous=generation_9_relative,
+        add_target=(
+            PurePosixPath(f"images/SF010/{CANDIDATE_ID}.jpg")
+            if interrupted_shape == "path-changing" and newer_action == "ADD"
+            else None
+        ),
     )
 
     def download_10(session, manifest_row, destination, policy, progress, cancelled):
@@ -262,18 +287,38 @@ SyncEngine(downloader=download).run(
     assert outcome.counts == {"succeeded": 1, "failed": 0, "skipped": 0}, (
         outcome.receipt_items
     )
-    assert outcome.receipt_items[0].status == "SUCCEEDED"
-    assert outcome.receipt_items[0].error is None
     assert latest is not None and latest.review_version == 10
     assert latest.action == newer_action
-    expected_content = generation_10_jpg if newer_action == "ADD" else old_jpg
+    expected_content = (
+        generation_10_jpg
+        if newer_action == "ADD"
+        else (
+            old_jpg
+            if interrupted_shape == "same-path"
+            else generation_9_jpg
+        )
+    )
     expected_sha = hashlib.sha256(expected_content).hexdigest()
     final_target = root.joinpath(*generation_10.target_relative_path.parts)
+    assert outcome.receipt_items == (
+        ReceiptItem(
+            candidate_id=str(CANDIDATE_ID),
+            review_id=str(review_10),
+            review_version=10,
+            status="SUCCEEDED",
+            sha256=expected_sha,
+            relative_path=generation_10.target_relative_path.as_posix(),
+            error=None,
+        ),
+    )
     assert latest.relative_path == generation_10.target_relative_path
     assert latest.sha256 == expected_sha
     assert final_target.read_bytes() == expected_content
     if final_target != target:
         assert not target.exists()
+    generation_9_target = root.joinpath(*generation_9_relative.parts)
+    if generation_9_target != final_target:
+        assert not generation_9_target.exists()
     assert index.get_add_intent(CANDIDATE_ID, review_9, 9, "ADD") is None
     assert not list(root.rglob("*.part"))
     assert not list(root.rglob("*.sync-download"))
