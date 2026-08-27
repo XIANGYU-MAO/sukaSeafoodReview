@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 from io import BytesIO
@@ -621,23 +622,26 @@ def test_isolated_stage_promotion_pins_parent_against_reparse_swap(
     except OSError as error:
         pytest.skip(f"directory symlink unavailable: {error}")
 
-    original_link = operations.os.link
+    shared_stage = destination.with_name(destination.name + ".part")
+    original_pin = operations._pin_link_parents
     attempted = False
     blocked = False
 
-    def swap_parent_then_link(source, target, *args, **kwargs):
+    @contextmanager
+    def swap_parent_at_link(source: Path, target: Path):
         nonlocal attempted, blocked
-        if not attempted:
-            attempted = True
-            parked = destination.parent.with_name(destination.parent.name + ".parked")
-            try:
-                destination.parent.rename(parked)
-                replacement_link.rename(destination.parent)
-            except OSError:
-                blocked = True
-        return original_link(source, target, *args, **kwargs)
+        with original_pin(source, target):
+            if source == private_stage and target == shared_stage and not attempted:
+                attempted = True
+                parked = destination.parent.with_name(destination.parent.name + ".parked")
+                try:
+                    destination.parent.rename(parked)
+                    replacement_link.rename(destination.parent)
+                except OSError:
+                    blocked = True
+            yield
 
-    monkeypatch.setattr(operations.os, "link", swap_parent_then_link)
+    monkeypatch.setattr(operations, "_pin_link_parents", swap_parent_at_link)
     promoted = operations.promote_isolated_staging(
         sync_root,
         manifest_row,
@@ -681,23 +685,25 @@ def test_isolated_stage_discard_pins_parent_against_reparse_swap(
     except OSError as error:
         pytest.skip(f"directory symlink unavailable: {error}")
 
-    original_unlink = operations.Path.unlink
+    original_pin = operations._pin_link_parents
     attempted = False
     blocked = False
 
-    def swap_parent_then_unlink(path, *args, **kwargs):
+    @contextmanager
+    def swap_parent_at_unlink(source: Path, target: Path):
         nonlocal attempted, blocked
-        if Path(path) == private_stage and not attempted:
-            attempted = True
-            parked = destination.parent.with_name(destination.parent.name + ".parked")
-            try:
-                destination.parent.rename(parked)
-                replacement_link.rename(destination.parent)
-            except OSError:
-                blocked = True
-        return original_unlink(path, *args, **kwargs)
+        with original_pin(source, target):
+            if source == private_stage and target == private_stage and not attempted:
+                attempted = True
+                parked = destination.parent.with_name(destination.parent.name + ".parked")
+                try:
+                    destination.parent.rename(parked)
+                    replacement_link.rename(destination.parent)
+                except OSError:
+                    blocked = True
+            yield
 
-    monkeypatch.setattr(operations.Path, "unlink", swap_parent_then_unlink)
+    monkeypatch.setattr(operations, "_pin_link_parents", swap_parent_at_unlink)
     operations.discard_isolated_staging(
         sync_root,
         manifest_row,
@@ -708,6 +714,119 @@ def test_isolated_stage_discard_pins_parent_against_reparse_swap(
     assert attempted and blocked
     assert not private_stage.exists()
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows exact-leaf deletion")
+def test_isolated_stage_discard_deletes_verified_leaf_not_path_replacement(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_row = row()
+    content, phash = encoded_image("JPEG", (17, 11))
+    destination = local_path(sync_root, manifest_row.target_relative_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    download_destination = destination.with_name(
+        f".{destination.name}.{'e' * 32}.sync-download"
+    )
+    private_stage = download_destination.with_name(download_destination.name + ".part")
+    verified = download(
+        sync_root,
+        manifest_row,
+        content=content,
+        phash=phash,
+        width=17,
+        height=11,
+        staging_path=private_stage,
+    )
+    replacement = b"unowned replacement must survive"
+    parked = private_stage.with_name(private_stage.name + ".parked")
+    original_pin = operations._pin_link_parents
+    injected = False
+
+    @contextmanager
+    def replace_leaf_at_unlink(source: Path, target: Path):
+        nonlocal injected
+        with original_pin(source, target):
+            if source == private_stage and target == private_stage and not injected:
+                private_stage.rename(parked)
+                private_stage.write_bytes(replacement)
+                injected = True
+            yield
+
+    monkeypatch.setattr(operations, "_pin_link_parents", replace_leaf_at_unlink)
+
+    operations.discard_isolated_staging(
+        sync_root,
+        manifest_row,
+        verified,
+        download_destination,
+    )
+
+    assert injected
+    assert private_stage.read_bytes() == replacement
+    assert not parked.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows exact-leaf linking")
+def test_isolated_stage_promotion_never_links_replacement_source_leaf(
+    sync_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_row = row()
+    content, phash = encoded_image("JPEG", (17, 11))
+    destination = local_path(sync_root, manifest_row.target_relative_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    download_destination = destination.with_name(
+        f".{destination.name}.{'f' * 32}.sync-download"
+    )
+    private_stage = download_destination.with_name(download_destination.name + ".part")
+    verified = download(
+        sync_root,
+        manifest_row,
+        content=content,
+        phash=phash,
+        width=17,
+        height=11,
+        staging_path=private_stage,
+    )
+    parked = private_stage.with_name(private_stage.name + ".parked")
+    replacement = b"unowned replacement must not be linked"
+    shared_stage = destination.with_name(destination.name + ".part")
+    outside = sync_root.parent / "outside-leaf-race"
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel.write_bytes(b"outside must remain unchanged")
+    original_pin = operations._pin_link_parents
+    injected = False
+
+    @contextmanager
+    def replace_leaf_at_link(source: Path, target: Path):
+        nonlocal injected
+        with original_pin(source, target):
+            if source == private_stage and target == shared_stage and not injected:
+                private_stage.rename(parked)
+                private_stage.write_bytes(replacement)
+                injected = True
+            yield
+
+    monkeypatch.setattr(operations, "_pin_link_parents", replace_leaf_at_link)
+
+    with pytest.raises(OperationError, match="STAGING_FILE_UNSAFE"):
+        operations.promote_isolated_staging(
+            sync_root,
+            manifest_row,
+            destination,
+            download_destination,
+            verified,
+        )
+
+    assert injected
+    assert private_stage.read_bytes() == replacement
+    assert parked.read_bytes() == content
+    if shared_stage.exists():
+        assert shared_stage.read_bytes() == content
+        assert shared_stage.samefile(parked)
+        assert not shared_stage.samefile(private_stage)
+    assert sentinel.read_bytes() == b"outside must remain unchanged"
+    assert list(outside.iterdir()) == [sentinel]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction/rename protection")
@@ -1535,6 +1654,113 @@ def test_stale_add_intent_changed_during_cas_is_not_deleted(
     current = index.get_add_intent(CANDIDATE_ID, REVIEW_ID, 2, "ADD")
     assert current is not None
     assert current.sha256 == changed_sha
+
+
+@pytest.mark.parametrize("durable_location", ["target", "shared-stage"])
+def test_reconcile_older_ordinary_intent_completes_verified_durable_transition(
+    sync_root: Path,
+    durable_location: str,
+) -> None:
+    index = SyncIndex(sync_root)
+    content, phash = encoded_image("JPEG", (19, 13))
+    older = row(review_id=OLD_REVIEW_ID, review_version=9)
+    intent = index.record_add_intent(
+        SyncResult(
+            candidate_id=older.candidate_id,
+            review_id=older.review_id,
+            review_version=older.review_version,
+            action="ADD",
+            batch_id=older.batch_id,
+            relative_path=older.target_relative_path,
+            sha256=hashlib.sha256(content).hexdigest(),
+            perceptual_hash=phash,
+        ),
+        older.target_relative_path,
+    )
+    target = local_path(sync_root, intent.actual_relative_path)
+    shared_stage = local_path(
+        sync_root,
+        intent.target_relative_path.with_name(intent.target_relative_path.name + ".part"),
+    )
+    durable = target if durable_location == "target" else shared_stage
+    write_file(
+        sync_root,
+        PurePosixPath(*durable.relative_to(sync_root).parts),
+        content,
+    )
+    newer = row(
+        "MOVE",
+        review_id=REVIEW_ID,
+        review_version=10,
+        previous_relative_path=older.target_relative_path,
+    )
+
+    operations.reconcile_older_add_intents(sync_root, newer, index)
+
+    completed = index.get_completed(
+        older.candidate_id, older.review_id, older.review_version, "ADD"
+    )
+    assert completed is not None
+    assert completed.relative_path == intent.actual_relative_path
+    assert completed.sha256 == intent.sha256
+    assert completed.perceptual_hash == intent.perceptual_hash
+    assert target.read_bytes() == content
+    assert not shared_stage.exists()
+    assert index.get_add_intent(
+        older.candidate_id, older.review_id, older.review_version, "ADD"
+    ) is None
+
+
+@pytest.mark.parametrize("tampered_location", ["target", "shared-stage"])
+def test_reconcile_older_ordinary_intent_rejects_unowned_durable_state(
+    sync_root: Path,
+    tampered_location: str,
+) -> None:
+    index = SyncIndex(sync_root)
+    expected, expected_phash = encoded_image("JPEG", (19, 13))
+    tampered, _tampered_phash = encoded_image("JPEG", (23, 17))
+    older = row(review_id=OLD_REVIEW_ID, review_version=9)
+    intent = index.record_add_intent(
+        SyncResult(
+            candidate_id=older.candidate_id,
+            review_id=older.review_id,
+            review_version=older.review_version,
+            action="ADD",
+            batch_id=older.batch_id,
+            relative_path=older.target_relative_path,
+            sha256=hashlib.sha256(expected).hexdigest(),
+            perceptual_hash=expected_phash,
+        ),
+        older.target_relative_path,
+    )
+    target = local_path(sync_root, intent.actual_relative_path)
+    shared_stage = local_path(
+        sync_root,
+        intent.target_relative_path.with_name(intent.target_relative_path.name + ".part"),
+    )
+    tampered_path = target if tampered_location == "target" else shared_stage
+    write_file(
+        sync_root,
+        PurePosixPath(*tampered_path.relative_to(sync_root).parts),
+        tampered,
+    )
+    newer = row(
+        "REMOVE",
+        review_id=REVIEW_ID,
+        review_version=10,
+        previous_relative_path=older.target_relative_path,
+    )
+
+    with pytest.raises(OperationError, match="ADD_RECOVERY_STATE_CHANGED"):
+        operations.reconcile_older_add_intents(sync_root, newer, index)
+
+    assert tampered_path.read_bytes() == tampered
+    assert index.get_completed(
+        older.candidate_id, older.review_id, older.review_version, "ADD"
+    ) is None
+    assert index.get_add_intent(
+        older.candidate_id, older.review_id, older.review_version, "ADD"
+    ) == intent
 
 
 def test_recover_add_exact_completed_record_returns_canonical_skip(

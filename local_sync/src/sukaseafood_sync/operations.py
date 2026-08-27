@@ -425,12 +425,16 @@ def _pin_link_parents(source: Path, target: Path) -> Iterator[None]:
 
 @contextmanager
 def _pin_owned_file(
-    path: Path, owned: os.stat_result, code: str
-) -> Iterator[None]:
-    """Deny new Windows writers while an owned file is proved and unlinked."""
+    path: Path,
+    owned: os.stat_result,
+    code: str,
+    *,
+    delete_access: bool = False,
+) -> Iterator[int | None]:
+    """Deny new Windows writers while an owned leaf is proved and used."""
 
     if os.name != "nt":
-        yield
+        yield None
         return
 
     import ctypes
@@ -474,7 +478,7 @@ def _pin_owned_file(
 
     handle = create_file(
         str(path),
-        0x80000000,  # GENERIC_READ
+        0x80000000 | (0x00010000 if delete_access else 0),  # READ [+ DELETE]
         0x0001 | 0x0004,  # share read/delete, intentionally not write
         None,
         3,  # OPEN_EXISTING
@@ -499,9 +503,207 @@ def _pin_owned_file(
             or int(current.st_ino) != file_index
         ):
             raise OperationError(code)
-        yield
+        yield int(handle)
     finally:
         close_handle(handle)
+
+
+def _unlink_windows_file_handle(handle: int, code: str) -> None:
+    """Delete the exact Windows leaf represented by an already verified handle."""
+
+    if os.name != "nt":
+        raise OperationError(code)
+    import ctypes
+    from ctypes import wintypes
+
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("delete_file", wintypes.BOOL)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    set_information.restype = wintypes.BOOL
+    information = _FileDispositionInfo(True)
+    if not set_information(
+        handle,
+        4,  # FileDispositionInfo
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        raise OperationError(code)
+
+
+def _hash_windows_file_handle(handle: int, expected_size: int, code: str) -> str:
+    """Hash an exact, write-pinned Windows file handle from its initial offset."""
+
+    if os.name != "nt":
+        raise OperationError(code)
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    read_file = kernel32.ReadFile
+    read_file.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    )
+    read_file.restype = wintypes.BOOL
+    buffer = ctypes.create_string_buffer(1024 * 1024)
+    digest = hashlib.sha256()
+    total = 0
+    while True:
+        read = wintypes.DWORD()
+        if not read_file(handle, buffer, len(buffer), ctypes.byref(read), None):
+            raise OperationError(code)
+        count = int(read.value)
+        if count == 0:
+            break
+        digest.update(buffer.raw[:count])
+        total += count
+    if total != expected_size:
+        raise OperationError(code)
+    return digest.hexdigest()
+
+
+def _link_windows_file_handle(handle: int, target: Path) -> bool:
+    """Create one no-clobber hard link to the exact opened Windows leaf."""
+
+    if os.name != "nt":
+        raise OperationError("FILESYSTEM_OPERATION_FAILED")
+    import ctypes
+    from ctypes import wintypes
+
+    class _FileLinkInfo(ctypes.Structure):
+        _fields_ = [
+            ("replace_if_exists", ctypes.c_ubyte),
+            ("root_directory", wintypes.HANDLE),
+            ("file_name_length", wintypes.DWORD),
+            ("file_name", wintypes.WCHAR * 1),
+        ]
+
+    encoded_name = target.name.encode("utf-16-le")
+    name_offset = _FileLinkInfo.file_name.offset
+    buffer = ctypes.create_string_buffer(
+        max(ctypes.sizeof(_FileLinkInfo), name_offset + len(encoded_name))
+    )
+    information = ctypes.cast(buffer, ctypes.POINTER(_FileLinkInfo)).contents
+    information.replace_if_exists = 0
+    information.file_name_length = len(encoded_name)
+    ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded_name, len(encoded_name))
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    )
+    get_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    parent_before = _lstat(target.parent, "PARENT_UNSAFE")
+    parent_handle = create_file(
+        str(target.parent),
+        0x80000000,  # GENERIC_READ
+        0x0001 | 0x0002,  # share read/write, intentionally not delete
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000 | 0x00200000,  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+        None,
+    )
+    if parent_handle == ctypes.c_void_p(-1).value:
+        raise OperationError("PARENT_UNSAFE")
+    try:
+        parent_information = _ByHandleFileInformation()
+        has_parent_information = bool(
+            get_information(parent_handle, ctypes.byref(parent_information))
+        )
+        parent_current = _lstat(target.parent, "PARENT_UNSAFE")
+        parent_file_index = (
+            int(parent_information.file_index_high) << 32
+        ) | int(parent_information.file_index_low)
+        if (
+            parent_before is None
+            or parent_current is None
+            or not has_parent_information
+            or not _directory(parent_current)
+            or parent_information.file_attributes & _REPARSE_POINT
+            or not _same_file(parent_before, parent_current)
+            or int(parent_current.st_ino) != parent_file_index
+        ):
+            raise OperationError("PARENT_UNSAFE")
+        information.root_directory = parent_handle
+
+        class _StatusOrPointer(ctypes.Union):
+            _fields_ = [("status", wintypes.LONG), ("pointer", wintypes.LPVOID)]
+
+        class _IoStatusBlock(ctypes.Structure):
+            _anonymous_ = ("result",)
+            _fields_ = [
+                ("result", _StatusOrPointer),
+                ("information", ctypes.c_size_t),
+            ]
+
+        io_status = _IoStatusBlock()
+        ntdll = ctypes.WinDLL("ntdll")
+        set_information = ntdll.NtSetInformationFile
+        set_information.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(_IoStatusBlock),
+            wintypes.LPVOID,
+            wintypes.ULONG,
+            ctypes.c_int,
+        )
+        set_information.restype = wintypes.LONG
+        status = int(
+            set_information(
+                handle,
+                ctypes.byref(io_status),
+                buffer,
+                len(buffer),
+                11,  # FileLinkInformation
+            )
+        ) & 0xFFFFFFFF
+    finally:
+        close_handle(parent_handle)
+    if status == 0:
+        return True
+    if status == 0xC0000035:  # STATUS_OBJECT_NAME_COLLISION
+        return False
+    raise OperationError("FILESYSTEM_OPERATION_FAILED")
 
 
 def _unlink_owned(
@@ -531,6 +733,44 @@ def _unlink_owned(
                 failed = True
     if failed:
         raise OperationError(code)
+
+
+def _unlink_owned_exact_leaf(
+    path: Path,
+    owned: os.stat_result,
+    code: str,
+    *,
+    expected_sha: str | None = None,
+) -> None:
+    """Remove the verified leaf itself even if its pathname is concurrently reused."""
+
+    current = _lstat(path, code)
+    if current is None:
+        return
+    if not _regular(current) or not _same_file(current, owned):
+        raise OperationError(code)
+    with _pin_owned_file(path, owned, code, delete_access=True) as handle:
+        if expected_sha is not None:
+            if os.name == "nt":
+                assert handle is not None
+                digest = _hash_windows_file_handle(handle, owned.st_size, code)
+            else:
+                digest, _size, current = _hash_regular(path, code)
+                if not _same_file(current, owned):
+                    raise OperationError("SOURCE_STATE_MISMATCH")
+            if digest != expected_sha:
+                raise OperationError("SOURCE_STATE_MISMATCH")
+        with _pin_link_parents(path, path):
+            if os.name == "nt":
+                assert handle is not None
+                _unlink_windows_file_handle(handle, code)
+            else:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    return
+                except OSError:
+                    raise OperationError(code) from None
 
 
 def _link_no_clobber(
@@ -568,6 +808,62 @@ def _link_no_clobber(
                 )
             raise OperationError("FILESYSTEM_OPERATION_FAILED")
         return target_metadata
+
+
+def _link_no_clobber_exact_source(
+    source: Path,
+    source_metadata: os.stat_result,
+    target: Path,
+    expected_sha: str,
+) -> os.stat_result:
+    """No-clobber link from the exact verified source leaf, not its later path."""
+
+    exists = False
+    with _pin_owned_file(source, source_metadata, "STAGING_FILE_UNSAFE") as handle:
+        if os.name == "nt":
+            assert handle is not None
+            source_sha = _hash_windows_file_handle(
+                handle, source_metadata.st_size, "STAGING_FILE_UNSAFE"
+            )
+        else:
+            source_sha, _source_size, current_source = _hash_regular(
+                source, "STAGING_FILE_UNSAFE"
+            )
+            if not _same_file(current_source, source_metadata):
+                raise OperationError("STAGING_FILE_UNSAFE")
+        if source_sha != expected_sha:
+            raise OperationError("STAGING_CONTENT_MISMATCH")
+        with _pin_link_parents(source, target):
+            if os.name == "nt":
+                assert handle is not None
+                exists = not _link_windows_file_handle(handle, target)
+            else:
+                try:
+                    os.link(source, target, follow_symlinks=False)
+                except FileExistsError:
+                    exists = True
+                except OSError:
+                    raise OperationError("FILESYSTEM_OPERATION_FAILED") from None
+            if exists:
+                target_sha, _size, target_metadata = _hash_regular(
+                    target, "TARGET_UNSAFE"
+                )
+                if target_sha != expected_sha:
+                    raise OperationError("TARGET_CONFLICT")
+                return target_metadata
+            target_sha, _size, target_metadata = _hash_regular(
+                target, "TARGET_UNSAFE"
+            )
+            if (
+                not _same_file(source_metadata, target_metadata)
+                or target_sha != expected_sha
+            ):
+                if _same_file(source_metadata, target_metadata):
+                    _unlink_owned(
+                        target, target_metadata, "FILESYSTEM_OPERATION_FAILED"
+                    )
+                raise OperationError("FILESYSTEM_OPERATION_FAILED")
+            return target_metadata
 
 
 def _validated_row_identity(row: ManifestRow, expected_action: str) -> None:
@@ -1070,7 +1366,7 @@ def discard_isolated_staging(
         downloaded,
         isolated_staging_path=expected,
     )
-    _unlink_owned(
+    _unlink_owned_exact_leaf(
         staging,
         owned,
         "STAGING_FILE_UNSAFE",
@@ -1103,7 +1399,9 @@ def promote_isolated_staging(
     )
     shared_relative = target_relative.with_name(target_relative.name + ".part")
     shared = _resolved_path(safe_root, shared_relative)
-    shared_owned = _link_no_clobber(source, source_owned, shared, sha256)
+    shared_owned = _link_no_clobber_exact_source(
+        source, source_owned, shared, sha256
+    )
     try:
         shared_image = _read_recovery_image(shared, None)
     except OperationError:
@@ -1115,7 +1413,7 @@ def promote_isolated_staging(
         or not _same_file(shared_owned, shared_image[6])
     ):
         raise OperationError("STAGING_CONTENT_MISMATCH")
-    _unlink_owned(
+    _unlink_owned_exact_leaf(
         source,
         source_owned,
         "STAGING_FILE_UNSAFE",
@@ -1617,22 +1915,187 @@ def _reconcile_superseded_replacement_intent(
         raise OperationError("ADD_RECOVERY_STATE_CHANGED")
 
 
+def _ordinary_intent_image(
+    root: Path,
+    intent: AddIntent,
+    relative: PurePosixPath,
+    *,
+    decoded_relative: PurePosixPath | None,
+) -> tuple[Path, tuple[str, str, int, int, int, str, os.stat_result]] | None:
+    lexical = root.joinpath(*relative.parts)
+    if _lstat(lexical, "ADD_RECOVERY_STATE_CHANGED") is None:
+        return None
+    try:
+        path = _resolved_path(root, relative)
+        image = _read_recovery_image(path, decoded_relative)
+    except OperationError:
+        raise OperationError("ADD_RECOVERY_STATE_CHANGED") from None
+    if (
+        image[0] != intent.sha256
+        or image[1] != intent.perceptual_hash
+        or _decoded_relative(intent.target_relative_path, image[5])
+        != intent.actual_relative_path
+    ):
+        raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+    return path, image
+
+
+def _reconcile_superseded_ordinary_add_intent(
+    root: Path,
+    index: SyncIndex,
+    intent: AddIntent,
+) -> None:
+    if any(
+        value is not None
+        for value in (
+            intent.prior_relative_path,
+            intent.prior_sha256,
+            intent.backup_relative_path,
+        )
+    ):
+        raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
+
+    try:
+        stored = index.get_completed(
+            intent.candidate_id,
+            intent.review_id,
+            intent.review_version,
+            intent.action,
+        )
+        latest_before = index.latest_for_candidate(intent.candidate_id)
+    except Exception:
+        raise OperationError("INDEX_READ_FAILED") from None
+
+    target_state = _ordinary_intent_image(
+        root,
+        intent,
+        intent.actual_relative_path,
+        decoded_relative=intent.actual_relative_path,
+    )
+    staging_relative = intent.target_relative_path.with_name(
+        intent.target_relative_path.name + ".part"
+    )
+    staging_state = _ordinary_intent_image(
+        root,
+        intent,
+        staging_relative,
+        decoded_relative=None,
+    )
+
+    if stored is not None:
+        if (
+            stored.batch_id != intent.batch_id
+            or stored.relative_path != intent.actual_relative_path
+            or stored.sha256 != intent.sha256
+            or stored.perceptual_hash != intent.perceptual_hash
+            or target_state is None
+        ):
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+    elif target_state is None and staging_state is None:
+        if not _clear_add_intent(index, intent):
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+        try:
+            current_intent = index.get_add_intent(
+                intent.candidate_id,
+                intent.review_id,
+                intent.review_version,
+                intent.action,
+            )
+            current_stored = index.get_completed(
+                intent.candidate_id,
+                intent.review_id,
+                intent.review_version,
+                intent.action,
+            )
+            latest_after = index.latest_for_candidate(intent.candidate_id)
+        except Exception:
+            raise OperationError("INDEX_READ_FAILED") from None
+        current_target = _lstat(
+            root.joinpath(*intent.actual_relative_path.parts),
+            "ADD_RECOVERY_STATE_CHANGED",
+        )
+        current_staging = _lstat(
+            root.joinpath(*staging_relative.parts),
+            "ADD_RECOVERY_STATE_CHANGED",
+        )
+        if (
+            current_intent is not None
+            or current_stored is not None
+            or latest_after != latest_before
+            or current_target is not None
+            or current_staging is not None
+        ):
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+        return
+    elif target_state is None:
+        assert staging_state is not None
+        target = _ensure_parents(root, intent.actual_relative_path)
+        _link_no_clobber(
+            staging_state[0], staging_state[1][6], target, intent.sha256
+        )
+        target_state = _ordinary_intent_image(
+            root,
+            intent,
+            intent.actual_relative_path,
+            decoded_relative=intent.actual_relative_path,
+        )
+        if target_state is None:
+            raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+
+    if staging_state is not None:
+        _unlink_owned(
+            staging_state[0],
+            staging_state[1][6],
+            "ADD_RECOVERY_STATE_CHANGED",
+            expected_sha=intent.sha256,
+        )
+
+    if stored is None:
+        _record(
+            index,
+            SyncResult(
+                candidate_id=intent.candidate_id,
+                review_id=intent.review_id,
+                review_version=intent.review_version,
+                action=intent.action,
+                batch_id=intent.batch_id,
+                relative_path=intent.actual_relative_path,
+                sha256=intent.sha256,
+                perceptual_hash=intent.perceptual_hash,
+            ),
+        )
+    elif not _clear_add_intent(index, intent):
+        raise OperationError("ADD_RECOVERY_STATE_CHANGED")
+
+
 def reconcile_older_add_intents(
     root: Path, row: ManifestRow, index: SyncIndex
 ) -> None:
-    """Resolve abandoned older replacements before a newer ADD proceeds.
+    """Resolve abandoned older ADD intents before a newer action proceeds.
 
     Callers hold the root state lock, so intent enumeration, rollback/cleanup,
     and the subsequent generation check form one serialized state transition.
     """
 
-    _validated_row_path(row, "ADD")
+    if not isinstance(row, ManifestRow) or row.action not in {"ADD", "MOVE", "REMOVE"}:
+        raise OperationError("ACTION_MISMATCH")
+    _validated_row_path(row, row.action)
     safe_root = _validated_root(root, index)
     intents = _candidate_add_intents(index, row)
     for intent in intents:
         if intent.review_version >= row.review_version:
             continue
-        _reconcile_superseded_replacement_intent(safe_root, index, intent)
+        replacement_fields = (
+            intent.prior_relative_path,
+            intent.prior_sha256,
+            intent.backup_relative_path,
+        )
+        if all(value is not None for value in replacement_fields):
+            _reconcile_superseded_replacement_intent(safe_root, index, intent)
+        elif all(value is None for value in replacement_fields):
+            _reconcile_superseded_ordinary_add_intent(safe_root, index, intent)
+        else:
+            raise OperationError("ADD_RECOVERY_INTENT_CONFLICT")
 
 
 def _recover_add(root: Path, row: ManifestRow, index: SyncIndex) -> SyncResult | None:

@@ -688,6 +688,7 @@ class SyncEngine:
                             phase="APPLYING",
                         )
                         with root_state_lock(safe_root):
+                            reconcile_older_add_intents(safe_root, row, index)
                             self._require_current_generation(index, row)
                             operation_started = True
                             result = apply_move(safe_root, row, index, logger=logger)
@@ -705,6 +706,7 @@ class SyncEngine:
                             phase="APPLYING",
                         )
                         with root_state_lock(safe_root):
+                            reconcile_older_add_intents(safe_root, row, index)
                             self._require_current_generation(index, row)
                             operation_started = True
                             result = apply_remove(safe_root, row, index, logger=logger)

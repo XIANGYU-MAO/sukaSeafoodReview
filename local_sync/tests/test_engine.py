@@ -741,6 +741,161 @@ def test_candidate_generation_is_monotonic_across_add_remove_add_and_old_replay(
     assert SyncIndex(sync_root).latest_for_candidate(generation_3.candidate_id).review_version == 3
 
 
+@pytest.mark.parametrize("newer_action", ["ADD", "MOVE", "REMOVE"])
+def test_newer_action_clears_ordinary_intent_left_before_shared_promotion(
+    sync_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    newer_action: str,
+) -> None:
+    sync_root.mkdir()
+    initial = replace(
+        row(79, species_code="OLD"),
+        review_id=candidate(7905),
+        review_version=5,
+    )
+    initial_outcome = SyncEngine(
+        session=Session(), downloader=fake_download(sync_root, [])
+    ).run(
+        ExportManifest((initial,), initial.batch_id, RECEIPT_TOKEN),
+        sync_root,
+        SyncCallbacks(),
+        threading.Event(),
+    )
+    assert initial_outcome.counts == {"succeeded": 1, "failed": 0, "skipped": 0}
+
+    generation_9_jpg, generation_9_phash, generation_9_sha = jpeg_variant(
+        (19, 13), (130, 40, 190)
+    )
+    generation_9 = replace(
+        row(79),
+        batch_id=candidate(7909),
+        review_id=candidate(8909),
+        review_version=9,
+        previous_relative_path=initial.target_relative_path,
+    )
+
+    def download_generation_9(
+        session, manifest_row, destination, policy, progress, cancel
+    ):
+        del session, manifest_row, policy, progress, cancel
+        staging = Path(destination).with_name(Path(destination).name + ".part")
+        staging.write_bytes(generation_9_jpg)
+        return DownloadResult(
+            staging,
+            generation_9_sha,
+            generation_9_phash,
+            len(generation_9_jpg),
+            "JPEG",
+            ".jpg",
+            19,
+            13,
+        )
+
+    class SimulatedProcessDeath(BaseException):
+        pass
+
+    def die_before_shared_promotion(*args, **kwargs):
+        del args, kwargs
+        raise SimulatedProcessDeath
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(
+            "sukaseafood_sync.engine._promote_isolated_staging",
+            die_before_shared_promotion,
+        )
+        with pytest.raises(SimulatedProcessDeath):
+            SyncEngine(session=Session(), downloader=download_generation_9).run(
+                ExportManifest(
+                    (generation_9,), generation_9.batch_id, RECEIPT_TOKEN
+                ),
+                sync_root,
+                SyncCallbacks(),
+                threading.Event(),
+            )
+
+    index = SyncIndex(sync_root)
+    intent = index.get_add_intent(
+        generation_9.candidate_id,
+        generation_9.review_id,
+        generation_9.review_version,
+        "ADD",
+    )
+    generation_9_target = local(sync_root, generation_9.target_relative_path)
+    shared_stage = generation_9_target.with_name(generation_9_target.name + ".part")
+    private_stages = list(
+        generation_9_target.parent.glob(
+            f".{generation_9_target.name}.*.sync-download.part"
+        )
+    )
+    assert intent is not None and intent.prior_relative_path is None
+    assert not generation_9_target.exists()
+    assert not shared_stage.exists()
+    assert len(private_stages) == 1
+    assert private_stages[0].read_bytes() == generation_9_jpg
+    assert local(sync_root, initial.target_relative_path).read_bytes() == JPEG
+
+    batch_10 = candidate(7910)
+    generation_10 = replace(
+        row(79, newer_action, species_code="NEW"),
+        batch_id=batch_10,
+        review_id=candidate(8910),
+        review_version=10,
+        previous_relative_path=initial.target_relative_path,
+    )
+    if newer_action == "REMOVE":
+        generation_10 = replace(
+            generation_10,
+            target_relative_path=PurePosixPath(
+                f"_removed/{batch_10}/{generation_10.candidate_id}.jpg"
+            ),
+        )
+    download_calls: list[UUID] = []
+    outcome = SyncEngine(
+        session=Session(), downloader=fake_download(sync_root, download_calls)
+    ).run(
+        ExportManifest((generation_10,), batch_10, RECEIPT_TOKEN),
+        sync_root,
+        SyncCallbacks(),
+        threading.Event(),
+    )
+
+    latest = index.latest_for_candidate(generation_10.candidate_id)
+    assert outcome.counts == {"succeeded": 1, "failed": 0, "skipped": 0}
+    assert outcome.receipt_items[0].status == "SUCCEEDED"
+    assert outcome.receipt_items[0].error is None
+    assert latest is not None
+    assert latest.review_version == 10
+    assert latest.action == newer_action
+    assert latest.relative_path == generation_10.target_relative_path
+    assert index.get_add_intent(
+        generation_9.candidate_id,
+        generation_9.review_id,
+        generation_9.review_version,
+        "ADD",
+    ) is None
+    assert download_calls == (
+        [generation_10.candidate_id] if newer_action == "ADD" else []
+    )
+    assert local(sync_root, generation_10.target_relative_path).read_bytes() == JPEG
+    assert not local(sync_root, initial.target_relative_path).exists()
+    assert not generation_9_target.exists()
+    assert private_stages[0].read_bytes() == generation_9_jpg
+    with (sync_root / "canonical_manifest.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        canonical = list(csv.DictReader(stream))
+    if newer_action == "REMOVE":
+        assert canonical == []
+    else:
+        assert len(canonical) == 1
+        assert canonical[0]["review_version"] == "10"
+        assert (
+            canonical[0]["relative_path"]
+            == generation_10.target_relative_path.as_posix()
+        )
+        assert canonical[0]["sha256"] == SHA256
+
+
 def test_concurrent_old_and_new_replay_cannot_invert_candidate_state(
     sync_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

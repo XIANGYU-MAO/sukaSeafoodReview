@@ -13,6 +13,7 @@ from uuid import UUID
 
 import imagehash
 from PIL import Image
+import pytest
 
 from conftest import RECEIPT_TOKEN
 from sukaseafood_sync.canonical import write_canonical_manifest
@@ -59,8 +60,39 @@ def _row(
     )
 
 
-def test_newer_generation_reconciles_older_intent_after_real_process_death(
+def _newer_row(*, action: str, batch_id: UUID, review_id: UUID) -> ManifestRow:
+    previous = PurePosixPath(f"images/SF006/{CANDIDATE_ID}.jpg")
+    if action == "ADD":
+        return _row(batch_id=batch_id, review_id=review_id, review_version=10)
+    if action == "MOVE":
+        target = PurePosixPath(f"images/SF010/{CANDIDATE_ID}.jpg")
+        species_code = "SF010"
+    else:
+        target = PurePosixPath(f"_removed/{batch_id}/{CANDIDATE_ID}.jpg")
+        species_code = "SF006"
+    return ManifestRow(
+        batch_id=batch_id,
+        action=action,  # type: ignore[arg-type]
+        candidate_id=CANDIDATE_ID,
+        review_id=review_id,
+        review_version=10,
+        species_code=species_code,
+        target_relative_path=target,
+        previous_relative_path=previous,
+        preview_url="https://images.example.test/10/preview.jpg",
+        original_url="https://images.example.test/10/original.jpg",
+        source_url="https://catalog.example.test/record/888",
+        creator="Researcher",
+        license="CC BY 4.0",
+        license_url="https://creativecommons.org/licenses/by/4.0/",
+        attribution="Researcher / Catalog",
+    )
+
+
+@pytest.mark.parametrize("newer_action", ["ADD", "MOVE", "REMOVE"])
+def test_newer_action_reconciles_older_intent_after_real_process_death(
     tmp_path: Path,
+    newer_action: str,
 ) -> None:
     root = tmp_path / "training"
     root.mkdir()
@@ -197,8 +229,8 @@ SyncEngine(downloader=download).run(
 
     batch_10 = UUID("50000000-0000-4000-8000-000000000010")
     review_10 = UUID("60000000-0000-4000-8000-000000000010")
-    generation_10 = _row(
-        batch_id=batch_10, review_id=review_10, review_version=10
+    generation_10 = _newer_row(
+        action=newer_action, batch_id=batch_10, review_id=review_10
     )
 
     def download_10(session, manifest_row, destination, policy, progress, cancelled):
@@ -230,8 +262,18 @@ SyncEngine(downloader=download).run(
     assert outcome.counts == {"succeeded": 1, "failed": 0, "skipped": 0}, (
         outcome.receipt_items
     )
+    assert outcome.receipt_items[0].status == "SUCCEEDED"
+    assert outcome.receipt_items[0].error is None
     assert latest is not None and latest.review_version == 10
-    assert target.read_bytes() == generation_10_jpg
+    assert latest.action == newer_action
+    expected_content = generation_10_jpg if newer_action == "ADD" else old_jpg
+    expected_sha = hashlib.sha256(expected_content).hexdigest()
+    final_target = root.joinpath(*generation_10.target_relative_path.parts)
+    assert latest.relative_path == generation_10.target_relative_path
+    assert latest.sha256 == expected_sha
+    assert final_target.read_bytes() == expected_content
+    if final_target != target:
+        assert not target.exists()
     assert index.get_add_intent(CANDIDATE_ID, review_9, 9, "ADD") is None
     assert not list(root.rglob("*.part"))
     assert not list(root.rglob("*.sync-download"))
@@ -239,7 +281,16 @@ SyncEngine(downloader=download).run(
         "r", encoding="utf-8-sig", newline=""
     ) as stream:
         canonical = list(csv.DictReader(stream))
-    assert canonical[0]["review_version"] == "10"
+    if newer_action == "REMOVE":
+        assert canonical == []
+    else:
+        assert len(canonical) == 1
+        assert canonical[0]["review_version"] == "10"
+        assert (
+            canonical[0]["relative_path"]
+            == generation_10.target_relative_path.as_posix()
+        )
+        assert canonical[0]["sha256"] == expected_sha
 
 
 def test_two_real_process_replacements_converge_to_highest_generation(
