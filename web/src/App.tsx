@@ -51,68 +51,68 @@ export function App() {
 
   return (
     <Routes>
-        <Route
-          path="/"
-          element={
-            <AuthenticatedShell
-              name={authenticatedUser.name}
-              isAdmin={authenticatedUser.role === "admin"}
-              onChangePassword={() => setChangingPassword(true)}
-              onLogout={auth.logout}
-            >
-              <ReviewPage
-                csrfToken={authenticatedUser.csrf_token}
-                reviewerId={authenticatedUser.id}
-                retryBootstrap={auth.retryBootstrap}
-              />
-            </AuthenticatedShell>
-          }
-        />
-        <Route
-          path="/history"
-          element={
-            <AuthenticatedShell
-              name={authenticatedUser.name}
-              isAdmin={authenticatedUser.role === "admin"}
-              onChangePassword={() => setChangingPassword(true)}
-              onLogout={auth.logout}
-            >
-              <HistoryPage
-                csrfToken={authenticatedUser.csrf_token}
-                reviewerId={authenticatedUser.id}
-                retryBootstrap={auth.retryBootstrap}
-              />
-            </AuthenticatedShell>
-          }
-        />
-        <Route
-          path="/progress"
-          element={
-            <AuthenticatedShell
-              name={authenticatedUser.name}
-              isAdmin={authenticatedUser.role === "admin"}
-              onChangePassword={() => setChangingPassword(true)}
-              onLogout={auth.logout}
-            >
-              <TeamProgressPage retryBootstrap={auth.retryBootstrap} />
-            </AuthenticatedShell>
-          }
-        />
-        <Route
-          path="/admin"
-          element={
-            authenticatedUser.name === "Mao" && authenticatedUser.role === "admin" ? <AuthenticatedShell
-              name={authenticatedUser.name}
-              isAdmin={authenticatedUser.role === "admin"}
-              onChangePassword={() => setChangingPassword(true)}
-              onLogout={auth.logout}
-            >
-              <AdminPage csrfToken={authenticatedUser.csrf_token} retryBootstrap={auth.retryBootstrap} />
-            </AuthenticatedShell>
-            : <Navigate to="/" replace />
-          }
-        />
-        <Route path="*" element={<Navigate to="/" replace />} />
+      <Route
+        path="/"
+        element={
+          <AuthenticatedShell
+            name={authenticatedUser.name}
+            isAdmin={authenticatedUser.role === "admin"}
+            onChangePassword={() => setChangingPassword(true)}
+            onLogout={auth.logout}
+          >
+            <ReviewPage
+              csrfToken={authenticatedUser.csrf_token}
+              reviewerId={authenticatedUser.id}
+              retryBootstrap={auth.retryBootstrap}
+            />
+          </AuthenticatedShell>
+        }
+      />
+      <Route
+        path="/history"
+        element={
+          <AuthenticatedShell
+            name={authenticatedUser.name}
+            isAdmin={authenticatedUser.role === "admin"}
+            onChangePassword={() => setChangingPassword(true)}
+            onLogout={auth.logout}
+          >
+            <HistoryPage
+              csrfToken={authenticatedUser.csrf_token}
+              reviewerId={authenticatedUser.id}
+              retryBootstrap={auth.retryBootstrap}
+            />
+          </AuthenticatedShell>
+        }
+      />
+      <Route
+        path="/progress"
+        element={
+          <AuthenticatedShell
+            name={authenticatedUser.name}
+            isAdmin={authenticatedUser.role === "admin"}
+            onChangePassword={() => setChangingPassword(true)}
+            onLogout={auth.logout}
+          >
+            <TeamProgressPage retryBootstrap={auth.retryBootstrap} />
+          </AuthenticatedShell>
+        }
+      />
+      <Route
+        path="/admin"
+        element={
+          authenticatedUser.name === "Mao" && authenticatedUser.role === "admin" ? <AuthenticatedShell
+            name={authenticatedUser.name}
+            isAdmin={authenticatedUser.role === "admin"}
+            onChangePassword={() => setChangingPassword(true)}
+            onLogout={auth.logout}
+          >
+            <AdminPage csrfToken={authenticatedUser.csrf_token} retryBootstrap={auth.retryBootstrap} />
+          </AuthenticatedShell>
+          : <Navigate to="/" replace />
+        }
+      />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
