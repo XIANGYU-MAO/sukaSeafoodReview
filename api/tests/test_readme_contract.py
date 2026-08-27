@@ -10,7 +10,7 @@ README_EN = ROOT / "README.md"
 ENV_EXAMPLE = ROOT / "api" / ".env.example"
 
 SHARED_COMMANDS_AND_FACTS = (
-    "codex/collaborative-review",
+    "`main`",
     "https://github.com/XIANGYU-MAO/sukaSeafoodReview.git",
     "http://localhost:5173/sukaseafood/review/",
     "https://findai.top/sukaseafood/review",
@@ -23,6 +23,8 @@ SHARED_COMMANDS_AND_FACTS = (
     "python.exe -m app.commands.import_candidates",
     "python.exe -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000",
     "npm install",
+    "https://pypi.tuna.tsinghua.edu.cn/simple",
+    "https://registry.npmmirror.com",
     "npm run dev",
     "pytest -q",
     "npm run typecheck",
@@ -84,16 +86,16 @@ def test_bilingual_readmes_exist_and_keep_critical_commands_and_facts_in_parity(
         )
 
 
-def test_readmes_describe_unpublished_checkout_security_boundaries_and_extensible_catalog():
+def test_readmes_describe_published_main_checkout_security_boundaries_and_extensible_catalog():
     chinese = README_ZH.read_text(encoding="utf-8")
     english = README_EN.read_text(encoding="utf-8")
-    checkout = "C:\\Users\\86166\\Desktop\\sukaSeafoodReview\\.worktrees\\collaborative-review"
+    checkout = "C:\\Users\\86166\\Desktop\\sukaSeafoodReview"
 
     assert checkout in chinese and checkout in english
-    assert "仅存在于本地，尚未发布" in chinese
-    assert "local and unpublished" in english
-    assert "显式合并、推送和发布后" in chinese
-    assert "explicitly merged, pushed, and published" in english
+    assert "已合并、推送并生产发布" in chinese
+    assert "merged, pushed, and deployed to production" in english
+    assert "仅存在于本地，尚未发布" not in chinese
+    assert "local and unpublished" not in english
     assert "登录是未认证入口" in chinese
     assert "login is the unauthenticated entry point" in english
     assert "批次 token" in chinese and "batch token" in english
@@ -118,13 +120,10 @@ def test_readmes_describe_implemented_sync_envelope_storage_and_release_truth():
     assert "离线回执" in chinese and "offline receipt" in english
     assert "不保存图片字节、原图 URL 或批次 token" in chinese
     assert "stores no image bytes, original URLs, or batch tokens" in english
-    assert "已准备的 YGF 发布会删除 `/project`" in chinese
-    assert "prepared YGF release removes `/project`" in english
-    assert "部署构件已实现并在本机验证" in chinese
-    assert "deployment artifacts are implemented and locally verified" in english
-    assert "未执行生产 SSH 部署或公开验收" in chinese
-    assert "no production SSH deployment or public acceptance has been executed" in english
-    assert "显式授权" in chinese and "explicit authorization" in english
+    assert "YGF 网关已删除 `/project`" in chinese
+    assert "YGF gateway now returns 404 for `/project`" in english
+    assert "已完成生产 SSH 部署与公开验收" in chinese
+    assert "production SSH deployment and public acceptance are complete" in english
     assert "精确 16 列 CSV" in chinese
     assert "exact 16-column CSV" in english
     assert "七字段 CSV" not in chinese
@@ -159,16 +158,15 @@ def test_readmes_show_the_exact_locked_clean_windows_build_command():
         assert "build_windows.ps1 -Clean -Locked" not in text
 
 
-def test_readmes_do_not_claim_deployment_or_embed_secret_material():
+def test_readmes_claim_current_deployment_without_embedding_secret_material():
     chinese = README_ZH.read_text(encoding="utf-8")
     english = README_EN.read_text(encoding="utf-8")
     combined = f"{chinese}\n{english}"
 
     assert "-----BEGIN" not in combined
     assert not re.search(r"(?i)ssh-rsa|ssh-ed25519|postgresql\+asyncpg://[^<\s]+:[^<\s]+@", combined)
-    assert "已部署" not in chinese
-    assert "已经上线" not in chinese
-    assert not re.search(r"(?i)\b(is|has been) deployed\b|currently live", english)
+    assert "已部署" in chinese
+    assert "is deployed" in english
 
 
 def test_environment_example_is_safe_complete_and_development_runnable():

@@ -718,7 +718,11 @@ def extension_from_url(url: str) -> str:
 
 def download_one(session: requests.Session, row: dict[str, str], images_dir: Path) -> dict[str, str]:
     if Image is None or imagehash is None:
-        raise RuntimeError("Image downloading requires Pillow and ImageHash. Run: pip install -r requirements.txt")
+        raise RuntimeError(
+            "Image downloading requires Pillow and ImageHash. Run: "
+            "py -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple "
+            "-r requirements.txt"
+        )
     url = row.get("image_url") or ""
     if not url:
         row["rejection_reason"] = "NO_IMAGE_URL"

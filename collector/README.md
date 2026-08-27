@@ -35,7 +35,7 @@ From this directory on Windows:
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-py -m pip install -r requirements.txt
+py -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 ```
 
 Use `--source` to choose `all`, `fish-vista`, `inat`, `gbif`, or `commons`.

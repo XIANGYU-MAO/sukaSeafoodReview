@@ -33,7 +33,7 @@ override。`commons_category` 默认是 `Category:<scientific_name>`，
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-py -m pip install -r requirements.txt
+py -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 ```
 
 `--source` 可选 `all`、`fish-vista`、`inat`、`gbif` 或 `commons`。没有

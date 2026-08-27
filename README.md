@@ -10,16 +10,16 @@ Reviewers can view and edit only their own current history, while everyone can s
 
 ## Repository and current development context
 
-As of 2026-08-27, this implementation is local and unpublished. It is on branch `codex/collaborative-review` in `C:\Users\86166\Desktop\sukaSeafoodReview\.worktrees\collaborative-review`. The `origin` remote currently has no published refs; `https://github.com/XIANGYU-MAO/sukaSeafoodReview.git` is only the target URL. `.worktrees` is a local Git isolation detail, not a runtime requirement.
+As of 2026-08-27, this implementation is merged, pushed, and deployed to production from `main`. The local repository root is `C:\Users\86166\Desktop\sukaSeafoodReview`, the published repository is `https://github.com/XIANGYU-MAO/sukaSeafoodReview.git`, and the live review entry is `https://findai.top/sukaseafood/review/`.
 
-Only after this branch has been explicitly merged, pushed, and published may other users run the following clone command; it is not a working acquisition path today:
+Other developers can obtain the current `main` branch with:
 
 ```powershell
 git clone https://github.com/XIANGYU-MAO/sukaSeafoodReview.git
 Set-Location .\sukaSeafoodReview
 ```
 
-Until then, local commands run from the repository root of the current checkout above. Do not copy or depend on another machine's `.worktrees` directory. This document describes the current implemented code; it does not claim a merge, push, or production release.
+Run local commands from the cloned repository root. A `.worktrees` directory is never a runtime requirement.
 
 ## Architecture and data flow
 
@@ -29,11 +29,11 @@ Until then, local commands run from the repository root of the current checkout 
 - `local_sync/`: the separate approved-original downloader, with an independent CLI/Tkinter Windows synchronizer, resumable index, and frozen build; see [`local_sync/README_ZH.md`](local_sync/README_ZH.md).
 - `deploy/` and the two Compose files: fixed-path production backup, restore, first-deploy, preflight, import, and rollback artifacts.
 - Development browser entry: `http://localhost:5173/sukaseafood/review/`. Vite rewrites only `/sukaseafood/api` to the local FastAPI root, so the Web app continues to use `/sukaseafood/api/v1`.
-- Planned production entry: `https://findai.top/sukaseafood/review`; the external API prefix is fixed at `/sukaseafood/api/v1`.
+- Production entry: `https://findai.top/sukaseafood/review/`; the external API prefix is fixed at `/sukaseafood/api/v1`.
 - The browser obtains candidate metadata from the API and loads an image directly from its external HTTPS URL. Image bytes neither pass through the China server nor enter its database or filesystem.
 - Review submissions carry CSRF and an Idempotency-Key. The API returns a receipt after the database transaction commits; the Web app validates that receipt before refreshing progress and requesting the next candidate.
 
-The system exposes no image-upload, original-image proxy, or original-image download API. The prepared YGF release removes `/project`, `/project/*`, and `/project-assets/*` while preserving the other YGF pages. Those gateway changes have not been deployed, so live routing will not change without an explicitly authorized release.
+The system exposes no image-upload, original-image proxy, or original-image download API. The YGF gateway now returns 404 for `/project`, `/project/*`, and `/project-assets/*` while preserving its other pages and routing `/sukaseafood` to this review system.
 
 ## Prerequisites
 
@@ -52,8 +52,8 @@ All commands begin at the repository root. Create the API virtual environment an
 ```powershell
 Set-Location .\api
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple --upgrade pip
+.\.venv\Scripts\python.exe -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt -r requirements-dev.txt
 Set-Location ..
 Copy-Item .\api\.env.example .\api\.env
 ```
@@ -79,7 +79,7 @@ Terminal 2: install Web dependencies and start Vite:
 
 ```powershell
 Set-Location .\web
-npm install
+npm install --registry=https://registry.npmmirror.com
 npm run dev
 ```
 
@@ -187,7 +187,7 @@ Set-Location ..
 powershell -NoProfile -ExecutionPolicy Bypass -File local_sync/scripts/build_windows.ps1
 ```
 
-Production assets must remain under `/sukaseafood/review/assets/`. The deployment artifacts are implemented and locally verified, but no production SSH deployment or public acceptance has been executed. No live deployment occurred. Going live, reloading Caddy, six-account browser acceptance, and rollback exercises all require explicit authorization.
+Production assets remain under `/sukaseafood/review/assets/`. The review system is deployed, and production SSH deployment and public acceptance are complete: the page, API health endpoint, collector ZIP, six-account login selector, and retired `/project` path have been verified publicly.
 
 ## Troubleshooting
 

@@ -10,16 +10,16 @@
 
 ## 仓库与当前开发上下文
 
-截至 2026-08-27，当前实现仅存在于本地，尚未发布：分支是 `codex/collaborative-review`，工作树位于 `C:\Users\86166\Desktop\sukaSeafoodReview\.worktrees\collaborative-review`。远端 `origin` 当前没有已发布引用；`https://github.com/XIANGYU-MAO/sukaSeafoodReview.git` 只是目标地址。`.worktrees` 是本机 Git 隔离实现细节，不是运行时要求。
+截至 2026-08-27，当前实现已合并、推送并生产发布，正式分支为 `main`。本机仓库根目录是 `C:\Users\86166\Desktop\sukaSeafoodReview`，公开仓库是 `https://github.com/XIANGYU-MAO/sukaSeafoodReview.git`，线上审核入口是 `https://findai.top/sukaseafood/review/`。
 
-只有该分支被显式合并、推送和发布后，其他使用者才可以执行以下 clone；当前不能把它当成可运行的获取方式：
+其他开发者现在可以直接获取当前 `main`：
 
 ```powershell
 git clone https://github.com/XIANGYU-MAO/sukaSeafoodReview.git
 Set-Location .\sukaSeafoodReview
 ```
 
-在此之前，本机命令必须从上述当前 checkout 的仓库根目录运行。不要复制或依赖另一台机器的 `.worktrees` 目录。本文描述当前已实现代码，不表示已合并、已推送或已生产发布。
+本机命令从 clone 后的仓库根目录运行；`.worktrees` 目录不是运行时要求。
 
 ## 架构与数据流
 
@@ -29,11 +29,11 @@ Set-Location .\sukaSeafoodReview
 - `local_sync/`：独立的已批准原图下载器，包含 CLI/Tkinter Windows 同步器、可恢复索引与冻结构建；使用说明见 [`local_sync/README_ZH.md`](local_sync/README_ZH.md)。
 - `deploy/` 与两个 Compose 文件：固定路径的生产备份、恢复、首次部署、预检、导入和回滚构件。
 - 开发浏览器入口：`http://localhost:5173/sukaseafood/review/`。Vite 只把 `/sukaseafood/api` 重写到本机 FastAPI 根路径，因此网页仍使用 `/sukaseafood/api/v1`。
-- 规划中的生产入口：`https://findai.top/sukaseafood/review`；外部 API 前缀固定为 `/sukaseafood/api/v1`。
+- 生产入口：`https://findai.top/sukaseafood/review/`；外部 API 前缀固定为 `/sukaseafood/api/v1`。
 - 浏览器从 API 取得候选元数据，再通过外部 HTTPS URL 直接加载图片。图片字节不经过中国服务器，也不写入服务器数据库或磁盘。
 - 审核提交带 CSRF 和 Idempotency-Key；API 在数据库事务确认后返回回执，网页验证回执再刷新汇总并取下一张。
 
-本系统没有图片上传、原图代理或原图下载 API。已准备的 YGF 发布会删除 `/project`、`/project/*` 与 `/project-assets/*`，同时保留其他 YGF 页面；这些网关改动尚未部署，线上路由在获得显式授权并发布前不会改变。
+本系统没有图片上传、原图代理或原图下载 API。YGF 网关已删除 `/project`、`/project/*` 与 `/project-assets/*`，这些路径现在返回 404；其他 YGF 页面保持不变，`/sukaseafood` 已路由到本审核系统。
 
 ## 环境要求
 
@@ -52,8 +52,8 @@ Set-Location .\sukaSeafoodReview
 ```powershell
 Set-Location .\api
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple --upgrade pip
+.\.venv\Scripts\python.exe -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt -r requirements-dev.txt
 Set-Location ..
 Copy-Item .\api\.env.example .\api\.env
 ```
@@ -79,7 +79,7 @@ Set-Location .\api
 
 ```powershell
 Set-Location .\web
-npm install
+npm install --registry=https://registry.npmmirror.com
 npm run dev
 ```
 
@@ -187,7 +187,7 @@ Set-Location ..
 powershell -NoProfile -ExecutionPolicy Bypass -File local_sync/scripts/build_windows.ps1
 ```
 
-生产构建资产必须保持在 `/sukaseafood/review/assets/`。部署构件已实现并在本机验证，但未执行生产 SSH 部署或公开验收。未执行线上部署；上线、Caddy reload、六账号浏览器验收和回滚演练都需要显式授权。
+生产构建资产保持在 `/sukaseafood/review/assets/`。系统已部署，并已完成生产 SSH 部署与公开验收：页面、API 健康接口、采集器 ZIP、六账号选择登录页及已下线的 `/project` 路径均已在线核验。
 
 ## 故障排查
 
