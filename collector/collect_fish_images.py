@@ -62,6 +62,8 @@ COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 ALLOWED_LICENSES = {"CC0", "CC-BY", "CC-BY-SA", "CC-BY-NC", "CC-BY-NC-SA", "PUBLIC-DOMAIN"}
 CONFIG_SCHEMA_VERSION = 1
 MAX_CONFIG_TEXT_LENGTH = 500
+MAX_COMMONS_CATEGORY_LENGTH = 512
+MAX_FISH_VISTA_FILTER_LENGTH = 255
 CONFIG_TOP_LEVEL_KEYS = {"schema_version", "generated_at", "species"}
 CONFIG_SPECIES_KEYS = {
     "seafood_code",
@@ -599,14 +601,20 @@ class Collector:
         return out
 
 
-def _config_text(value: Any, field_name: str, *, required: bool) -> str | None:
+def _config_text(
+    value: Any,
+    field_name: str,
+    *,
+    required: bool,
+    max_length: int = MAX_CONFIG_TEXT_LENGTH,
+) -> str | None:
     if value is None and not required:
         return None
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be text")
     text = value.strip()
-    if not text or len(text) > MAX_CONFIG_TEXT_LENGTH:
-        raise ValueError(f"{field_name} must be non-empty text up to {MAX_CONFIG_TEXT_LENGTH} characters")
+    if not text or len(text) > max_length:
+        raise ValueError(f"{field_name} must be non-empty text up to {max_length} characters")
     return text
 
 
@@ -648,8 +656,18 @@ def normalize_species_config(raw: Any) -> dict[str, Any]:
         if code in seen:
             raise ValueError("species code and names must be non-empty and unique")
         seen.add(code)
-        commons_category = _config_text(item.get("commons_category"), "commons_category", required=False)
-        fish_vista_filter = _config_text(item.get("fish_vista_filter"), "fish_vista_filter", required=False)
+        commons_category = _config_text(
+            item.get("commons_category"),
+            "commons_category",
+            required=False,
+            max_length=MAX_COMMONS_CATEGORY_LENGTH,
+        )
+        fish_vista_filter = _config_text(
+            item.get("fish_vista_filter"),
+            "fish_vista_filter",
+            required=False,
+            max_length=MAX_FISH_VISTA_FILTER_LENGTH,
+        )
         normalized.append(
             {
                 "seafood_code": code,
@@ -791,7 +809,12 @@ def main(argv: list[str] | None = None) -> int:
                     found = []
                 rows.extend(found)
                 print(f"  -> {len(found)} usable licensed candidate rows", file=sys.stderr)
-            except (requests.RequestException, ValueError, AttributeError, TypeError) as exc:
+            except requests.RequestException as exc:
+                print(
+                    f"!! {species['seafood_code']} {source} failed: {exc}; retry later with --resume",
+                    file=sys.stderr,
+                )
+            except (ValueError, AttributeError, TypeError) as exc:
                 print(f"!! {species['seafood_code']} {source} failed: {exc}", file=sys.stderr)
 
     rows = merge_resume_rows(existing_rows, rows) if args.resume else dedupe_metadata(rows)

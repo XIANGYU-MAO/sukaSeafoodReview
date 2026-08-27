@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+import requests
 
 import collector.collect_fish_images as collector_module
 from collector.collect_fish_images import (
@@ -260,6 +261,30 @@ def test_main_reports_taxon_resolution_failures_per_species_and_source(monkeypat
 
     assert result == 0
     assert "!! FISH_A inat failed: FISH_A iNaturalist exact taxon was not resolved; set inat_taxon_id" in capsys.readouterr().err
+
+
+def test_main_tells_operator_to_resume_after_source_request_failure(monkeypatch, tmp_path, capsys):
+    config = tmp_path / "species_config.json"
+    config.write_text(json.dumps(dynamic_config()), encoding="utf-8")
+
+    class FakeCollector:
+        def __init__(self, **_kwargs):
+            pass
+
+        def collect_inat(self, _species, _max_rows):
+            raise requests.RequestException("temporary source outage")
+
+    monkeypatch.setattr(collector_module, "Collector", FakeCollector)
+    result = collector_module.main([
+        "--config", str(config),
+        "--source", "inat",
+        "--species", "FISH_A",
+        "--max-per-species", "1",
+        "--output-dir", str(tmp_path / "output"),
+    ])
+
+    assert result == 0
+    assert "!! FISH_A inat failed: temporary source outage; retry later with --resume" in capsys.readouterr().err
 
 
 def test_main_continues_after_malformed_source_response(monkeypatch, tmp_path, capsys):

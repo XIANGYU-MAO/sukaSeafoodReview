@@ -62,6 +62,22 @@ def test_config_rejects_unknown_keys_and_non_positive_overrides(raw):
         normalize_species_config(raw)
 
 
+@pytest.mark.parametrize(
+    ("field", "accepted_length", "rejected_length"),
+    [
+        ("commons_category", 512, 513),
+        ("fish_vista_filter", 255, 256),
+    ],
+)
+def test_config_uses_exported_source_override_text_bounds(field, accepted_length, rejected_length):
+    valid = {**dynamic_config(), "species": [{**dynamic_config()["species"][0], field: "x" * accepted_length}]}
+    assert normalize_species_config(valid)["species"][0][field] == "x" * accepted_length
+
+    invalid = {**dynamic_config(), "species": [{**dynamic_config()["species"][0], field: "x" * rejected_length}]}
+    with pytest.raises(ValueError):
+        normalize_species_config(invalid)
+
+
 def collector_with_json_response(response):
     collector = Collector(session=requests.Session(), sleep_fn=lambda _seconds: None)
     collector.get_json = response
