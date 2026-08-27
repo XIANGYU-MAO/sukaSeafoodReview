@@ -720,8 +720,7 @@ def download_one(session: requests.Session, row: dict[str, str], images_dir: Pat
     if Image is None or imagehash is None:
         raise RuntimeError(
             "Image downloading requires Pillow and ImageHash. Run: "
-            "py -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple "
-            "-r requirements.txt"
+            "py -m pip install -r requirements.txt"
         )
     url = row.get("image_url") or ""
     if not url:

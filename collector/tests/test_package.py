@@ -25,3 +25,14 @@ def test_published_collector_zip_contains_only_current_allowlisted_sources():
             assert archive.read(f"{PACKAGE_ROOT}/{name}") == (
                 ROOT / "collector" / name
             ).read_bytes()
+
+
+def test_published_collector_zip_does_not_force_a_regional_package_mirror():
+    with ZipFile(ZIP) as archive:
+        packaged_text = "\n".join(
+            archive.read(f"{PACKAGE_ROOT}/{name}").decode("utf-8")
+            for name in ("collect_fish_images.py", "README_ZH.md", "README.md")
+        )
+
+    assert "pypi.tuna.tsinghua.edu.cn" not in packaged_text
+    assert "pip install -r requirements.txt" in packaged_text
