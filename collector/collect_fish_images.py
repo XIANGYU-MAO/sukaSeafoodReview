@@ -619,7 +619,11 @@ def _positive_integer_override(value: Any, field_name: str) -> int | None:
 
 
 def normalize_species_config(raw: Any) -> dict[str, Any]:
-    if not isinstance(raw, dict) or raw.get("schema_version") != CONFIG_SCHEMA_VERSION:
+    if (
+        not isinstance(raw, dict)
+        or type(raw.get("schema_version")) is not int
+        or raw["schema_version"] != CONFIG_SCHEMA_VERSION
+    ):
         raise ValueError("collector config schema_version must be 1")
     unknown_top_level = set(raw) - CONFIG_TOP_LEVEL_KEYS
     if unknown_top_level:
@@ -787,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
                     found = []
                 rows.extend(found)
                 print(f"  -> {len(found)} usable licensed candidate rows", file=sys.stderr)
-            except (requests.RequestException, ValueError) as exc:
+            except (requests.RequestException, ValueError, AttributeError) as exc:
                 print(f"!! {species['seafood_code']} {source} failed: {exc}", file=sys.stderr)
 
     rows = merge_resume_rows(existing_rows, rows) if args.resume else dedupe_metadata(rows)

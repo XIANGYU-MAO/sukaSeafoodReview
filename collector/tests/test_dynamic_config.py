@@ -51,6 +51,7 @@ def test_config_rejects_empty_or_duplicate_species(species):
 @pytest.mark.parametrize(
     "raw",
     [
+        {**dynamic_config(), "schema_version": True},
         {**dynamic_config(), "unexpected": True},
         {**dynamic_config(), "species": [{**dynamic_config()["species"][0], "inat_taxon_id": 0}]},
         {**dynamic_config(), "species": [{**dynamic_config()["species"][0], "mistyped_key": "value"}]},

@@ -260,3 +260,31 @@ def test_main_reports_taxon_resolution_failures_per_species_and_source(monkeypat
 
     assert result == 0
     assert "!! FISH_A inat failed: FISH_A iNaturalist exact taxon was not resolved; set inat_taxon_id" in capsys.readouterr().err
+
+
+def test_main_continues_after_malformed_source_response(monkeypatch, tmp_path, capsys):
+    config = tmp_path / "species_config.json"
+    config.write_text(json.dumps(dynamic_config()), encoding="utf-8")
+    seen = []
+
+    class FakeCollector:
+        def __init__(self, **_kwargs):
+            pass
+
+        def collect_inat(self, species, _max_rows):
+            seen.append(species["seafood_code"])
+            if species["seafood_code"] == "FISH_A":
+                return None.get("results")
+            return []
+
+    monkeypatch.setattr(collector_module, "Collector", FakeCollector)
+    result = collector_module.main([
+        "--config", str(config),
+        "--source", "inat",
+        "--max-per-species", "1",
+        "--output-dir", str(tmp_path / "output"),
+    ])
+
+    assert result == 0
+    assert seen == ["FISH_A", "FISH_B"]
+    assert "!! FISH_A inat failed: 'NoneType' object has no attribute 'get'" in capsys.readouterr().err
