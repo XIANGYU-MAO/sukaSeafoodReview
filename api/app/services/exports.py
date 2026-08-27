@@ -318,7 +318,7 @@ async def derive_deltas(
                 ):
                     action = ExportAction.ADD
                     target_path = desired_path
-                    if previous_path == desired_path:
+                    if previous_path == desired_path and not original_changed:
                         previous_path = None
         elif local_present:
             assert local_item is not None

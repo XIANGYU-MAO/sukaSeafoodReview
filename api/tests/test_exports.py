@@ -537,6 +537,31 @@ def test_species_and_original_change_emits_redownload_add_with_old_path_cleanup(
     ]
 
 
+def test_same_suffix_original_replacement_preserves_previous_path(settings):
+    seed, local = _successful_initial_sync(settings)
+    old_generation = int(local["review_version"])
+
+    asyncio.run(
+        mutate(
+            settings,
+            Candidate,
+            seed.candidate_ids[0],
+            original_url="https://images.example.test/1/replacement.jpg",
+            preview_url="https://images.example.test/1/replacement-preview.jpg",
+            version=old_generation + 1,
+        )
+    )
+    with TestClient(create_app(settings)) as client:
+        batch = create_batch(client, seed)
+        _, rows = download(client, seed, batch.json()["id"])
+
+    row = rows[0]
+    assert row["action"] == "ADD"
+    assert row["target_relative_path"].endswith(".jpg")
+    assert row["previous_relative_path"] == row["target_relative_path"]
+    assert int(row["review_version"]) > old_generation
+
+
 def test_metadata_refresh_and_original_url_change_emit_add_but_unchanged_state_does_not(settings):
     seed, local = _successful_initial_sync(settings)
     with TestClient(create_app(settings)) as client:
