@@ -69,6 +69,10 @@ def upgrade() -> None:
         sa.Column("name_zh", sa.String(length=255), nullable=False),
         sa.Column("name_en", sa.String(length=255), nullable=False),
         sa.Column("scientific_name", sa.String(length=255), nullable=False),
+        sa.Column("inat_taxon_id", sa.BigInteger(), nullable=True),
+        sa.Column("gbif_taxon_key", sa.BigInteger(), nullable=True),
+        sa.Column("commons_category", sa.String(length=512), nullable=True),
+        sa.Column("fish_vista_filter", sa.String(length=255), nullable=True),
         sa.Column(
             "active", sa.Boolean(), server_default=sa.true(), nullable=False
         ),
@@ -79,6 +83,14 @@ def upgrade() -> None:
             nullable=False,
         ),
         *timestamps(),
+        sa.CheckConstraint(
+            "inat_taxon_id IS NULL OR inat_taxon_id > 0",
+            name="ck_species_inat_taxon_positive",
+        ),
+        sa.CheckConstraint(
+            "gbif_taxon_key IS NULL OR gbif_taxon_key > 0",
+            name="ck_species_gbif_taxon_positive",
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("code"),
     )

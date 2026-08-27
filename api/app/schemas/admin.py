@@ -34,6 +34,13 @@ TrimmedCode = Annotated[
 TrimmedName = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
 ]
+PositiveTaxonId = Annotated[int, Field(gt=0, le=9_223_372_036_854_775_807)]
+CommonsOverride = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)
+]
+FilterOverride = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
+]
 
 
 def _validate_https(value: str | None) -> str | None:
@@ -77,6 +84,10 @@ class SpeciesResponse(BaseModel):
     name_zh: str
     name_en: str
     scientific_name: str
+    inat_taxon_id: int | None
+    gbif_taxon_key: int | None
+    commons_category: str | None
+    fish_vista_filter: str | None
     active: bool
     sort_order: int
     candidate_count: int
@@ -94,6 +105,10 @@ class SpeciesCreateRequest(BaseModel):
     name_zh: TrimmedName
     name_en: TrimmedName
     scientific_name: TrimmedName
+    inat_taxon_id: PositiveTaxonId | None = None
+    gbif_taxon_key: PositiveTaxonId | None = None
+    commons_category: CommonsOverride | None = None
+    fish_vista_filter: FilterOverride | None = None
     active: bool = True
     sort_order: int = 0
     reason: TrimmedReason
@@ -110,6 +125,10 @@ class SpeciesPatchRequest(BaseModel):
     name_zh: TrimmedName | None = None
     name_en: TrimmedName | None = None
     scientific_name: TrimmedName | None = None
+    inat_taxon_id: PositiveTaxonId | None = None
+    gbif_taxon_key: PositiveTaxonId | None = None
+    commons_category: CommonsOverride | None = None
+    fish_vista_filter: FilterOverride | None = None
     active: bool | None = None
     sort_order: int | None = None
     reason: TrimmedReason

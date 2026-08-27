@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -96,6 +97,10 @@ def test_species_list_filters_sorts_paginates_and_counts_candidates(settings):
         "name_zh",
         "name_en",
         "scientific_name",
+        "inat_taxon_id",
+        "gbif_taxon_key",
+        "commons_category",
+        "fish_vista_filter",
         "active",
         "sort_order",
         "candidate_count",
@@ -124,6 +129,10 @@ def test_species_create_and_edit_trim_fields_keep_code_immutable_and_audit(setti
                 "name_zh": " 新鱼 ",
                 "name_en": " New fish ",
                 "scientific_name": " Piscis novus ",
+                "inat_taxon_id": 123,
+                "gbif_taxon_key": 456,
+                "commons_category": " Category:Piscis novus ",
+                "fish_vista_filter": " Piscis novus ",
                 "active": True,
                 "sort_order": 30,
                 "reason": " add missing species ",
@@ -135,6 +144,7 @@ def test_species_create_and_edit_trim_fields_keep_code_immutable_and_audit(setti
             headers=headers,
             json={
                 "name_en": "Corrected fish",
+                "inat_taxon_id": None,
                 "active": False,
                 "sort_order": 5,
                 "reason": " correct catalog ",
@@ -157,21 +167,38 @@ def test_species_create_and_edit_trim_fields_keep_code_immutable_and_audit(setti
                     )
                 ).all()
             )
+            species = await db.get(Species, UUID(species_id))
         await engine.dispose()
-        return audits
+        return audits, species
 
-    audits = asyncio.run(load())
+    audits, species = asyncio.run(load())
     assert created.status_code == 201
     assert created.json()["code"] == "SF003"
     assert created.json()["name_zh"] == "新鱼"
+    assert created.json()["inat_taxon_id"] == 123
+    assert created.json()["gbif_taxon_key"] == 456
+    assert created.json()["commons_category"] == "Category:Piscis novus"
+    assert created.json()["fish_vista_filter"] == "Piscis novus"
     assert edited.status_code == 200
     assert edited.json()["code"] == "SF003"
     assert edited.json()["active"] is False
+    assert edited.json()["inat_taxon_id"] is None
+    assert edited.json()["gbif_taxon_key"] == 456
+    assert species.inat_taxon_id is None
+    assert species.gbif_taxon_key == 456
+    assert species.commons_category == "Category:Piscis novus"
+    assert species.fish_vista_filter == "Piscis novus"
     assert immutable.status_code == 422
     assert [audit.action for audit in audits] == ["SPECIES_CREATE", "SPECIES_UPDATE"]
     assert audits[0].before_json is None
     assert audits[0].after_json["code"] == "SF003"
+    assert audits[0].after_json["inat_taxon_id"] == 123
+    assert audits[0].after_json["gbif_taxon_key"] == 456
+    assert audits[0].after_json["commons_category"] == "Category:Piscis novus"
+    assert audits[0].after_json["fish_vista_filter"] == "Piscis novus"
     assert audits[1].before_json["name_en"] == "New fish"
+    assert audits[1].before_json["inat_taxon_id"] == 123
+    assert audits[1].after_json["inat_taxon_id"] is None
     assert audits[1].after_json["name_en"] == "Corrected fish"
     assert audits[1].reason == "correct catalog"
 
@@ -206,6 +233,30 @@ def test_species_patch_rejects_explicit_null_without_database_work(settings, fie
     assert species.active is True
     assert species.sort_order == 20
     assert audits == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"inat_taxon_id": 0},
+        {"gbif_taxon_key": -1},
+        {"inat_taxon_id": 9_223_372_036_854_775_808},
+        {"commons_category": "   "},
+        {"commons_category": "x" * 513},
+        {"fish_vista_filter": "   "},
+        {"fish_vista_filter": "x" * 256},
+    ],
+)
+def test_species_source_overrides_reject_invalid_values(settings, payload):
+    seed = asyncio.run(seed_catalog(settings))
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        response = client.patch(
+            f"/v1/admin/species/{seed.species_ids[0]}",
+            headers=admin_headers(seed, csrf=True),
+            json={**payload, "reason": "invalid source override"},
+        )
+
+    assert response.status_code == 422
 
 
 def test_species_duplicate_code_conflicts_without_partial_row_or_audit(settings):

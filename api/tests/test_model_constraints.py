@@ -148,6 +148,25 @@ def test_candidate_current_reviewer_has_unique_non_null_index(db_session):
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("inat_taxon_id", 0), ("inat_taxon_id", -1), ("gbif_taxon_key", 0)],
+)
+def test_species_source_override_taxon_ids_must_be_positive(db_session, field, value):
+    record = Species(
+        code="SF001",
+        name_zh="测试鱼",
+        name_en="Test fish",
+        scientific_name="Piscis probatio",
+        **{field: value},
+    )
+    db_session.add(record)
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
 def test_initial_migration_upgrades_a_fresh_database(tmp_path):
     api_root = Path(__file__).resolve().parents[1]
     database_path = tmp_path / "migration.sqlite3"
@@ -207,9 +226,16 @@ def test_initial_migration_upgrades_a_fresh_database(tmp_path):
     session_columns = {
         column["name"]: column for column in inspector.get_columns("sessions")
     }
+    species_columns = {
+        column["name"]: column for column in inspector.get_columns("species")
+    }
     assert candidate_columns["current_reviewer_id"]["nullable"] is True
     assert user_columns["password_version"]["nullable"] is False
     assert session_columns["password_version"]["nullable"] is False
+    assert species_columns["inat_taxon_id"]["nullable"] is True
+    assert species_columns["gbif_taxon_key"]["nullable"] is True
+    assert species_columns["commons_category"]["nullable"] is True
+    assert species_columns["fish_vista_filter"]["nullable"] is True
 
     candidate_foreign_keys = {
         tuple(foreign_key["constrained_columns"])

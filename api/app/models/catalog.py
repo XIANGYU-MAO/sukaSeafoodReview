@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
+    BigInteger,
     CheckConstraint,
     Date,
     DateTime,
@@ -35,6 +36,14 @@ class Species(TimestampMixin, Base):
         CheckConstraint(
             POSTGRESQL_SPECIES_CODE_CHECK_SQL, name="ck_species_code_safe"
         ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "inat_taxon_id IS NULL OR inat_taxon_id > 0",
+            name="ck_species_inat_taxon_positive",
+        ),
+        CheckConstraint(
+            "gbif_taxon_key IS NULL OR gbif_taxon_key > 0",
+            name="ck_species_gbif_taxon_positive",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -42,6 +51,10 @@ class Species(TimestampMixin, Base):
     name_zh: Mapped[str] = mapped_column(String(255), nullable=False)
     name_en: Mapped[str] = mapped_column(String(255), nullable=False)
     scientific_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    inat_taxon_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    gbif_taxon_key: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    commons_category: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    fish_vista_filter: Mapped[str | None] = mapped_column(String(255), nullable=True)
     active: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )

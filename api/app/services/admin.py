@@ -85,6 +85,10 @@ def species_snapshot(species: Species) -> dict[str, Any]:
         "name_zh": species.name_zh,
         "name_en": species.name_en,
         "scientific_name": species.scientific_name,
+        "inat_taxon_id": species.inat_taxon_id,
+        "gbif_taxon_key": species.gbif_taxon_key,
+        "commons_category": species.commons_category,
+        "fish_vista_filter": species.fish_vista_filter,
         "active": species.active,
         "sort_order": species.sort_order,
     }
@@ -347,6 +351,10 @@ async def create_species(
             name_zh=payload.name_zh,
             name_en=payload.name_en,
             scientific_name=payload.scientific_name,
+            inat_taxon_id=payload.inat_taxon_id,
+            gbif_taxon_key=payload.gbif_taxon_key,
+            commons_category=payload.commons_category,
+            fish_vista_filter=payload.fish_vista_filter,
             active=payload.active,
             sort_order=payload.sort_order,
         )
@@ -406,7 +414,17 @@ async def patch_species(
             "active" in payload.model_fields_set
             and payload.active != species.active
         )
-        for field in ("name_zh", "name_en", "scientific_name", "active", "sort_order"):
+        for field in (
+            "name_zh",
+            "name_en",
+            "scientific_name",
+            "inat_taxon_id",
+            "gbif_taxon_key",
+            "commons_category",
+            "fish_vista_filter",
+            "active",
+            "sort_order",
+        ):
             if field in payload.model_fields_set:
                 setattr(species, field, getattr(payload, field))
         if active_changed:
