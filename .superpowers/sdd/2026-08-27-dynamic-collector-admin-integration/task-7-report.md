@@ -36,13 +36,11 @@ was warranted.
   Upgrade ran revisions `20260826_01` through `20260827_07`; `alembic check`
   reported `No new upgrade operations detected.` The 253,952-byte temporary
   file was removed and confirmed absent.
-- `npm test` from `web/`: **failed** with `20` test files passed, `1` test file
-  failed; `210 passed, 1 failed` in `44.40s`. The deterministic failure is
-  `src/App.integration.test.tsx:170`: it still expects the retired `导入` tab
-  label while Task 5 intentionally renders `采集与导入`. The isolated rerun
-  produced `4 passed, 1 failed in 4.66s`. This is a pre-existing base-commit
-  expectation mismatch and is outside Task 7's authorized paths, so it was not
-  modified.
+- The first `npm test` run from `web/` exposed one stale integration assertion:
+  `src/App.integration.test.tsx:170` still expected `导入` after Task 5 renamed
+  the tab to `采集与导入` (`210 passed, 1 failed`). The original Task 5
+  implementer corrected only that test expectation in commit `1f9fb29`; the
+  isolated file then passed `5/5` and the complete web suite passed `211/211`.
 - `npm run typecheck`: passed.
 - `npm run build`: passed; Vite transformed 49 modules and built in `1.09s`.
 - `python -m pytest tests -q`: `21 passed, 11 skipped in 2.09s`.
@@ -66,18 +64,18 @@ All required migrated artifacts exist as regular files:
 - `collector/README.md`
 - `web/public/downloads/sukaseafood-collector.zip`
 
-The ZIP staleness check passes. However, the complete normal matrix is not all
-green because of the precise pre-existing web expectation above. Therefore the
-normal-matrix deletion precondition is **not satisfied**, and the controller
-must not delete the legacy directory on this evidence. Task 7 did not inspect,
-modify, package from, or delete
-`C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector`; exact target and
-non-reparse-point validation remain exclusively with the controller after
-independent review and after the web matrix is repaired and green.
+After the repaired complete web suite passed, the controller independently
+confirmed a clean Git worktree, a fresh ZIP, all six migrated artifacts, and
+that `C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector` resolved to the
+exact explicitly authorized real directory and was not a reparse point. The
+controller then deleted only that directory and confirmed it no longer exists.
+The old 1,221-row CSV, cached thumbnails, and legacy output were intentionally
+removed; the migrated source, documentation, and downloadable ZIP remain in the
+committed repository.
 
 ## Concerns
 
-The collector-to-importer path itself is green and required no runtime change.
-The only concern is the stale full-web integration assertion already present at
-base `63416ba`. No compatibility, concurrency, crash, upgrade, network,
-deployment, push, merge, production, or destructive work was added or run.
+None. The collector-to-importer path required no runtime correction, the normal
+matrix is green after the narrow stale-test repair, and the authorized legacy
+directory removal is complete. No compatibility, concurrency, crash, upgrade,
+network, deployment, push, merge, or production work was added or run.
