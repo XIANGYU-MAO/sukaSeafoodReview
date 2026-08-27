@@ -25,7 +25,8 @@ Set-Location .\sukaSeafoodReview
 
 - `web/`：React 19、TypeScript、Vite；生产构建基址和浏览器路由基址固定为 `/sukaseafood/review/`。
 - `api/`：FastAPI、SQLAlchemy async、Alembic；应用内部路由从 `/v1` 开始。
-- `local_sync/`：独立的 CLI/Tkinter Windows 同步器、可恢复索引与冻结构建；使用说明见 [`local_sync/README_ZH.md`](local_sync/README_ZH.md)。
+- `collector/`：Mao 的 Windows 本地候选元数据采集器，读取当前鱼种配置并写入 `collector/output/candidates.csv` 供审核导入。
+- `local_sync/`：独立的已批准原图下载器，包含 CLI/Tkinter Windows 同步器、可恢复索引与冻结构建；使用说明见 [`local_sync/README_ZH.md`](local_sync/README_ZH.md)。
 - `deploy/` 与两个 Compose 文件：固定路径的生产备份、恢复、首次部署、预检、导入和回滚构件。
 - 开发浏览器入口：`http://localhost:5173/sukaseafood/review/`。Vite 只把 `/sukaseafood/api` 重写到本机 FastAPI 根路径，因此网页仍使用 `/sukaseafood/api/v1`。
 - 规划中的生产入口：`https://findai.top/sukaseafood/review`；外部 API 前缀固定为 `/sukaseafood/api/v1`。
@@ -59,7 +60,7 @@ Copy-Item .\api\.env.example .\api\.env
 
 `api/.env` 只供本机使用。把三个 `change-me-*` 值替换为彼此不同的本地随机值，不要提交该文件，也不要复用生产值。
 
-终端 1：加载 `.env` 到当前 PowerShell 进程，迁移、初始化默认鱼种与六账号并启动 API：
+终端 1：加载 `.env` 到当前 PowerShell 进程，迁移、初始化六账号并启动 API：
 
 ```powershell
 Get-Content .\api\.env | Where-Object { $_ -match '^[^#][^=]*=' } | ForEach-Object {
@@ -68,12 +69,11 @@ Get-Content .\api\.env | Where-Object { $_ -match '^[^#][^=]*=' } | ForEach-Obje
 }
 Set-Location .\api
 .\.venv\Scripts\python.exe -m alembic upgrade head
-.\.venv\Scripts\python.exe -m app.commands.seed_species
 .\.venv\Scripts\python.exe -m app.commands.seed_users --print-once
 .\.venv\Scripts\python.exe -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-鱼种 seed 只补齐缺失的 SF001–SF005 默认目录，不覆盖 Mao 已编辑的字段，不删除或拒绝 SF006 等未来鱼种；重复运行没有新增项时不输出。账号首次 seed 会在终端中各显示一次六个临时密码；立即安全保存并分发。相同数据库再次运行不会输出或替换密码。
+新数据库包含六个账号，但初始鱼种目录为空。Mao 在中文管理后台创建并维护任意当前鱼种后，再采集或导入候选。账号首次 seed 会在终端中各显示一次六个临时密码；立即安全保存并分发。相同数据库再次运行不会输出或替换密码。
 
 终端 2：安装网页依赖并启动 Vite：
 
@@ -93,18 +93,18 @@ npm run dev
 
 临时密码和重置密码只显示一次。不要把密码、会话 Cookie、CSRF、回执密钥、数据库 URL 或 SSH 凭据写进 Git、截图、日志或问题单。
 
-## 导入初始 1,221 行清单
+## 采集与导入
 
-真实旧清单路径是 `C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector\output\candidates.csv`。先确认已经运行默认鱼种 seed，再在已经加载 API 环境变量的终端执行只读 dry-run：
+Mao 的正常四步流程是：（1）在中文管理后台维护当前鱼种，（2）下载采集器和当前配置，（3）在本机运行 `collector/`，生成 `C:\Users\86166\Desktop\sukaSeafoodReview\collector\output\candidates.csv`，（4）预检查并显式提交 CSV。初始目录为空；Mao 可以在采集前创建任意有效的当前鱼种。
+
+采集器输出可以有任意有效行数和任意受支持来源组合。在已经加载 API 环境变量的终端执行只读 dry-run：
 
 ```powershell
 Set-Location .\api
-.\.venv\Scripts\python.exe -m app.commands.import_candidates 'C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector\output\candidates.csv' --dry-run
+.\.venv\Scripts\python.exe -m app.commands.import_candidates 'C:\Users\86166\Desktop\sukaSeafoodReview\collector\output\candidates.csv' --dry-run
 ```
 
-2026-08-26 对该真实文件的当前验证结果是：1,221 行可作为新候选、247 条可能 URL 重复、262 条警告、0 条 blocking error。它是一次已观察到的验证证据，不是对未来文件或已有数据库状态的永久不变量；文件内容或数据库变化后应重新 dry-run。
-
-dry-run 不写候选、不生成可提交预览令牌。确认报告后，Mao 可以在中文后台“导入”标签先预检查再显式确认 commit；生产首次导入脚本也会在服务器上先 dry-run，再以同一 CLI 的 `--commit` 事务性复核并写入。CLI 精确重复导入是幂等的。网页预览令牌仅保存在当前页面内存并有过期时间；新文件、终端冲突或成功提交会使旧令牌失效。
+dry-run 不写候选、不生成可提交预览令牌。它必须报告零个 blocking error 且 `can_commit=true`，Mao 才能显式提交。确认报告后，Mao 可以在中文后台“采集与导入”标签先预检查再显式确认 commit；生产帮助脚本同样先 dry-run，再以 `--commit` 事务性复核并写入，随后把返回的 `file_sha256` 与本机 CSV 核对，并打印 `total`、`inserted`、`skipped_exact` 和 `possible_url_duplicates`。CLI 精确重复导入是幂等的。网页预览令牌仅保存在当前页面内存并有过期时间；新文件、终端冲突或成功提交会使旧令牌失效。
 
 ## 审核成员工作流
 
@@ -124,9 +124,9 @@ dry-run 不写候选、不生成可提交预览令牌。确认报告后，Mao �
 
 1. 审核进度：全组聚合和当前占用。
 2. 候选图片：筛选、修正安全元数据、释放或转交尚未提交的当前图片。
-3. 鱼种管理：新增、编辑、停用和重新启用 Windows 安全的不可变鱼种代码。默认 seed 不是五种上限；导入 SF006 或其他未来鱼种的行之前，Mao 应先在此添加符合安全代码规则的目录项。
+3. 鱼种管理：新增、编辑、停用和重新启用 Windows 安全的不可变鱼种代码。初始目录为空；导入 SF006 或任何其他当前鱼种的行之前，Mao 应先在此添加符合安全代码规则的目录项。
 4. 审核历史：跨成员筛选、受版本保护的修正，以及指定从未审核该候选的活跃成员重新审核。
-5. 导入：CSV 预检查与原子 commit。
+5. 采集与导入：四步采集器流程、CSV 预检查与原子 commit。
 6. 训练集同步：查看待处理数、创建不可变增量批次、下载小型 CSV、上传 JSON 回执文件。
 7. 账号：查看固定目录并重置普通成员密码；不在网页重置 Mao。
 
@@ -195,7 +195,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File local_sync/scripts/build_win
 - 生产配置因 Cookie 启动失败：生产只能使用 HTTPS 和 `SECURE_COOKIE=true`；不要为了绕过检查关闭安全 Cookie。
 - 401 表示没有有效会话或会话已撤销；403 通常表示角色、首次改密或 CSRF 边界不满足。刷新后重新登录，不要复制另一个会话的 CSRF。
 - 外部图片被屏蔽或损坏：检查浏览器网络、来源站、HTTPS 和内容拦截器。服务器不会代理图片；使用页面的重试或“图片链接不可用”，必要时由 Mao 修正 URL。
-- 来源采集遇到 429：Wikimedia/GBIF/iNaturalist 等原始采集与重试属于旧 `SukaSeafood_CV_Dataset_Collector`，不是审核服务器职责。登录 API 自身的 429 是认证限流，也应等待后重试。
+- 来源采集遇到 429：Wikimedia/GBIF/iNaturalist 等原始采集与重试属于本地 `collector/`，不是审核服务器职责。登录 API 自身的 429 是认证限流，也应等待后重试。
 - PostgreSQL 集成测试显示 skipped：设置 `TEST_POSTGRES_URL` 指向独立 PostgreSQL 16 测试库；SQLite 无法证明行锁、SKIP LOCKED 或竞争语义。
 - 导入返回 409：预览可能过期、已提交、属于另一个会话或文件状态已变化；重新选择文件并预检查，不要复用旧令牌。
 - 回执返回 409/422：确认 batch、review ID、版本、状态和服务器给出的精确路径匹配；重新取得当前批次，不要把冲突当成功。
@@ -205,13 +205,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File local_sync/scripts/build_win
 ```text
 api/                         FastAPI、模型、迁移、CLI 与后端测试
 web/                         React/Vite 网页与 Web 测试
-local_sync/                  Windows 同步器、测试、构建与中文手册
+collector/                   Windows 候选元数据采集器与测试
+local_sync/                  独立的已批准原图下载器、测试、构建与中文手册
 deploy/                      生产脚本、环境模板、操作与回滚清单
 docs/superpowers/specs/      已批准系统设计
 docs/superpowers/plans/      核心、本地同步和生产部署计划
 ```
 
 - 系统设计：`docs/superpowers/specs/2026-08-26-collaborative-review-system-design.md`
+- 当前采集器权威：`docs/superpowers/specs/2026-08-27-dynamic-collector-admin-integration-design.md`
+- 动态采集器集成计划：`docs/superpowers/plans/2026-08-27-dynamic-collector-admin-integration.md`
 - 核心实施计划：`docs/superpowers/plans/2026-08-26-collaborative-review-core.md`
 - Windows 本地同步实施计划：`docs/superpowers/plans/2026-08-26-local-training-sync.md`（代码与冻结构建流程已实现）
 - 生产部署与 YGF 路由计划：`docs/superpowers/plans/2026-08-26-production-deployment.md`（构件和隔离网关提交已准备，未上线）

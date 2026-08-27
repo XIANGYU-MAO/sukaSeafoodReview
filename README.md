@@ -25,7 +25,8 @@ Until then, local commands run from the repository root of the current checkout 
 
 - `web/`: React 19, TypeScript, and Vite. The production build base and browser router base are fixed at `/sukaseafood/review/`.
 - `api/`: FastAPI, async SQLAlchemy, and Alembic. Internal application routes start at `/v1`.
-- `local_sync/`: independent CLI/Tkinter Windows synchronizer, resumable index, and frozen build; see [`local_sync/README_ZH.md`](local_sync/README_ZH.md).
+- `collector/`: Mao's Windows-only metadata collector. It reads the current species configuration and writes `collector/output/candidates.csv` for review import.
+- `local_sync/`: the separate approved-original downloader, with an independent CLI/Tkinter Windows synchronizer, resumable index, and frozen build; see [`local_sync/README_ZH.md`](local_sync/README_ZH.md).
 - `deploy/` and the two Compose files: fixed-path production backup, restore, first-deploy, preflight, import, and rollback artifacts.
 - Development browser entry: `http://localhost:5173/sukaseafood/review/`. Vite rewrites only `/sukaseafood/api` to the local FastAPI root, so the Web app continues to use `/sukaseafood/api/v1`.
 - Planned production entry: `https://findai.top/sukaseafood/review`; the external API prefix is fixed at `/sukaseafood/api/v1`.
@@ -59,7 +60,7 @@ Copy-Item .\api\.env.example .\api\.env
 
 `api/.env` is local-only. Replace the three `change-me-*` values with different local random values. Do not commit the file or reuse production values.
 
-Terminal 1: load `.env` into the current PowerShell process, migrate, seed the default species and six accounts, and start the API:
+Terminal 1: load `.env` into the current PowerShell process, migrate, seed the six accounts, and start the API:
 
 ```powershell
 Get-Content .\api\.env | Where-Object { $_ -match '^[^#][^=]*=' } | ForEach-Object {
@@ -68,12 +69,11 @@ Get-Content .\api\.env | Where-Object { $_ -match '^[^#][^=]*=' } | ForEach-Obje
 }
 Set-Location .\api
 .\.venv\Scripts\python.exe -m alembic upgrade head
-.\.venv\Scripts\python.exe -m app.commands.seed_species
 .\.venv\Scripts\python.exe -m app.commands.seed_users --print-once
 .\.venv\Scripts\python.exe -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-The species seed only fills missing SF001–SF005 defaults. It does not overwrite Mao's edits or delete or reject future species such as SF006; a no-op rerun prints nothing. The first account seed prints one temporary password for each account exactly once. Store and distribute them securely at once. Running it again against the same database neither prints nor replaces them.
+A fresh database contains the six accounts but an empty species catalog. Mao creates and maintains any current species in the Chinese admin before collecting or importing candidates. The first account seed prints one temporary password for each account exactly once. Store and distribute them securely at once. Running it again against the same database neither prints nor replaces them.
 
 Terminal 2: install Web dependencies and start Vite:
 
@@ -93,18 +93,18 @@ Sessions are stored in the database. The browser receives only an HttpOnly, Same
 
 Temporary and reset passwords are shown once. Never put passwords, session cookies, CSRF values, receipt secrets, database URLs, or SSH credentials in Git, screenshots, logs, or issue reports.
 
-## Import the initial 1,221-row manifest
+## Collection and import
 
-The real legacy manifest is `C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector\output\candidates.csv`. Confirm that the default species seed has run, then run the read-only dry-run from a terminal in which the API environment has already been loaded:
+Mao's normal four-step workflow is: (1) manage current species in the Chinese admin, (2) download the collector and current configuration, (3) run `collector/` locally to produce `C:\Users\86166\Desktop\sukaSeafoodReview\collector\output\candidates.csv`, and (4) preview and explicitly commit the CSV. The initial catalog is empty; Mao may create any valid current species before collection.
+
+The collector output may contain any valid number of rows and any supported mix of sources. From a terminal with the API environment loaded, run a read-only dry-run:
 
 ```powershell
 Set-Location .\api
-.\.venv\Scripts\python.exe -m app.commands.import_candidates 'C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector\output\candidates.csv' --dry-run
+.\.venv\Scripts\python.exe -m app.commands.import_candidates 'C:\Users\86166\Desktop\sukaSeafoodReview\collector\output\candidates.csv' --dry-run
 ```
 
-The current observation for that real file on 2026-08-26 was: 1,221 new candidate rows, 247 possible URL duplicates, 262 warnings, and 0 blocking errors. This is verification evidence from one run, not a permanent invariant for future files or database states. Re-run the dry-run whenever the file or database changes.
-
-The CLI dry-run writes no candidates and creates no committable preview token. After reviewing it, Mao may choose the same CSV on the Chinese “导入” tab, preview it, and explicitly confirm commit. The production first-import script instead dry-runs server-side, then uses the same CLI's `--commit` mode to transactionally revalidate and insert. Exact CLI repeats are idempotent. A Web preview token remains only in the current page's memory and expires; a new file, terminal conflict, or successful commit invalidates it.
+The CLI dry-run writes no candidates and creates no committable preview token. It must report zero blocking errors and `can_commit=true` before Mao explicitly commits. After reviewing it, Mao may choose the same CSV on the Chinese “采集与导入” tab, preview it, and explicitly confirm commit. The production helper uses the same dry-run and `--commit` transactionally, then verifies the returned `file_sha256` against the local CSV and prints `total`, `inserted`, `skipped_exact`, and `possible_url_duplicates`. Exact CLI repeats are idempotent. A Web preview token remains only in the current page's memory and expires; a new file, terminal conflict, or successful commit invalidates it.
 
 ## Reviewer workflow
 
@@ -124,9 +124,9 @@ The page has the generic title “管理后台” (Administration), while Mao re
 
 1. 审核进度 — team aggregates and current assignments.
 2. 候选图片 — filters, safe metadata corrections, release, and transfer of unsubmitted current candidates.
-3. 鱼种管理 (Species management) — create, edit, deactivate, and reactivate species with immutable Windows-safe codes. The default seed is not a five-species ceiling: before importing SF006 or any future species, Mao adds its directory entry here under the safe-code rules.
+3. 鱼种管理 (Species management) — create, edit, deactivate, and reactivate species with immutable Windows-safe codes. The initial catalog is empty: before importing SF006 or any other current species, Mao adds its directory entry here under the safe-code rules.
 4. 审核历史 — cross-member filtering, version-protected corrections, and reopening for a specified active reviewer who has never reviewed the candidate.
-5. 导入 — CSV preview and atomic commit.
+5. 采集与导入 — the four-step collector workflow, CSV preview, and atomic commit.
 6. 训练集同步 — pending counts, immutable incremental batches, small CSV downloads, and JSON receipt-file upload.
 7. 账号 — the fixed directory and reviewer password reset; Mao is not reset through the Web UI.
 
@@ -195,7 +195,7 @@ Production assets must remain under `/sukaseafood/review/assets/`. The deploymen
 - Production cookie configuration prevents startup: production supports only HTTPS with `SECURE_COOKIE=true`; do not disable secure cookies to bypass the check.
 - A 401 means there is no valid session or it has been revoked. A 403 usually means the role, first-password gate, or CSRF boundary is unmet. Refresh and log in again; never copy CSRF from another session.
 - An external image is blocked or broken: inspect browser network access, the source host, HTTPS, and content blockers. The server will not proxy it. Use page retry or “image URL unavailable”; Mao can correct the URL if necessary.
-- Source collection receives 429: Wikimedia/GBIF/iNaturalist collection and retry belong to the legacy `SukaSeafood_CV_Dataset_Collector`, not this review server. A 429 from the login API is its own authentication limit and should also be retried later.
+- Source collection receives 429: Wikimedia/GBIF/iNaturalist collection and retry belong to the local `collector/`, not this review server. A 429 from the login API is its own authentication limit and should also be retried later.
 - PostgreSQL integration tests are skipped: set `TEST_POSTGRES_URL` to a separate PostgreSQL 16 test database. SQLite cannot prove row locks, SKIP LOCKED, or contention behavior.
 - Import returns 409: the preview may be expired, committed, owned by another session, or stale against file/database state. Select the file and preview again; never reuse the old token.
 - Receipt returns 409/422: verify batch, review ID, version, status, and the exact server-provided path. Fetch the current batch again; never treat a conflict as success.
@@ -205,13 +205,16 @@ Production assets must remain under `/sukaseafood/review/assets/`. The deploymen
 ```text
 api/                         FastAPI, models, migrations, CLIs, and backend tests
 web/                         React/Vite Web application and Web tests
-local_sync/                  Windows synchronizer, tests, build, and Chinese guide
+collector/                   Windows metadata collector and its tests
+local_sync/                  Separate approved-original downloader, tests, build, and Chinese guide
 deploy/                      Production scripts, environment template, operations and rollback checklists
 docs/superpowers/specs/      Approved system design
 docs/superpowers/plans/      Core, local-sync, and production plans
 ```
 
 - Design: `docs/superpowers/specs/2026-08-26-collaborative-review-system-design.md`
+- Current collector authority: `docs/superpowers/specs/2026-08-27-dynamic-collector-admin-integration-design.md`
+- Dynamic collector integration plan: `docs/superpowers/plans/2026-08-27-dynamic-collector-admin-integration.md`
 - Core plan: `docs/superpowers/plans/2026-08-26-collaborative-review-core.md`
 - Windows local-sync implementation plan: `docs/superpowers/plans/2026-08-26-local-training-sync.md` (code and frozen-build flow implemented)
 - Production and YGF routing plan: `docs/superpowers/plans/2026-08-26-production-deployment.md` (artifacts and isolated gateway commit prepared, not live)

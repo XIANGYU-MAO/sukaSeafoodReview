@@ -1,5 +1,5 @@
 param(
-    [string]$CandidateCsv = "C:\Users\86166\Desktop\SukaSeafood_CV_Dataset_Collector\output\candidates.csv",
+    [string]$CandidateCsv = "C:\Users\86166\Desktop\sukaSeafoodReview\collector\output\candidates.csv",
     [string]$SshHost = "dianshu-prod",
     [switch]$Commit,
     [switch]$WhatIf
@@ -47,6 +47,7 @@ $RemoteTemporary = "/tmp/sukaseafood-import-$Sha256.csv"
 $TaskTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $TempDirectory = Join-Path $TaskTempRoot ("sukaseafood-import-" + [guid]::NewGuid().ToString("N"))
 $LocalReport = Join-Path $TempDirectory "$Sha256.report.json"
+$LocalCommitReport = Join-Path $TempDirectory "$Sha256.commit-report.json"
 New-Item -ItemType Directory -Path $TempDirectory | Out-Null
 
 try {
@@ -65,7 +66,6 @@ try {
     $Report = Get-Content -LiteralPath $LocalReport -Raw -Encoding UTF8 | ConvertFrom-Json
     $Report | Select-Object total, species_counts, source_counts, blocking_errors, invalid_species, invalid_licenses, invalid_sources, missing_urls, exact_duplicates, possible_url_duplicates | ConvertTo-Json -Depth 5
 
-    if ($Report.total -ne 1221) { throw "Dry-run total must be exactly 1221" }
     if ($Report.blocking_errors -ne 0 -or -not $Report.can_commit) {
         throw "Dry-run contains blocking or invalid rows; commit is forbidden"
     }
@@ -73,17 +73,13 @@ try {
     if ($Commit) {
         $CommitCommand = "cd '$RemoteRoot' && docker compose --env-file deploy/.env -f docker-compose.production.yml run --rm review-api python -m app.commands.import_candidates '/imports/$Sha256.csv' --commit --json-report '/imports/$Sha256.commit-report.json'"
         Invoke-Native "ssh" @($SshOptions + @($SshHost, $CommitCommand))
-        $CountQuery = "SELECT count(*) AS total, count(*) FILTER (WHERE current_reviewer_id IS NULL) AS unassigned FROM candidates;"
-        $VerifyCounts = "cd '$RemoteRoot' && docker compose --env-file deploy/.env -f docker-compose.production.yml exec -T review-postgres psql -U review -d review -v ON_ERROR_STOP=1 -At -F '|' -c `"$CountQuery`""
-        $CountOutput = (& ssh @SshOptions $SshHost $VerifyCounts).Trim()
-        if ($LASTEXITCODE -ne 0) { throw "Candidate-count verification failed" }
-        if ($CountOutput -ne "1221|1221") {
-            throw "Candidate-count verification expected total=1221 and unassigned=1221"
+        Invoke-Native "scp" @($SshOptions + @("${SshHost}:$RemoteCommitReport", $LocalCommitReport))
+        $CommitReport = Get-Content -LiteralPath $LocalCommitReport -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($CommitReport.file_sha256 -ne $Sha256) {
+            throw "Commit report SHA256 does not match the local CSV"
         }
-        $SampleQuery = "SELECT DISTINCT ON (source_dataset) source_dataset, source_url, preview_url, original_url, license, attribution FROM candidates WHERE source_dataset IN ('FISH_VISTA','INATURALIST','GBIF','WIKIMEDIA_COMMONS') ORDER BY source_dataset, created_at;"
-        $VerifySamples = "cd '$RemoteRoot' && docker compose --env-file deploy/.env -f docker-compose.production.yml exec -T review-postgres psql -U review -d review -v ON_ERROR_STOP=1 -c `"$SampleQuery`""
-        Invoke-Native "ssh" @($SshOptions + @($SshHost, $VerifySamples))
-        Write-Output "Committed the validated 1,221-row candidate CSV; report: $RemoteCommitReport"
+        $CommitReport | Select-Object total, inserted, skipped_exact, possible_url_duplicates | ConvertTo-Json
+        Write-Output "Committed the validated candidate CSV; report: $RemoteCommitReport"
     }
     else {
         Write-Output "Dry-run passed. Re-run with -Commit for the explicit import step."

@@ -16,7 +16,7 @@
 - [ ] 运行 `first_deploy.sh`（仅首次）或 Windows 发布脚本；保存首次六账号临时密码到密码管理器。
 - [ ] Alembic 成功后才切换 API；等待 review-postgres、review-api、review-web 健康。
 - [ ] 从容器网络验证 `review-api:8000/v1/health` 内容为 `{"status":"ok"}`，`review-web:8080/healthz` 含 `SukaSeafood`。
-- [ ] 如需导入，先检查 1,221 行 dry-run 报告，再显式 `-Commit`；确认全部未分配 reviewer。
+- [ ] 如需导入，按“采集与导入”四步流程生成当前 CSV；先确认 dry-run 的 `blocking_errors=0` 和 `can_commit=true`，再显式 `-Commit`；核对 commit report 的 `file_sha256` 并记录实际 `total`、`inserted`、`skipped_exact` 与 `possible_url_duplicates`。
 
 ## 再发布 YGF 网关
 

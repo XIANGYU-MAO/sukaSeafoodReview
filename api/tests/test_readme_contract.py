@@ -15,12 +15,10 @@ SHARED_COMMANDS_AND_FACTS = (
     "http://localhost:5173/sukaseafood/review/",
     "https://findai.top/sukaseafood/review",
     "/sukaseafood/api/v1",
-    "C:\\Users\\86166\\Desktop\\SukaSeafood_CV_Dataset_Collector\\output\\candidates.csv",
-    "1,221",
-    "247",
-    "262",
+    "C:\\Users\\86166\\Desktop\\sukaSeafoodReview\\collector\\output\\candidates.csv",
+    "collector/",
+    "local_sync/",
     "python.exe -m alembic upgrade head",
-    "python.exe -m app.commands.seed_species",
     "python.exe -m app.commands.seed_users --print-once",
     "python.exe -m app.commands.import_candidates",
     "python.exe -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000",
@@ -38,7 +36,7 @@ ZH_SECTIONS = (
     "环境要求",
     "Windows 本地快速启动",
     "账号、密码与会话",
-    "导入初始 1,221 行清单",
+    "采集与导入",
     "审核成员工作流",
     "七标签中文管理后台",
     "增量 CSV 与本地下载边界",
@@ -54,7 +52,7 @@ EN_SECTIONS = (
     "Prerequisites",
     "Windows local quick start",
     "Accounts, passwords, and sessions",
-    "Import the initial 1,221-row manifest",
+    "Collection and import",
     "Reviewer workflow",
     "Seven-tab Chinese administration",
     "Incremental CSV and local downloader boundary",
@@ -81,9 +79,9 @@ def test_bilingual_readmes_exist_and_keep_critical_commands_and_facts_in_parity(
     for section in EN_SECTIONS:
         assert f"## {section}" in english
     for text in (chinese, english):
-        assert text.index("python.exe -m app.commands.seed_species") < text.index(
-            "python.exe -m app.commands.seed_users --print-once"
-        ) < text.index("python.exe -m app.commands.import_candidates")
+        assert text.index("python.exe -m app.commands.seed_users --print-once") < text.index(
+            "python.exe -m app.commands.import_candidates"
+        )
 
 
 def test_readmes_describe_unpublished_checkout_security_boundaries_and_extensible_catalog():

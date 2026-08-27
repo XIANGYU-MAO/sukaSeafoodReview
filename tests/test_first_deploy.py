@@ -21,6 +21,7 @@ def test_first_deploy_is_capacity_checked_secret_safe_and_idempotent():
     assert script.count("openssl rand") >= 4
     assert "chmod 600" in script
     assert "seed_users --print-once" in script
+    assert "seed_species" not in script
     assert "accounts already initialized" in script
     assert "docker volume rm" not in script
     assert "down -v" not in script
@@ -35,7 +36,9 @@ def test_operations_guide_covers_accounts_backups_imports_and_external_images():
         "备份",
         "恢复",
         "dry-run",
-        "1,221",
+        "采集与导入",
+        "collector/output/candidates.csv",
+        "file_sha256",
         "外部图片",
         "不代理",
         "/opt/sukaseafood-review",

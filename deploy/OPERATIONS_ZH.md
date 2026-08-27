@@ -20,7 +20,7 @@ sudo /opt/sukaseafood-review/deploy/scripts/first_deploy.sh <review-git-revision
 
 脚本先检查 `/opt` 至少有 5 GiB 可用空间、内存至少 1 GiB、Docker/Compose 可用，并检查或创建 `sukaseafood-edge`。它以 `umask 077` 在服务器本机生成四个独立密钥，写入 `deploy/.env` 并设为 `0600`，不会输出密钥值，也不会覆盖已有文件或删除数据库卷。
 
-固定账号恰好六个：Hassan、Xinhui、Wahid、Sharmaa、Yiming 为 reviewer，Mao 为唯一 admin。首次初始化只在当前 SSH 终端显示一次临时密码；立即存入密码管理器。再次执行时显示 `accounts already initialized`，不重置密码。
+固定账号恰好六个：Hassan、Xinhui、Wahid、Sharmaa、Yiming 为 reviewer，Mao 为唯一 admin。首次初始化只在当前 SSH 终端显示一次临时密码；立即存入密码管理器。首次部署只创建账号，初始鱼种目录保持为空，由 Mao 在中文后台维护任意当前鱼种。再次执行时显示 `accounts already initialized`，不重置密码。
 
 ## 日常发布与预检
 
@@ -64,15 +64,15 @@ powershell -NoProfile -File deploy/scripts/deploy_from_windows.ps1 -SshHost dian
 
 恢复结束后重新运行预检。任何迁移前备份都必须先用 `pg_restore --list` 验证。
 
-## 导入 1,221 条候选
+## 采集与导入
 
-候选源文件只从受控 Windows 路径读取。先 dry-run：
+Mao 的正常四步流程是：在中文后台维护鱼种、下载 `collector/` 与当前配置、在 Windows 本地生成 `collector/output/candidates.csv`、回到后台预检查并显式提交。初始目录为空；CSV 可以包含任意有效行数和任意受支持来源组合。Windows 帮助脚本默认读取 `C:\Users\86166\Desktop\sukaSeafoodReview\collector\output\candidates.csv`。先 dry-run：
 
 ```powershell
 powershell -NoProfile -File deploy/scripts/import_candidates_from_windows.ps1
 ```
 
-脚本拒绝非 `.csv`、目录和 reparse point，计算 SHA-256，并上传为 `/opt/sukaseafood-review/imports/<sha256>.csv`；原始文件名不会进入远程命令。报告必须显示 `total=1221`、blocking errors 为 0，并列出各鱼种、Fish-Vista、iNaturalist、GBIF、Commons 来源、无效项和重复项。dry-run 不写 Candidate。
+脚本拒绝非 `.csv`、目录和 reparse point，计算 SHA-256，并上传为 `/opt/sukaseafood-review/imports/<sha256>.csv`；原始文件名不会进入远程命令。dry-run 报告必须显示 `blocking_errors=0` 且 `can_commit=true`，并列出实际的鱼种、来源、无效项和重复项；dry-run 不写 Candidate。
 
 人工复核报告后显式提交：
 
@@ -80,7 +80,7 @@ powershell -NoProfile -File deploy/scripts/import_candidates_from_windows.ps1
 powershell -NoProfile -File deploy/scripts/import_candidates_from_windows.ps1 -Commit
 ```
 
-提交命令在一个数据库事务内重新验证；首次应插入 1,221 条，所有 `current_reviewer_id` 均为 NULL。重复运行只报告 exact duplicates，不重复插入。抽样只读取 source_url、preview_url、original_url、license、attribution；服务器不会请求这些外部图片地址。
+提交命令在一个数据库事务内重新验证。随后脚本下载并读取 commit report，核对其中的 `file_sha256` 与本机 CSV 的 SHA-256 相同，并打印 `total`、`inserted`、`skipped_exact` 和 `possible_url_duplicates`。重复运行只报告 exact duplicates，不重复插入；服务器不会请求这些外部图片地址。
 
 ## 批次与离线回执
 
