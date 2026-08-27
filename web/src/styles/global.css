@@ -968,6 +968,18 @@ h1 {
   box-shadow: 0 0.6rem 1.8rem rgba(7, 59, 76, 0.07);
 }
 
+.admin-card-subsection {
+  margin: 1rem 0;
+  padding: 0.85rem;
+  border: 1px solid rgba(7, 59, 76, 0.14);
+  border-radius: 0.6rem;
+}
+
+.admin-card-subsection summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
 .admin-card-grid,
 .admin-stat-grid {
   display: grid;

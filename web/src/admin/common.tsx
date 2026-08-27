@@ -11,6 +11,7 @@ export interface AdminTabProps {
   sources: string[];
   directoriesUnavailable: boolean;
   refreshDirectories: () => void;
+  openSpecies: () => void;
 }
 
 export interface QueryState<T> {

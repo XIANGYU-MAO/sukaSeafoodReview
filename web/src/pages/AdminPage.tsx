@@ -16,7 +16,7 @@ const TABS = [
   ["candidates", "候选图片", CandidatesTab],
   ["species", "鱼种管理", SpeciesTab],
   ["reviews", "审核历史", ReviewsTab],
-  ["imports", "导入", ImportsTab],
+  ["imports", "采集与导入", ImportsTab],
   ["exports", "训练集同步", ExportsTab],
   ["users", "账号", UsersTab],
 ] as const;
@@ -56,6 +56,7 @@ export function AdminPage({ csrfToken, retryBootstrap }: { csrfToken: string; re
     sources: sourcesQuery.data?.sources ?? EMPTY_SOURCES,
     directoriesUnavailable: usersQuery.unavailable || speciesQuery.unavailable || sourcesQuery.unavailable,
     refreshDirectories,
+    openSpecies: () => select(2),
   };
 
   return <main className="admin-workspace" lang="zh-CN">

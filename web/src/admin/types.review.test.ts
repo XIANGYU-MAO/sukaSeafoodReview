@@ -1,9 +1,34 @@
 import { describe, expect, it } from "vitest";
 
 import { IDS, candidateFixture, currentFixture, exportBatch, speciesFixture } from "../test/task12Fixtures";
-import { parseCandidateReceipt, parseExportCreate, parseReceiptResponse, parseReviewReceipt, parseSpeciesReceipt } from "./types";
+import { parseCandidateReceipt, parseExportCreate, parseReceiptResponse, parseReviewReceipt, parseSpeciesList, parseSpeciesReceipt } from "./types";
+
+const SOURCE_OVERRIDES = {
+  inat_taxon_id: null,
+  gbif_taxon_key: null,
+  commons_category: null,
+  fish_vista_filter: null,
+};
+
+for (const species of [...speciesFixture.items, ...currentFixture.items.map((item) => item.species), candidateFixture.species]) {
+  Object.assign(species, SOURCE_OVERRIDES);
+}
 
 describe("Task 12 review runtime mutation contracts", () => {
+  it("requires every bounded nullable source override in species responses", () => {
+    const species = {
+      ...speciesFixture.items[0],
+      inat_taxon_id: 123,
+      gbif_taxon_key: 456,
+      commons_category: "Category:Test fish",
+      fish_vista_filter: "Test fish",
+    };
+    expect(parseSpeciesList({ total: 1, items: [species] }).items[0]).toMatchObject(species);
+    expect(() => parseSpeciesList({ total: 1, items: [{ ...species, inat_taxon_id: 0 }] })).toThrow("鱼种响应无效");
+    const missing = { ...species } as Record<string, unknown>;
+    delete missing.commons_category;
+    expect(() => parseSpeciesList({ total: 1, items: [missing] })).toThrow("鱼种响应无效");
+  });
   it("accepts pending batch IDs outside a partial upload but only accepts submitted successes", () => {
     const result = parseReceiptResponse({
       batch_id: IDS.batch,

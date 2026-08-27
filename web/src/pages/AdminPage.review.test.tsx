@@ -7,6 +7,8 @@ import { deferred, renderWithAuth } from "../test/helpers";
 import {
   IDS,
   candidatesFixture,
+  candidateFixture,
+  currentFixture,
   defaultAdminResponse,
   exportBatch,
   importPreviewFixture,
@@ -14,6 +16,19 @@ import {
   speciesFixture,
   speciesItems,
 } from "../test/task12Fixtures";
+
+const SOURCE_OVERRIDES = {
+  inat_taxon_id: null,
+  gbif_taxon_key: null,
+  commons_category: null,
+  fish_vista_filter: null,
+};
+
+for (const species of [
+  ...speciesFixture.items,
+  ...currentFixture.items.map((item) => item.species),
+  candidateFixture.species,
+]) Object.assign(species, SOURCE_OVERRIDES);
 
 function mockAdmin(overrides: (url: string, init?: RequestInit) => Response | Promise<Response> | undefined) {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -28,6 +43,34 @@ function mockAdmin(overrides: (url: string, init?: RequestInit) => Response | Pr
 async function openTab(name: string) {
   await userEvent.click(await screen.findByRole("tab", { name }));
 }
+
+it("guides collection through four steps with current downloads, copy, and species navigation", async () => {
+  mockAdmin(() => undefined);
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+
+  expect(await screen.findAllByRole("tab")).toHaveLength(7);
+  await user.click(screen.getByRole("tab", { name: "采集与导入" }));
+  for (const heading of ["1. 管理鱼种", "2. 准备本地采集器", "3. 本地生成 CSV", "4. 预检查并导入"]) {
+    expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+  }
+  expect(screen.getByRole("link", { name: "下载采集器 ZIP" })).toHaveAttribute("href", "/sukaseafood/review/downloads/sukaseafood-collector.zip");
+  expect(screen.getByRole("link", { name: "下载最新鱼种配置" })).toHaveAttribute("href", "/sukaseafood/api/v1/admin/collector/config");
+  await user.click(screen.getByRole("button", { name: "复制命令" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("命令已复制。");
+  await user.click(screen.getByRole("button", { name: "前往鱼种管理" }));
+  expect(screen.getByRole("tab", { name: "鱼种管理" })).toHaveAttribute("aria-selected", "true");
+});
+
+it("blocks configuration download until at least one active species is available", async () => {
+  const user = userEvent.setup();
+  mockAdmin((url, init) => url.includes("/admin/species?") && !init?.method ? jsonResponse({ total: 0, items: [] }) : undefined);
+  renderWithAuth(<App />, "/admin");
+  await user.click(await screen.findByRole("tab", { name: "采集与导入" }));
+
+  expect(screen.getByRole("button", { name: "下载最新鱼种配置" })).toBeDisabled();
+  expect(screen.getByText("请先在鱼种管理中新增并启用鱼种。")).toBeInTheDocument();
+});
 
 it("loads every species directory page with URLSearchParams and exposes the 101st species", async () => {
   const many = Array.from({ length: 101 }, (_, index) => ({
@@ -174,7 +217,7 @@ it("aborts preview A when B is selected and only commits B's in-memory token", a
   });
   const user = userEvent.setup();
   renderWithAuth(<App />, "/admin");
-  await openTab("导入");
+  await openTab("采集与导入");
   const input = screen.getByLabelText("候选 CSV 文件");
   await user.upload(input, new File(["A"], "a.csv", { type: "text/csv" }));
   await user.click(screen.getByRole("button", { name: "预检查" }));
@@ -199,7 +242,7 @@ it("locks file ownership while commit A is pending and applies its completion ex
   });
   const user = userEvent.setup();
   renderWithAuth(<App />, "/admin");
-  await openTab("导入");
+  await openTab("采集与导入");
   const input = screen.getByLabelText("候选 CSV 文件");
   await user.upload(input, new File(["A"], "a.csv", { type: "text/csv" }));
   await user.click(screen.getByRole("button", { name: "预检查" }));
@@ -238,7 +281,7 @@ it("ignores a pending import commit completion after unmount", async () => {
   });
   const user = userEvent.setup();
   const rendered = renderWithAuth(<App />, "/admin");
-  await openTab("导入");
+  await openTab("采集与导入");
   await user.upload(screen.getByLabelText("候选 CSV 文件"), new File(["A"], "a.csv", { type: "text/csv" }));
   await user.click(screen.getByRole("button", { name: "预检查" }));
   await user.click(await screen.findByRole("button", { name: "提交导入" }));
@@ -258,7 +301,7 @@ it("clears commit eligibility after a terminal preview-token conflict", async ()
   });
   const user = userEvent.setup();
   renderWithAuth(<App />, "/admin");
-  await openTab("导入");
+  await openTab("采集与导入");
   await user.upload(screen.getByLabelText("候选 CSV 文件"), new File(["A"], "a.csv", { type: "text/csv" }));
   await user.click(screen.getByRole("button", { name: "预检查" }));
   await user.click(await screen.findByRole("button", { name: "提交导入" }));
@@ -274,7 +317,7 @@ it("renders a validated fatal import report without enabling commit", async () =
   }, 413) : undefined);
   const user = userEvent.setup();
   renderWithAuth(<App />, "/admin");
-  await openTab("导入");
+  await openTab("采集与导入");
   await user.upload(screen.getByLabelText("候选 CSV 文件"), new File(["A"], "a.csv", { type: "text/csv" }));
   await user.click(screen.getByRole("button", { name: "预检查" }));
 

@@ -25,6 +25,10 @@ export interface AdminSpecies {
   name_zh: string;
   name_en: string;
   scientific_name: string;
+  inat_taxon_id: number | null;
+  gbif_taxon_key: number | null;
+  commons_category: string | null;
+  fish_vista_filter: string | null;
   active: boolean;
   sort_order?: number;
   candidate_count?: number;
@@ -172,11 +176,11 @@ export function parseSpeciesList(value: unknown): AdminSpeciesList {
   } catch { throw new Error("鱼种响应无效"); }
 }
 
-export function parseSpeciesReceipt(value: unknown, expected: { id?: string; code?: string; submitted: Partial<Pick<Required<AdminSpecies>, "name_zh" | "name_en" | "scientific_name" | "sort_order" | "active">>; create?: boolean }): Required<AdminSpecies> {
+export function parseSpeciesReceipt(value: unknown, expected: { id?: string; code?: string; submitted: Partial<Pick<Required<AdminSpecies>, "name_zh" | "name_en" | "scientific_name" | "inat_taxon_id" | "gbif_taxon_key" | "commons_category" | "fish_vista_filter" | "sort_order" | "active">>; create?: boolean }): Required<AdminSpecies> {
   try {
     const item = parseSpeciesFull(value);
     if ((expected.id && item.id !== expected.id) || (expected.code && item.code !== expected.code) || (expected.create && item.candidate_count !== 0)) fail();
-    for (const key of ["name_zh", "name_en", "scientific_name", "sort_order", "active"] as const) if (key in expected.submitted && item[key] !== expected.submitted[key]) fail();
+    for (const key of ["name_zh", "name_en", "scientific_name", "inat_taxon_id", "gbif_taxon_key", "commons_category", "fish_vista_filter", "sort_order", "active"] as const) if (key in expected.submitted && item[key] !== expected.submitted[key]) fail();
     return item;
   } catch { throw new Error("鱼种操作结果无效"); }
 }
@@ -363,14 +367,14 @@ export function parseExportConflict(errorBody: unknown): { code: "EXPORT_SCOPE_O
 }
 
 function parseSpeciesFull(value: unknown): Required<AdminSpecies> {
-  const item = object(value); exact(item, ["id", "code", "name_zh", "name_en", "scientific_name", "active", "sort_order", "candidate_count"]);
-  const summary = Object.fromEntries(["id", "code", "name_zh", "name_en", "scientific_name", "active"].map((key) => [key, item[key]]));
+  const item = object(value); exact(item, ["id", "code", "name_zh", "name_en", "scientific_name", "inat_taxon_id", "gbif_taxon_key", "commons_category", "fish_vista_filter", "active", "sort_order", "candidate_count"]);
+  const summary = Object.fromEntries(["id", "code", "name_zh", "name_en", "scientific_name", "inat_taxon_id", "gbif_taxon_key", "commons_category", "fish_vista_filter", "active"].map((key) => [key, item[key]]));
   return { ...parseSpeciesSummary(summary), sort_order: signedInteger(item.sort_order), candidate_count: integer(item.candidate_count) } as Required<AdminSpecies>;
 }
 function parseSpeciesSummary(value: unknown): AdminSpecies {
-  const item = object(value); exact(item, ["id", "code", "name_zh", "name_en", "scientific_name", "active"]);
+  const item = object(value); exact(item, ["id", "code", "name_zh", "name_en", "scientific_name", "inat_taxon_id", "gbif_taxon_key", "commons_category", "fish_vista_filter", "active"]);
   const code = text(item.code, 32); if (!isSafeSpeciesCode(code)) fail();
-  return { id: uuid(item.id), code, name_zh: text(item.name_zh, 255), name_en: text(item.name_en, 255), scientific_name: text(item.scientific_name, 255), active: bool(item.active) };
+  return { id: uuid(item.id), code, name_zh: text(item.name_zh, 255), name_en: text(item.name_en, 255), scientific_name: text(item.scientific_name, 255), inat_taxon_id: item.inat_taxon_id === null ? null : positive(item.inat_taxon_id), gbif_taxon_key: item.gbif_taxon_key === null ? null : positive(item.gbif_taxon_key), commons_category: optionalText(item.commons_category, 512), fish_vista_filter: optionalText(item.fish_vista_filter, 255), active: bool(item.active) };
 }
 function parseUserSummary(value: unknown): AdminUserSummary { const item = object(value); exact(item, ["id", "display_name", "active"]); return { id: uuid(item.id), display_name: fixedName(item.display_name), active: bool(item.active) }; }
 function parseCandidateSummary(value: unknown): AdminCandidateSummary {

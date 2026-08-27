@@ -21,6 +21,20 @@ import {
   usersFixture,
 } from "../test/task12Fixtures";
 
+const SOURCE_OVERRIDES = {
+  inat_taxon_id: null,
+  gbif_taxon_key: null,
+  commons_category: null,
+  fish_vista_filter: null,
+};
+
+for (const species of [
+  ...speciesFixture.items,
+  ...currentFixture.items.map((item) => item.species),
+  candidateFixture.species,
+  reviewItem.species,
+]) Object.assign(species, SOURCE_OVERRIDES);
+
 function mockAdmin(overrides?: (url: string, init?: RequestInit) => Response | Promise<Response> | undefined) {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -58,7 +72,7 @@ describe("admin authorization and accessible shell", () => {
     const fetchMock = mockAdmin();
     const user = userEvent.setup();
     renderWithAuth(<App />, "/admin");
-    const labels = ["审核进度", "候选图片", "鱼种管理", "审核历史", "导入", "训练集同步", "账号"];
+    const labels = ["审核进度", "候选图片", "鱼种管理", "审核历史", "采集与导入", "训练集同步", "账号"];
 
     expect(await screen.findByRole("heading", { name: "管理后台" })).toBeVisible();
     expect(screen.queryByText("Mao 管理")).not.toBeInTheDocument();
@@ -200,6 +214,35 @@ describe("progress/current and candidate safety", () => {
 });
 
 describe("species and review administration", () => {
+  it("edits advanced source overrides as typed values and clears an override with JSON null", async () => {
+    const configured = {
+      ...speciesFixture.items[0],
+      inat_taxon_id: 123,
+      gbif_taxon_key: 456,
+      commons_category: "Category:Test fish",
+      fish_vista_filter: "Test fish",
+    };
+    const fetchMock = mockAdmin((url, init) => {
+      if (url.includes("/admin/species?") && !init?.method) return jsonResponse({ total: 1, items: [configured] });
+      if (url.endsWith(`/admin/species/${IDS.species1}`) && init?.method === "PATCH") {
+        return jsonResponse({ ...configured, inat_taxon_id: null });
+      }
+    });
+    const user = userEvent.setup();
+    renderWithAuth(<App />, "/admin");
+    await openTab("鱼种管理");
+    await user.click(await screen.findByRole("button", { name: "编辑 SF001" }));
+    await user.click(screen.getByText("高级来源配置（通常不需要填写）"));
+    const inaturalist = screen.getByLabelText("iNaturalist taxon ID");
+    expect(inaturalist).toHaveValue("123");
+    await user.clear(inaturalist);
+    await user.type(screen.getByLabelText("鱼种修改原因"), "改用自动解析");
+    await user.click(screen.getByRole("button", { name: "保存鱼种" }));
+
+    const call = fetchMock.mock.calls.find(([input]) => String(input).endsWith(`/admin/species/${IDS.species1}`));
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ inat_taxon_id: null, reason: "改用自动解析" });
+  });
+
   it("enforces Windows-safe species codes, reserved names, reasons, immutable code and no delete", async () => {
     const fetchMock = mockAdmin((url, init) => {
       if (url.endsWith("/admin/species") && init?.method === "POST") {
@@ -236,6 +279,10 @@ describe("species and review administration", () => {
           name_zh: "新鱼",
           name_en: "New fish",
           scientific_name: "Piscis novus",
+          inat_taxon_id: 123,
+          gbif_taxon_key: 456,
+          commons_category: "Category:Piscis novus",
+          fish_vista_filter: "Piscis novus",
           sort_order: 0,
           candidate_count: 0,
         }, 201);
@@ -252,9 +299,16 @@ describe("species and review administration", () => {
     await user.type(screen.getByLabelText("中文名"), "新鱼");
     await user.type(screen.getByLabelText("英文名"), "New fish");
     await user.type(screen.getByLabelText("学名"), "Piscis novus");
+    await user.click(screen.getByText("高级来源配置（通常不需要填写）"));
+    await user.type(screen.getByLabelText("iNaturalist taxon ID"), "123");
+    await user.type(screen.getByLabelText("GBIF taxon key"), "456");
+    await user.type(screen.getByLabelText("Commons 分类"), "Category:Piscis novus");
+    await user.type(screen.getByLabelText("Fish-Vista 过滤名称"), "Piscis novus");
     await user.type(screen.getByLabelText("鱼种修改原因"), "新增目录");
     await user.click(screen.getByRole("button", { name: "创建鱼种" }));
     expect(await screen.findByRole("status")).toHaveTextContent("鱼种已创建");
+    const create = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith("/admin/species") && init?.method === "POST");
+    expect(JSON.parse(String(create?.[1]?.body))).toEqual({ code: "SF003", name_zh: "新鱼", name_en: "New fish", scientific_name: "Piscis novus", inat_taxon_id: 123, gbif_taxon_key: 456, commons_category: "Category:Piscis novus", fish_vista_filter: "Piscis novus", active: true, sort_order: 0, reason: "新增目录" });
     await user.click(screen.getByRole("button", { name: "编辑 SF001" }));
     await user.click(screen.getByRole("button", { name: "停用鱼种" }));
     await user.type(screen.getByLabelText("鱼种修改原因"), "目录暂停维护");
@@ -336,7 +390,7 @@ describe("import, export and one-time password workflows", () => {
     });
     const user = userEvent.setup();
     renderWithAuth(<App />, "/admin");
-    await openTab("导入");
+    await openTab("采集与导入");
     const file = new File(["seafood_code\nSF001"], "candidates.csv", { type: "text/csv" });
     await user.upload(screen.getByLabelText("候选 CSV 文件"), file);
     await user.click(screen.getByRole("button", { name: "预检查" }));
@@ -361,7 +415,7 @@ describe("import, export and one-time password workflows", () => {
     });
     const user = userEvent.setup();
     renderWithAuth(<App />, "/admin");
-    await openTab("导入");
+    await openTab("采集与导入");
     await user.upload(screen.getByLabelText("候选 CSV 文件"), new File(["seafood_code\nSF001"], "candidates.csv", { type: "text/csv" }));
     await user.click(screen.getByRole("button", { name: "预检查" }));
     await user.click(await screen.findByRole("button", { name: "提交导入" }));
