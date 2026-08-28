@@ -74,6 +74,7 @@ export function ImportsTab(props: AdminTabProps) {
   const [collectionMode, setCollectionMode] = useState<CollectionMode>("initial");
   const [maxPerSpecies, setMaxPerSpecies] = useState(100);
   const [minimumPerSpecies, setMinimumPerSpecies] = useState(300);
+  const [maximumTotalPerSpecies, setMaximumTotalPerSpecies] = useState(500);
   const [selectedSources, setSelectedSources] = useState<string[]>(DEFAULT_COLLECTOR_SOURCES);
   const [smithsonianApiKey, setSmithsonianApiKey] = useState("");
   const [copyState, setCopyState] = useState<"idle" | "success" | "error">("idle");
@@ -97,8 +98,8 @@ export function ImportsTab(props: AdminTabProps) {
     const key = selectedSources.includes("smithsonian") && smithsonianApiKey
       ? ` --smithsonian-api-key ${smithsonianApiKey}`
       : "";
-    return `${python} ${separator}collect_fish_images.py --config ${separator}species_config.json${sources}${key} --max-per-species ${maxPerSpecies} --minimum-total-per-species ${minimumPerSpecies}${resume}`;
-  }, [collectionMode, maxPerSpecies, minimumPerSpecies, platform, selectedSources, smithsonianApiKey]);
+    return `${python} ${separator}collect_fish_images.py --config ${separator}species_config.json${sources}${key} --max-per-species ${maxPerSpecies} --minimum-total-per-species ${minimumPerSpecies} --maximum-total-per-species ${maximumTotalPerSpecies}${resume}`;
+  }, [collectionMode, maxPerSpecies, maximumTotalPerSpecies, minimumPerSpecies, platform, selectedSources, smithsonianApiKey]);
 
   useEffect(() => setCopyState("idle"), [command]);
 
@@ -319,8 +320,11 @@ export function ImportsTab(props: AdminTabProps) {
           })}
         </div></div>
         {selectedSources.includes("smithsonian") ? <div className="command-number-field command-number-field--wide"><label htmlFor="smithsonian-api-key">Smithsonian API Key</label><input id="smithsonian-api-key" type="password" autoComplete="off" value={smithsonianApiKey} onChange={(event) => setSmithsonianApiKey(event.target.value.replace(/[^A-Za-z0-9_-]/g, ""))} /><small>先在 api.data.gov 免费申请；未填写时 Smithsonian 会提示缺少密钥，其余来源仍可继续。</small></div> : null}
-        <div className="command-number-field command-number-field--target"><div className="admin-field-label"><label htmlFor="collector-minimum">每个鱼种候选数至少达到</label><HelpHint context="字段" label="最低候选目标">这是服务器中每个鱼种希望达到的候选图片总数。最新鱼种配置会记录当前数量；采集器只补不足的鱼种，达到目标的会跳过。来源图片可能不足或被系统判重，所以一次未达到时，先导入 CSV，再重新下载最新配置继续补采。</HelpHint></div><input id="collector-minimum" type="number" min="1" max="10000" value={minimumPerSpecies} onChange={(event) => setMinimumPerSpecies(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></div>
-        <div className="command-number-field"><div className="admin-field-label"><label htmlFor="collector-max">每个鱼种、每个来源最多采集</label><HelpHint context="字段" label="采集数量参数">这是每个鱼种在每个来源尝试收集的上限，不是最终保证数量。审核后不够时，调大这个数字并选择“数量不足时补采”；采集器保留旧 CSV，导入时系统也会按来源身份和原图地址自动去重。</HelpHint></div><input id="collector-max" type="number" min="1" max="10000" value={maxPerSpecies} onChange={(event) => setMaxPerSpecies(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></div>
+        <div className="command-number-grid">
+          <div className="command-number-field command-number-field--target"><div className="admin-field-label"><label htmlFor="collector-minimum">每个鱼种候选数至少达到</label><HelpHint context="字段" label="最低候选目标">当前候选数低于这个数字时才会启动采集；达到后会跳过该鱼种。默认是 300。</HelpHint></div><input id="collector-minimum" type="number" min="1" max="10000" value={minimumPerSpecies} onChange={(event) => { const next = Math.max(1, Math.min(10000, Number(event.target.value) || 1)); setMinimumPerSpecies(next); setMaximumTotalPerSpecies((current) => Math.max(current, next)); }} /></div>
+          <div className="command-number-field command-number-field--target"><div className="admin-field-label"><label htmlFor="collector-maximum-total">每个鱼种候选数最多达到</label><HelpHint context="字段" label="最高候选目标">当鱼种低于最低目标并开始采集后，新增候选不会让服务器候选总数超过这个数字。默认是 500，且不能小于最低目标。</HelpHint></div><input id="collector-maximum-total" type="number" min={minimumPerSpecies} max="10000" value={maximumTotalPerSpecies} onChange={(event) => setMaximumTotalPerSpecies(Math.max(minimumPerSpecies, Math.min(10000, Number(event.target.value) || minimumPerSpecies)))} /></div>
+          <div className="command-number-field"><div className="admin-field-label"><label htmlFor="collector-max">每个鱼种、每个来源最多采集</label><HelpHint context="字段" label="采集数量参数">这是每个鱼种在每个来源尝试收集的上限，不是最终保证数量。审核后不够时，调大这个数字并选择“数量不足时补采”；采集器保留旧 CSV，导入时系统也会按来源身份和原图地址自动去重。</HelpHint></div><input id="collector-max" type="number" min="1" max="10000" value={maxPerSpecies} onChange={(event) => setMaxPerSpecies(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></div>
+        </div>
       </div>
       {activeSpecies.length ? <ul className="collector-shortfalls" aria-label="鱼种候选缺口">{activeSpecies.map((species) => {
         const shortfall = Math.max(0, minimumPerSpecies - species.candidate_count);

@@ -17,7 +17,7 @@ tracked example, then replace its fictional entries with the active catalog:
 
 ```powershell
 Copy-Item .\species_config.example.json .\species_config.json
-python .\collect_fish_images.py --config .\species_config.json --source inat --source gbif --source ala --source obis --max-per-species 100 --minimum-total-per-species 300
+python .\collect_fish_images.py --config .\species_config.json --source inat --source gbif --source ala --source obis --max-per-species 100 --minimum-total-per-species 300 --maximum-total-per-species 500
 python .\collect_fish_images.py --config .\species_config.json --source commons --species FISH_A --resume
 ```
 
@@ -50,11 +50,13 @@ manifest. The server independently deduplicates again during upload.
 
 Smithsonian requires a free Open Access API key. Pass
 `--smithsonian-api-key YOUR_KEY` or set `SMITHSONIAN_API_KEY`; the key remains
-local and is never part of the CSV. `--minimum-total-per-species 300` skips
-species already at 300 server candidates and collects only each remaining
-shortfall, stopping once it is filled. A source may not have enough usable
-images, and import deduplication can leave the server below the target; import
-the CSV, download a fresh configuration, and run replenishment again.
+local and is never part of the CSV. `--minimum-total-per-species 300` starts
+collection only while a species has fewer than 300 server candidates;
+`--maximum-total-per-species 500` then limits the additions so the server total
+does not exceed 500. The maximum must not be below the minimum. Per-source
+limits, unavailable images, and import deduplication can still leave the server
+below the target; import the CSV, download a fresh configuration, and run
+replenishment again.
 `--download-images` is optional; metadata
 collection is the default.
 

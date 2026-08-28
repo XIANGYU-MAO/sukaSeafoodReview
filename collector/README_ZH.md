@@ -15,7 +15,7 @@ Smithsonian Open Access 收集带许可证的候选图片 metadata，并写入�
 
 ```powershell
 Copy-Item .\species_config.example.json .\species_config.json
-python .\collect_fish_images.py --config .\species_config.json --source inat --source gbif --source ala --source obis --max-per-species 100 --minimum-total-per-species 300
+python .\collect_fish_images.py --config .\species_config.json --source inat --source gbif --source ala --source obis --max-per-species 100 --minimum-total-per-species 300 --maximum-total-per-species 500
 python .\collect_fish_images.py --config .\species_config.json --source commons --species FISH_A --resume
 ```
 
@@ -49,10 +49,10 @@ Smithsonian 需要免费 API Key：勾选该来源后使用管理后台生成的
 `SMITHSONIAN_API_KEY`。密钥不需要上传到审核系统。默认只收 metadata；
 `--download-images` 为可选项。
 
-`--minimum-total-per-species 300` 表示服务器中每个鱼种至少希望有 300 个候选。采集器
-根据配置中的 `candidate_count` 跳过已达标鱼种，只采集未达标鱼种的缺口，并在缺口
-填满时停止。来源图片不足或导入判重时，一次采集可能仍未达标；先导入 CSV，再从
-管理后台重新下载最新配置继续补采即可。
+`--minimum-total-per-species 300` 表示当前候选数低于 300 时才启动该鱼种的采集；
+`--maximum-total-per-species 500` 表示启动后最多补到服务器总数 500。最大值不能小于
+最小值。每个来源仍受 `--max-per-species` 限制，所以来源图片不足或导入判重时，一次
+采集可能仍未达标；先导入 CSV，再从管理后台重新下载最新配置继续补采即可。
 
 ## 来源与许可证规则
 

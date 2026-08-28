@@ -503,6 +503,59 @@ def test_main_collects_only_each_species_shortfall_until_minimum(monkeypatch, tm
         assert len(list(csv.DictReader(handle))) == 7
 
 
+def test_main_collects_up_to_total_maximum_once_species_is_below_minimum(monkeypatch, tmp_path):
+    config = tmp_path / "species_config.json"
+    config.write_text(json.dumps(dynamic_config()), encoding="utf-8")
+    calls = []
+
+    def rows(species, source, amount):
+        return [
+            {
+                "seafood_code": species["seafood_code"],
+                "source": source,
+                "source_record_id": f"{source}-{index}",
+                "image_url": f"https://example.test/{species['seafood_code']}/{source}-{index}.jpg",
+            }
+            for index in range(amount)
+        ]
+
+    class FakeCollector:
+        def __init__(self, **_kwargs):
+            pass
+
+        def collect_fish_vista(self, species, max_rows):
+            calls.append((species["seafood_code"], "fish-vista", max_rows))
+            return rows(species, "fish-vista", max_rows)
+
+        def collect_inat(self, species, max_rows):
+            calls.append((species["seafood_code"], "inat", max_rows))
+            return rows(species, "inat", max_rows)
+
+    monkeypatch.setattr(collector_module, "Collector", FakeCollector)
+    result = collector_module.main([
+        "--config", str(config),
+        "--source", "fish-vista",
+        "--source", "inat",
+        "--max-per-species", "5",
+        "--minimum-total-per-species", "10",
+        "--maximum-total-per-species", "12",
+        "--output-dir", str(tmp_path / "output"),
+    ])
+
+    assert result == 0
+    assert calls == [("FISH_B", "fish-vista", 5), ("FISH_B", "inat", 4)]
+    with (tmp_path / "output" / "candidates.csv").open(encoding="utf-8-sig", newline="") as handle:
+        assert len(list(csv.DictReader(handle))) == 9
+
+
+def test_main_rejects_total_maximum_below_minimum():
+    with pytest.raises(SystemExit, match="--maximum-total-per-species must be >= --minimum-total-per-species"):
+        collector_module.main([
+            "--minimum-total-per-species", "10",
+            "--maximum-total-per-species", "9",
+        ])
+
+
 def test_main_selects_all_configured_species_without_fixed_default(monkeypatch, tmp_path):
     config = tmp_path / "species_config.json"
     config.write_text(json.dumps(dynamic_config()), encoding="utf-8")

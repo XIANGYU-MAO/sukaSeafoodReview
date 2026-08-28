@@ -1990,6 +1990,7 @@ h1 {
 .command-pill-group--sources {
   display: flex;
   align-items: stretch;
+  margin-top: 0.75rem;
 }
 
 .command-pill-group--sources .pill-choice {
@@ -2010,6 +2011,13 @@ h1 {
   border: 1px solid #c8dcde;
   border-radius: 0.9rem;
   background: #f8fcfb;
+}
+
+.command-number-grid {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
 }
 
 .collector-shortfalls {
@@ -2256,6 +2264,7 @@ h1 {
 
 @media (max-width: 42rem) {
   .command-options,
+  .command-number-grid,
   .export-batch-grid {
     grid-template-columns: minmax(0, 1fr);
   }

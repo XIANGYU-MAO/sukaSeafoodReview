@@ -1192,6 +1192,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--species", action="append", help="Seafood code, e.g. FISH_A. Repeat for multiple. Default: all configured species.")
     p.add_argument("--max-per-species", type=int, default=100, help="Maximum candidate rows per species per source (default 100).")
     p.add_argument("--minimum-total-per-species", type=int, help="Collect only the shortfall needed for each species to reach this server candidate total.")
+    p.add_argument("--maximum-total-per-species", type=int, help="When collection is needed, stop before the server candidate total would exceed this value.")
     p.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument("--download-images", action="store_true", help="Download image bytes after metadata collection. Default is metadata-only.")
     p.add_argument("--resume", action="store_true", help="Merge newly collected rows into an existing output/candidates.csv instead of overwriting it.")
@@ -1204,6 +1205,14 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--max-per-species must be >= 1")
     if args.minimum_total_per_species is not None and args.minimum_total_per_species < 1:
         raise SystemExit("--minimum-total-per-species must be >= 1")
+    if args.maximum_total_per_species is not None and args.maximum_total_per_species < 1:
+        raise SystemExit("--maximum-total-per-species must be >= 1")
+    if (
+        args.minimum_total_per_species is not None
+        and args.maximum_total_per_species is not None
+        and args.maximum_total_per_species < args.minimum_total_per_species
+    ):
+        raise SystemExit("--maximum-total-per-species must be >= --minimum-total-per-species")
     cfg = load_config(args.config)
     selected = set(args.species or [])
     species_list = [x for x in cfg["species"] if not selected or x["seafood_code"] in selected]
@@ -1250,13 +1259,23 @@ def main(argv: list[str] | None = None) -> int:
     for species in species_list:
         remaining = None
         if args.minimum_total_per_species is not None:
-            remaining = max(0, args.minimum_total_per_species - species["candidate_count"])
-            if remaining == 0:
+            if species["candidate_count"] >= args.minimum_total_per_species:
                 print(
-                    f"[{species['seafood_code']}] already has {species['candidate_count']} server candidates; target reached, skipping",
+                    f"[{species['seafood_code']}] already has {species['candidate_count']} server candidates; minimum reached, skipping",
                     file=sys.stderr,
                 )
                 continue
+        if args.maximum_total_per_species is not None:
+            remaining = max(0, args.maximum_total_per_species - species["candidate_count"])
+        elif args.minimum_total_per_species is not None:
+            remaining = max(0, args.minimum_total_per_species - species["candidate_count"])
+        if remaining == 0:
+            print(
+                f"[{species['seafood_code']}] already has {species['candidate_count']} server candidates; maximum reached, skipping",
+                file=sys.stderr,
+            )
+            continue
+        if remaining is not None:
             print(
                 f"[{species['seafood_code']}] server has {species['candidate_count']}; collecting up to {remaining} new candidates",
                 file=sys.stderr,

@@ -76,11 +76,13 @@ it("switches command syntax for Unix replenishment and accepts a CSV dropped ont
   await user.click(screen.getByRole("button", { name: "数量不足时补采" }));
   const minimum = screen.getByRole("spinbutton", { name: "每个鱼种候选数至少达到" });
   fireEvent.change(minimum, { target: { value: "300" } });
+  const maximum = screen.getByRole("spinbutton", { name: "每个鱼种候选数最多达到" });
+  fireEvent.change(maximum, { target: { value: "450" } });
   expect(screen.getByRole("list", { name: "鱼种候选缺口" })).toHaveTextContent("SF001测试鱼当前 2还差 298");
   expect(screen.getByRole("list", { name: "鱼种候选缺口" })).toHaveTextContent("SF002其他鱼当前 1还差 299");
   const limit = screen.getByRole("spinbutton", { name: "每个鱼种、每个来源最多采集" });
   fireEvent.change(limit, { target: { value: "250" } });
-  expect(screen.getByText(/python \.\/collect_fish_images\.py.*--max-per-species 250 --minimum-total-per-species 300 --resume/)).toBeInTheDocument();
+  expect(screen.getByText(/python \.\/collect_fish_images\.py.*--max-per-species 250 --minimum-total-per-species 300 --maximum-total-per-species 450 --resume/)).toBeInTheDocument();
   expect(screen.queryByText(/python3/)).not.toBeInTheDocument();
 
   const dropped = new File(["seafood_code\nSF001"], "dropped.csv", { type: "text/csv" });
@@ -172,6 +174,7 @@ it("lets the administrator choose exactly which collectors appear in the generat
 
   const sourceGroup = screen.getByRole("group", { name: "采集来源" });
   expect(getComputedStyle(sourceGroup).display).toBe("flex");
+  expect(getComputedStyle(sourceGroup).marginTop).toBe("0.75rem");
   expect(within(sourceGroup).getAllByRole("button")).toHaveLength(8);
   expect(screen.getByText(/--source fish-vista/)).toBeInTheDocument();
   expect(screen.getByText(/--source ala/)).toBeInTheDocument();
