@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 
 import { CandidatesTab } from "../admin/CandidatesTab";
+import { AccessSettingsTab } from "../admin/AccessSettingsTab";
 import { ExportsTab } from "../admin/ExportsTab";
 import { ImportsTab } from "../admin/ImportsTab";
 import { ProgressTab } from "../admin/ProgressTab";
@@ -29,6 +30,7 @@ const TAB_GROUPS = [
   ] },
   { key: "system", label: "系统管理", tabs: [
     ["users", "账号", UsersTab],
+    ["access-settings", "访问设置", AccessSettingsTab],
   ] },
 ] as const satisfies readonly TabGroup[];
 const TABS = TAB_GROUPS.reduce<TabDefinition[]>((tabs, group) => {

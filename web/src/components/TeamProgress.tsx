@@ -27,11 +27,17 @@ export function TeamProgress({ data }: { data: ProgressResponse }) {
           </div>
         ))}
       </div>
-      <div className="decision-counts" aria-label={t("overallDecisions")}>
+      <div className="decision-stat-grid" role="group" aria-label={t("overallDecisions")}>
         {(["APPROVED", "REJECTED", "UNSURE"] as const).map((code) => (
-          <span key={code}>{decisionLabel(locale, code)}: {data.decision_counts[code]}</span>
+          <div className={`progress-stat progress-stat--${code.toLowerCase()}`} key={code}>
+            <span>{decisionLabel(locale, code)}</span>
+            <strong className="progress-stat__value">{data.decision_counts[code]}</strong>
+          </div>
         ))}
-        <span>{t("todayProgress")}{locale === "zh" ? "：" : ": "}{data.today_count}</span>
+        <div className="progress-stat progress-stat--today">
+          <span>{t("todayProgress")}</span>
+          <strong className="progress-stat__value">{data.today_count}</strong>
+        </div>
       </div>
       <div className="progress-table-wrap">
         <table className="progress-table">

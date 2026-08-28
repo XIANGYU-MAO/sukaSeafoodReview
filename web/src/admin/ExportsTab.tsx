@@ -43,6 +43,7 @@ export function ExportsTab(props: AdminTabProps) {
   const [scope, setScope] = useState("");
   const [pending, setPending] = useState(false);
   const [draggingBatchId, setDraggingBatchId] = useState<string | null>(null);
+  const [receiptFallbacks, setReceiptFallbacks] = useState<Set<string>>(() => new Set());
   const [notice, setNotice] = useState<{
     kind: "error" | "success";
     text: string;
@@ -291,6 +292,7 @@ export function ExportsTab(props: AdminTabProps) {
                   {data.items.map((batch) => {
                     const uploadDisabled =
                       batch.status !== "pending" || pending || unavailable || props.directoriesUnavailable;
+                    const receiptFallbackOpen = receiptFallbacks.has(batch.id);
                     return (
                       <article className="export-batch-card" key={batch.id}>
                         <header className="export-batch-card__header">
@@ -330,43 +332,61 @@ export function ExportsTab(props: AdminTabProps) {
                           </a>
                         ) : null}
                         {batch.status === "pending" ? (
-                          <div
-                            className={`receipt-drop-zone${draggingBatchId === batch.id ? " receipt-drop-zone--active" : ""}`}
-                            onDragEnter={(event) => {
-                              event.preventDefault();
-                              if (!uploadDisabled) setDraggingBatchId(batch.id);
-                            }}
-                            onDragOver={(event) => event.preventDefault()}
-                            onDragLeave={() => setDraggingBatchId((current) =>
-                              current === batch.id ? null : current
-                            )}
-                            onDrop={(event) => {
-                              event.preventDefault();
-                              setDraggingBatchId(null);
-                              if (!uploadDisabled) {
-                                void receiptFile(batch, event.dataTransfer.files?.[0] ?? null);
-                              }
-                            }}
-                          >
-                            <strong>把 JSON 回执拖到这里</strong>
-                            <small>仅在自动提交失败时使用</small>
-                            <span>或</span>
-                            <label className="receipt-upload" htmlFor={`receipt-${batch.id}`}>
-                              选择 JSON 回执
-                            </label>
-                            <input
-                              id={`receipt-${batch.id}`}
-                              className="receipt-file-input"
-                              aria-label={`上传 ${batch.id} 回执`}
-                              type="file"
-                              accept=".json,application/json"
-                              disabled={uploadDisabled}
-                              onChange={(event) => {
-                                const file = event.target.files?.[0] ?? null;
-                                event.currentTarget.value = "";
-                                void receiptFile(batch, file);
+                          <div className="receipt-fallback">
+                            <button
+                              type="button"
+                              className="receipt-fallback__toggle"
+                              aria-expanded={receiptFallbackOpen}
+                              aria-controls={`receipt-fallback-${batch.id}`}
+                              onClick={() => setReceiptFallbacks((current) => {
+                                const next = new Set(current);
+                                if (next.has(batch.id)) next.delete(batch.id);
+                                else next.add(batch.id);
+                                return next;
+                              })}
+                            >
+                              <span className="receipt-fallback__question" aria-hidden="true">?</span>
+                              自动化工具上传失败？
+                            </button>
+                            {receiptFallbackOpen ? <div
+                              id={`receipt-fallback-${batch.id}`}
+                              className={`receipt-drop-zone${draggingBatchId === batch.id ? " receipt-drop-zone--active" : ""}`}
+                              onDragEnter={(event) => {
+                                event.preventDefault();
+                                if (!uploadDisabled) setDraggingBatchId(batch.id);
                               }}
-                            />
+                              onDragOver={(event) => event.preventDefault()}
+                              onDragLeave={() => setDraggingBatchId((current) =>
+                                current === batch.id ? null : current
+                              )}
+                              onDrop={(event) => {
+                                event.preventDefault();
+                                setDraggingBatchId(null);
+                                if (!uploadDisabled) {
+                                  void receiptFile(batch, event.dataTransfer.files?.[0] ?? null);
+                                }
+                              }}
+                            >
+                              <strong>把 JSON 回执拖到这里</strong>
+                              <small>这里上传的是同步工具生成的 JSON 回执，不是任务 CSV。</small>
+                              <span>或</span>
+                              <label className="receipt-upload" htmlFor={`receipt-${batch.id}`}>
+                                选择 JSON 回执
+                              </label>
+                              <input
+                                id={`receipt-${batch.id}`}
+                                className="receipt-file-input"
+                                aria-label={`上传 ${batch.id} 回执`}
+                                type="file"
+                                accept=".json,application/json"
+                                disabled={uploadDisabled}
+                                onChange={(event) => {
+                                  const file = event.target.files?.[0] ?? null;
+                                  event.currentTarget.value = "";
+                                  void receiptFile(batch, file);
+                                }}
+                              />
+                            </div> : null}
                           </div>
                         ) : null}
                         <div className="export-batch-actions">

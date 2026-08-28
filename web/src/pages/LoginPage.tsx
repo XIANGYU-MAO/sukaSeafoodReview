@@ -82,6 +82,10 @@ export function LoginPage() {
     }
   }
 
+  const alphabeticalNames = loginOptions?.login_name_mode === "choices"
+    ? [...loginOptions.names].sort((left, right) => left.localeCompare(right, "en"))
+    : [];
+
   return (
     <main className="auth-layout">
       <section className="auth-card" aria-labelledby="login-title">
@@ -93,7 +97,7 @@ export function LoginPage() {
         <div className="brand-mark" aria-hidden="true">海</div>
         <p className="eyebrow">{t("loginEyebrow")}</p>
         <h1 id="login-title">{t("loginTitle")}</h1>
-        <p className="auth-intro">{t(loginOptions?.login_name_mode === "manual" ? "loginIntroManual" : "loginIntro")}</p>
+        {loginOptions?.login_name_mode === "choices" ? <p className="auth-intro">{t("loginIntro")}</p> : null}
 
         {successMessageKey ? <p className="notice notice--success">{t(successMessageKey)}</p> : null}
         {namesError ? (
@@ -109,7 +113,7 @@ export function LoginPage() {
               <legend>{t("chooseName")}</legend>
               <PillChoiceGroup
                 label={t("chooseName")}
-                options={loginOptions.names}
+                options={alphabeticalNames}
                 value={selectedName}
                 onChange={setSelectedName}
                 disabled={pending}

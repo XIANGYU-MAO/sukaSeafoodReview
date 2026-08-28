@@ -54,15 +54,15 @@ describe("admin authorization and accessible shell", () => {
     expect(calls.some((url) => url.includes("/admin/"))).toBe(false);
   });
 
-  it("groups exactly seven fixed-Chinese tabs by function while retaining global roving keyboard selection", async () => {
+  it("groups all fixed-Chinese tabs by function while retaining global roving keyboard selection", async () => {
     const fetchMock = mockAdmin();
     const user = userEvent.setup();
     renderWithAuth(<App />, "/admin");
-    const labels = ["审核进度", "候选图片", "鱼种管理", "审核历史", "采集与导入", "训练集同步", "账号"];
+    const labels = ["审核进度", "候选图片", "鱼种管理", "审核历史", "采集与导入", "训练集同步", "账号", "访问设置"];
 
     expect(await screen.findByRole("heading", { name: "管理后台" })).toBeVisible();
     expect(screen.queryByText("Mao 管理")).not.toBeInTheDocument();
-    expect(await screen.findAllByRole("tab")).toHaveLength(7);
+    expect(await screen.findAllByRole("tab")).toHaveLength(8);
     const reviewGroup = screen.getByRole("group", { name: "审核工作" });
     const collectionGroup = screen.getByRole("group", { name: "鱼种与采集" });
     const trainingGroup = screen.getByRole("group", { name: "训练数据" });
@@ -71,6 +71,7 @@ describe("admin authorization and accessible shell", () => {
     for (const label of ["鱼种管理", "采集与导入"]) expect(within(collectionGroup).getByRole("tab", { name: label })).toBeVisible();
     expect(within(trainingGroup).getByRole("tab", { name: "训练集同步" })).toBeVisible();
     expect(within(systemGroup).getByRole("tab", { name: "账号" })).toBeVisible();
+    expect(within(systemGroup).getByRole("tab", { name: "访问设置" })).toBeVisible();
     for (const label of labels) expect(screen.getByRole("tab", { name: label })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "English" }));
     for (const label of labels) expect(screen.getByRole("tab", { name: label })).toBeVisible();
@@ -80,7 +81,7 @@ describe("admin authorization and accessible shell", () => {
     expect(screen.getByRole("tab", { name: "候选图片" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tabpanel")).toHaveAccessibleName("候选图片");
     await user.keyboard("{End}");
-    expect(screen.getByRole("tab", { name: "账号" })).toHaveAttribute("tabindex", "0");
+    expect(screen.getByRole("tab", { name: "访问设置" })).toHaveAttribute("tabindex", "0");
     await user.keyboard("{Home}");
     expect(screen.getByRole("tab", { name: "审核进度" })).toHaveAttribute("aria-selected", "true");
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/admin/candidates?"))).toBe(true);
@@ -109,6 +110,17 @@ describe("admin authorization and accessible shell", () => {
 });
 
 describe("progress/current and candidate safety", () => {
+  it("shows aggregate decisions as status-colored statistic cards", async () => {
+    mockAdmin();
+    renderWithAuth(<App />, "/admin");
+
+    const decisionCards = await screen.findByRole("group", { name: "全部审核结果" });
+    expect(within(decisionCards).getByText("保留").closest("div")).toHaveClass("progress-stat--approved");
+    expect(within(decisionCards).getByText("拒绝").closest("div")).toHaveClass("progress-stat--rejected");
+    expect(within(decisionCards).getByText("不确定").closest("div")).toHaveClass("progress-stat--unsure");
+    expect(within(decisionCards).getByText("今日").closest("div")).toHaveClass("progress-stat--today");
+  });
+
   it("bulk-disables the selected candidate source without editing cards one by one", async () => {
     const fetchMock = mockAdmin((url, init) => {
       if (url.endsWith("/admin/candidates/bulk-disable") && init?.method === "POST") {
@@ -592,6 +604,8 @@ describe("import, export and one-time password workflows", () => {
     expect(screen.getByText(/本地下载工具/)).toBeInTheDocument();
     expect(screen.getByText(/下载失败或尚未处理的项目仍可继续同步/)).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("Mao 的");
+    await user.click(screen.getByRole("button", { name: "自动化工具上传失败？" }));
+    expect(screen.getByLabelText(`上传 ${IDS.batch} 回执`)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "创建同步批次" }));
     expect(await screen.findByRole("status")).toHaveTextContent("没有待同步项目");
     await user.click(screen.getByRole("button", { name: "创建同步批次" }));

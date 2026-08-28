@@ -810,13 +810,38 @@ h1 {
   font-size: 1.5rem;
 }
 
-.decision-counts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem 1.2rem;
+.decision-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
   margin-bottom: 1rem;
+}
+
+.progress-stat--approved {
+  color: #0d5946;
+  background: #ccefe3;
+}
+
+.progress-stat--rejected {
+  color: #762d28;
+  background: #ffd9d4;
+}
+
+.progress-stat--unsure {
+  color: #684d0f;
+  background: #ffe9a8;
+}
+
+.progress-stat--today {
   color: #285761;
-  font-weight: 750;
+  background: #eaf7f5;
+}
+
+.progress-stat--approved .progress-stat__value,
+.progress-stat--rejected .progress-stat__value,
+.progress-stat--unsure .progress-stat__value,
+.progress-stat--today .progress-stat__value {
+  color: inherit;
 }
 
 .progress-table-wrap {
@@ -1557,7 +1582,7 @@ h1 {
 }
 
 .export-batch-grid {
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 46rem), 46rem));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 42rem), 42rem));
   justify-content: start;
   margin-top: 1rem;
 }
@@ -1658,6 +1683,40 @@ h1 {
 
 .export-archive-button {
   color: #762d28;
+}
+
+.receipt-fallback {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.receipt-fallback__toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 0.5rem;
+  padding: 0;
+  border: 0;
+  color: #075d6b;
+  background: transparent;
+  font: inherit;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.receipt-fallback__question {
+  display: inline-grid;
+  width: 1.55rem;
+  height: 1.55rem;
+  place-items: center;
+  border: 1px solid #78969c;
+  border-radius: 50%;
+  background: #fff;
+}
+
+.receipt-fallback__toggle:hover,
+.receipt-fallback__toggle:focus-visible {
+  color: #043c48;
 }
 
 .receipt-drop-zone {
@@ -2318,6 +2377,7 @@ h1 {
   .metadata-grid,
   .decision-actions,
   .progress-stat-grid,
+  .decision-stat-grid,
   .history-filters {
     grid-template-columns: 1fr;
   }

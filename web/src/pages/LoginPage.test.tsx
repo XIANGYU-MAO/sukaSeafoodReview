@@ -26,11 +26,14 @@ describe("login page", () => {
     );
   });
 
-  it("renders the exact six fixed ordered names from a valid server payload", async () => {
+  it("renders listed accounts alphabetically and explains the order", async () => {
     renderWithAuth(<App />);
 
     const radios = await screen.findAllByRole("radio");
-    expect(radios.map((radio) => radio.textContent?.replace("✓", "").trim())).toEqual(serverNames);
+    expect(radios.map((radio) => radio.textContent?.replace("✓", "").trim())).toEqual([
+      "Hassan", "Mao", "Sharmaa", "Wahid", "Xinhui", "Yiming",
+    ]);
+    expect(screen.getByText("请选择姓名（按字母顺序排列），然后输入密码。")).toBeInTheDocument();
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   });
 
@@ -326,6 +329,7 @@ describe("login page", () => {
 
     expect(await screen.findByRole("textbox", { name: "姓名" })).toBeInTheDocument();
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+    expect(screen.queryByText(/按字母顺序排列/)).not.toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "姓名" }), "Hassan");
     await user.type(screen.getByLabelText("密码"), "temporary-password");
     await user.click(screen.getByRole("button", { name: "登录" }));

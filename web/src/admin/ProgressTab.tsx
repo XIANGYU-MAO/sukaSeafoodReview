@@ -11,7 +11,12 @@ function ChineseProgress({ data }: { data: ProgressResponse }) {
   return <section className="team-progress" aria-labelledby="admin-progress-title">
     <div className="team-progress__heading"><div><p className="eyebrow">总完成率</p><h3 id="admin-progress-title">团队审核进度</h3></div><strong className="progress-percent">{data.completion_percent}%</strong></div>
     <div className="progress-stat-grid">{[["候选总数", data.total], ["已审核", data.reviewed], ["待审核", data.pending], ["当前打开", data.currently_open]].map(([label, value]) => <div className="progress-stat" key={label}><span>{label}</span><strong className="progress-stat__value">{value}</strong></div>)}</div>
-    <div className="decision-counts" aria-label="全部审核结果"><span>保留：{data.decision_counts.APPROVED}</span><span>拒绝：{data.decision_counts.REJECTED}</span><span>不确定：{data.decision_counts.UNSURE}</span><span>今日：{data.today_count}</span></div>
+    <div className="decision-stat-grid" role="group" aria-label="全部审核结果">
+      <div className="progress-stat progress-stat--approved"><span>保留</span><strong className="progress-stat__value">{data.decision_counts.APPROVED}</strong></div>
+      <div className="progress-stat progress-stat--rejected"><span>拒绝</span><strong className="progress-stat__value">{data.decision_counts.REJECTED}</strong></div>
+      <div className="progress-stat progress-stat--unsure"><span>不确定</span><strong className="progress-stat__value">{data.decision_counts.UNSURE}</strong></div>
+      <div className="progress-stat progress-stat--today"><span>今日</span><strong className="progress-stat__value">{data.today_count}</strong></div>
+    </div>
     <div className="progress-table-wrap"><table className="progress-table"><thead><tr><th>成员</th><th>已完成</th><th>保留</th><th>拒绝</th><th>不确定</th><th>今日</th></tr></thead><tbody>{data.members.map((member) => <tr key={member.name}><th>{member.name}</th><td>{member.completed}</td><td>{member.approved}</td><td>{member.rejected}</td><td>{member.unsure}</td><td>{member.today}</td></tr>)}</tbody></table></div>
     <p className="progress-explanation">进度按当前有效审核计算；重新开放的旧记录仅保留为历史。</p>
   </section>;

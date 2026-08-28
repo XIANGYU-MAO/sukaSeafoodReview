@@ -19,11 +19,18 @@ describe("TeamProgress", () => {
     renderProgress();
 
     expect(screen.getByText("58.33%")).toBeInTheDocument();
-    expect(screen.getByText("12", { selector: ".progress-stat__value" })).toBeInTheDocument();
-    expect(screen.getByText("7", { selector: ".progress-stat__value" })).toBeInTheDocument();
-    expect(screen.getByText("4", { selector: ".progress-stat__value" })).toBeInTheDocument();
-    expect(screen.getByText("1", { selector: ".progress-stat__value" })).toBeInTheDocument();
-    expect(screen.getByText("今日审核：3")).toBeInTheDocument();
+    const aggregateCards = document.querySelector<HTMLElement>(".progress-stat-grid");
+    expect(aggregateCards).not.toBeNull();
+    expect(within(aggregateCards!).getByText("12", { selector: ".progress-stat__value" })).toBeInTheDocument();
+    expect(within(aggregateCards!).getByText("7", { selector: ".progress-stat__value" })).toBeInTheDocument();
+    expect(within(aggregateCards!).getByText("4", { selector: ".progress-stat__value" })).toBeInTheDocument();
+    expect(within(aggregateCards!).getByText("1", { selector: ".progress-stat__value" })).toBeInTheDocument();
+    const decisionCards = screen.getByRole("group", { name: "当前数据集结果" });
+    expect(within(decisionCards).getByText("已保留").closest("div")).toHaveClass("progress-stat--approved");
+    expect(within(decisionCards).getByText("已拒绝").closest("div")).toHaveClass("progress-stat--rejected");
+    expect(within(decisionCards).getByText("不确定").closest("div")).toHaveClass("progress-stat--unsure");
+    expect(within(decisionCards).getByText("今日审核").closest("div")).toHaveClass("progress-stat--today");
+    expect(within(decisionCards).getByText("3", { selector: ".progress-stat__value" })).toBeInTheDocument();
     for (const member of progressFixture.members) {
       const row = screen.getByRole("row", { name: new RegExp(member.name) });
       expect(within(row).getByText(member.name)).toBeInTheDocument();
@@ -39,6 +46,8 @@ describe("TeamProgress", () => {
     renderProgress("en");
     expect(screen.getByRole("heading", { name: "Team progress" })).toBeInTheDocument();
     expect(screen.queryByText(/Member totals count submitted review attempts/)).not.toBeInTheDocument();
-    expect(screen.getByText("Reviewed today: 3")).toBeInTheDocument();
+    const decisionCards = screen.getByRole("group", { name: "Current dataset decisions" });
+    expect(within(decisionCards).getByText("Reviewed today")).toBeInTheDocument();
+    expect(within(decisionCards).getByText("3", { selector: ".progress-stat__value" })).toBeInTheDocument();
   });
 });

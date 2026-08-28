@@ -124,7 +124,7 @@ export const messages = {
   zh: {
     loginEyebrow: "SukaSeafood · 协作审核",
     loginTitle: "登录审核平台",
-    loginIntro: "选择你的固定账号，继续协作审核。",
+    loginIntro: "请选择姓名（按字母顺序排列），然后输入密码。",
     loginIntroManual: "输入你的账号姓名，继续协作审核。",
     chooseName: "选择姓名",
     name: "姓名",
@@ -269,7 +269,7 @@ export const messages = {
   en: {
     loginEyebrow: "SukaSeafood · Collaborative Review",
     loginTitle: "Sign in to review",
-    loginIntro: "Choose your fixed account to continue reviewing together.",
+    loginIntro: "Select your name (listed alphabetically), then enter your password.",
     loginIntroManual: "Enter your account name to continue reviewing together.",
     chooseName: "Choose your name",
     name: "Name",

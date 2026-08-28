@@ -38,7 +38,7 @@ it("guides collection through four steps with current downloads, copy, and speci
   const user = userEvent.setup();
   renderWithAuth(<App />, "/admin");
 
-  expect(await screen.findAllByRole("tab")).toHaveLength(7);
+  expect(await screen.findAllByRole("tab")).toHaveLength(8);
   await user.click(screen.getByRole("tab", { name: "采集与导入" }));
   for (const heading of ["1. 管理鱼种", "2. 准备本地采集器", "3. 本地生成 CSV", "4. 预检查并导入"]) {
     expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
@@ -207,8 +207,11 @@ it("lets the administrator configure login identity entry and reviewer team visi
   const user = userEvent.setup();
   renderWithAuth(<App />, "/admin");
   await openTab("账号");
+  expect(await screen.findByRole("heading", { name: "固定账号", level: 3 })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "访问设置", level: 3 })).not.toBeInTheDocument();
+  await openTab("访问设置");
 
-  expect(await screen.findByRole("heading", { name: "访问设置" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "访问设置", level: 3 })).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "手动输入姓名" }));
   await user.click(screen.getByRole("button", { name: "隐藏团队记录" }));
   await user.click(screen.getByRole("button", { name: "保存访问设置" }));
@@ -584,6 +587,9 @@ it("explains the local export workflow and accepts a JSON receipt dropped onto i
   expect(await screen.findByRole("tooltip")).toHaveTextContent("网页不会上传图片");
   expect(screen.getByRole("tooltip")).toHaveTextContent("成功项目以后不会重复加入下载批次");
 
+  expect(screen.queryByLabelText(`上传 ${IDS.batch} 回执`)).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "自动化工具上传失败？" }));
+
   const receipt = new File([JSON.stringify({
     batch_id: IDS.batch,
     items: [{
@@ -649,6 +655,7 @@ it("paginates export history and accepts a partial success with another batch it
   await openTab("训练集同步");
   await screen.findByText(IDS.batch);
   const valid = new File([JSON.stringify({ batch_id: IDS.batch, items: [{ candidate_id: IDS.candidate, review_id: IDS.review, review_version: 1, status: "SUCCEEDED", sha256: "b".repeat(64), relative_path: "SF001/example.jpg", error: null }] })], "receipt.json", { type: "application/json" });
+  await user.click(screen.getByRole("button", { name: "自动化工具上传失败？" }));
   await user.upload(screen.getByLabelText(`上传 ${IDS.batch} 回执`), valid);
   expect(await screen.findByRole("status")).toHaveTextContent("接受 1，待处理 1");
   await user.click(screen.getByRole("button", { name: "下一页" }));
@@ -670,6 +677,7 @@ it("accepts a two-item export in two exact partial receipt uploads", async () =>
   const user = userEvent.setup();
   renderWithAuth(<App />, "/admin");
   await openTab("训练集同步");
+  await user.click(await screen.findByRole("button", { name: "自动化工具上传失败？" }));
   const input = await screen.findByLabelText(`上传 ${IDS.batch} 回执`);
   const receipt = (candidateId: string) => new File([JSON.stringify({
     batch_id: IDS.batch,
