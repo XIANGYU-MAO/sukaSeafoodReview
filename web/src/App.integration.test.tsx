@@ -1,4 +1,4 @@
-import { act, fireEvent, screen } from "@testing-library/react";
+import { act, fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -41,7 +41,7 @@ describe("production-shell integration", () => {
       const url = String(input);
       const path = pathOf(input);
       if (path.endsWith("/auth/me")) return Promise.resolve(jsonResponse({}, 401));
-      if (path.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames));
+      if (path.endsWith("/auth/names")) return Promise.resolve(jsonResponse({ login_name_mode: "choices", names: fixedNames }));
       if (path.endsWith("/auth/login")) {
         expect(init).toEqual(expect.objectContaining({
           method: "POST",
@@ -131,6 +131,24 @@ describe("production-shell integration", () => {
     ]);
   });
 
+  it("hides team progress from reviewers and redirects a direct progress URL when disabled", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = pathOf(input);
+      if (path.endsWith("/auth/me")) {
+        return Promise.resolve(jsonResponse({ ...authState, team_progress_visible: false }));
+      }
+      if (path.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+      return Promise.reject(new Error(`Unexpected request: ${String(input)}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithStrictAuth(<App />, "/progress");
+
+    const nav = await screen.findByRole("navigation", { name: "协作审核" });
+    expect(within(nav).queryByRole("link", { name: "团队记录" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "图片审核" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.every(([input]) => !pathOf(input).endsWith("/progress"))).toBe(true);
+  });
+
   it("opens aggregate progress at /progress without exposing review history details", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const path = pathOf(input);
@@ -171,7 +189,7 @@ describe("production-shell integration", () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = pathOf(input);
       if (path.endsWith("/auth/me")) return Promise.resolve(jsonResponse({}, 401));
-      if (path.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames));
+      if (path.endsWith("/auth/names")) return Promise.resolve(jsonResponse({ login_name_mode: "choices", names: fixedNames }));
       if (path.endsWith("/auth/login")) {
         expect(init).toEqual(expect.objectContaining({
           method: "POST",
@@ -236,7 +254,7 @@ describe("production-shell integration", () => {
         }));
         return Promise.resolve(new Response(null, { status: 204 }));
       }
-      if (path.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames));
+      if (path.endsWith("/auth/names")) return Promise.resolve(jsonResponse({ login_name_mode: "choices", names: fixedNames }));
       return Promise.reject(new Error(`Unexpected request: ${String(input)} ${init?.method ?? "GET"}`));
     });
     vi.stubGlobal("fetch", fetchMock);

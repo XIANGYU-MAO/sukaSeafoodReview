@@ -18,6 +18,10 @@ export interface AdminUser {
 
 export interface AdminUserList { total: number; items: AdminUser[] }
 export interface AdminSourceList { sources: string[] }
+export interface SystemSettings {
+  login_name_mode: "choices" | "manual";
+  reviewer_team_progress_visible: boolean;
+}
 
 export interface AdminSpeciesSummary {
   id: string;
@@ -172,6 +176,18 @@ export function parseAdminSources(value: unknown): AdminSourceList {
     if (new Set(sources).size !== sources.length || sources.some((value, index) => index > 0 && sources[index - 1].localeCompare(value, undefined, { sensitivity: "base" }) > 0)) fail();
     return { sources };
   } catch { throw new Error("来源目录响应无效"); }
+}
+
+export function parseSystemSettings(value: unknown): SystemSettings {
+  try {
+    const root = object(value);
+    exact(root, ["login_name_mode", "reviewer_team_progress_visible"]);
+    if (root.login_name_mode !== "choices" && root.login_name_mode !== "manual") fail();
+    return {
+      login_name_mode: root.login_name_mode,
+      reviewer_team_progress_visible: bool(root.reviewer_team_progress_visible),
+    };
+  } catch { throw new Error("系统设置响应无效"); }
 }
 
 export function parseSpeciesList(value: unknown): AdminSpeciesList {

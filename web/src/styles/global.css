@@ -1362,10 +1362,8 @@ h1 {
 }
 
 .help-hint__tooltip {
-  position: absolute;
-  z-index: 30;
-  top: calc(100% + 0.4rem);
-  left: 0;
+  position: fixed;
+  z-index: 120;
   width: max-content;
   max-width: min(18rem, calc(100vw - 2rem));
   padding: 0.55rem 0.7rem;
@@ -1377,11 +1375,7 @@ h1 {
   font-weight: 600;
   line-height: 1.45;
   white-space: normal;
-}
-
-.admin-table-wrap th:last-child .help-hint__tooltip {
-  right: 0;
-  left: auto;
+  pointer-events: none;
 }
 
 .admin-tabs [aria-selected="true"] {
@@ -1452,6 +1446,43 @@ h1 {
   gap: 0.75rem;
   align-items: end;
   margin-bottom: 1rem;
+}
+
+.admin-filter-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.75rem;
+}
+
+.admin-filter-actions .primary-button,
+.admin-filter-actions .secondary-button {
+  width: auto;
+  min-width: 10rem;
+  margin: 0;
+}
+
+.admin-setting-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 21rem), 1fr));
+  gap: 1rem;
+}
+
+.admin-setting-grid > div {
+  padding: 1rem;
+  border: 1px solid #c8dcde;
+  border-radius: 0.8rem;
+  background: #f8fcfb;
+}
+
+.admin-setting-grid p {
+  min-height: 3em;
+  color: #587278;
+}
+
+.admin-access-settings > h3 {
+  margin-top: 0;
 }
 
 .admin-filters label,
@@ -1957,14 +1988,16 @@ h1 {
 }
 
 .command-pill-group--sources {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  display: flex;
+  align-items: stretch;
 }
 
 .command-pill-group--sources .pill-choice {
-  min-height: 3rem;
-  padding: 0.65rem 0.8rem;
-  font-size: 0.9rem;
+  flex: 0 1 auto;
+  min-height: 2.65rem;
+  max-width: 12rem;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.86rem;
   line-height: 1.25;
 }
 

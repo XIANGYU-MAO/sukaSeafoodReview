@@ -20,7 +20,7 @@ describe("login page", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith("/auth/me")) return jsonResponse({ detail: "Unauthorized" }, 401);
-        if (url.endsWith("/auth/names")) return jsonResponse(serverNames.map((name) => ({ name })));
+        if (url.endsWith("/auth/names")) return jsonResponse({ login_name_mode: "choices", names: serverNames.map((name) => ({ name })) });
         throw new Error(`Unexpected request: ${url}`);
       }),
     );
@@ -46,7 +46,7 @@ describe("login page", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
-        if (url.endsWith("/auth/names")) return jsonResponse(payload);
+        if (url.endsWith("/auth/names")) return jsonResponse({ login_name_mode: "choices", names: payload });
         throw new Error(`Unexpected request: ${url}`);
       }),
     );
@@ -62,7 +62,7 @@ describe("login page", () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse({}, 401))
       .mockRejectedValueOnce(new TypeError("offline"))
-      .mockResolvedValueOnce(jsonResponse(serverNames.map((name) => ({ name }))));
+      .mockResolvedValueOnce(jsonResponse({ login_name_mode: "choices", names: serverNames.map((name) => ({ name })) }));
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
@@ -82,7 +82,7 @@ describe("login page", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
-      if (url.endsWith("/auth/names")) return jsonResponse(serverNames.map((name) => ({ name })));
+      if (url.endsWith("/auth/names")) return jsonResponse({ login_name_mode: "choices", names: serverNames.map((name) => ({ name })) });
       if (url.endsWith("/auth/login")) return loginResponse;
       throw new Error(`Unexpected request: ${url} ${init?.method}`);
     });
@@ -120,7 +120,7 @@ describe("login page", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
-        if (url.endsWith("/auth/names")) return jsonResponse(serverNames.map((name) => ({ name })));
+        if (url.endsWith("/auth/names")) return jsonResponse({ login_name_mode: "choices", names: serverNames.map((name) => ({ name })) });
         if (url.endsWith("/auth/login")) return jsonResponse({ detail: "server detail" }, status);
         throw new Error(`Unexpected request: ${url}`);
       }),
@@ -140,7 +140,7 @@ describe("login page", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({}, 401))
-      .mockResolvedValueOnce(jsonResponse(serverNames.map((name) => ({ name }))))
+      .mockResolvedValueOnce(jsonResponse({ login_name_mode: "choices", names: serverNames.map((name) => ({ name })) }))
       .mockRejectedValueOnce(new TypeError("offline"));
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
@@ -170,7 +170,7 @@ describe("login page", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
-        if (url.endsWith("/auth/names")) return jsonResponse(serverNames.map((name) => ({ name })));
+        if (url.endsWith("/auth/names")) return jsonResponse({ login_name_mode: "choices", names: serverNames.map((name) => ({ name })) });
         if (url.endsWith("/auth/login")) return jsonResponse(authState);
         throw new Error(`Unexpected request: ${url}`);
       }),
@@ -194,7 +194,7 @@ describe("login page", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
-        if (url.endsWith("/auth/names")) return jsonResponse(serverNames.map((name) => ({ name })));
+        if (url.endsWith("/auth/names")) return jsonResponse({ login_name_mode: "choices", names: serverNames.map((name) => ({ name })) });
         if (url.endsWith("/auth/login")) return jsonResponse({});
         throw new Error(`Unexpected request: ${url}`);
       }),
@@ -232,11 +232,11 @@ describe("login page", () => {
     const view = renderWithStrictAuth(<App />);
     await waitFor(() => expect(namesCalls).toBe(2));
     await act(async () => {
-      activeNames.resolve(jsonResponse(serverNames.map((name) => ({ name }))));
+      activeNames.resolve(jsonResponse({ login_name_mode: "choices", names: serverNames.map((name) => ({ name })) }));
     });
     expect(await screen.findAllByRole("radio")).toHaveLength(6);
 
-    await act(async () => staleNames.resolve(jsonResponse([{ name: "Intruder" }])));
+    await act(async () => staleNames.resolve(jsonResponse({ login_name_mode: "choices", names: [{ name: "Intruder" }] })));
     expect(nameSignals[0]).toBeInstanceOf(AbortSignal);
     expect(nameSignals[0].aborted).toBe(true);
     expect(screen.queryByText("无法载入成员名单")).not.toBeInTheDocument();
@@ -252,7 +252,7 @@ describe("login page", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
-        if (url.endsWith("/auth/names")) return jsonResponse(serverNames.map((name) => ({ name })));
+        if (url.endsWith("/auth/names")) return jsonResponse({ login_name_mode: "choices", names: serverNames.map((name) => ({ name })) });
         if (url.endsWith("/auth/login")) return jsonResponse({}, 401);
         throw new Error(`Unexpected request: ${url}`);
       }),
@@ -281,7 +281,7 @@ describe("login page", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
-        if (url.endsWith("/auth/names")) return jsonResponse(serverNames.map((name) => ({ name })));
+        if (url.endsWith("/auth/names")) return jsonResponse({ login_name_mode: "choices", names: serverNames.map((name) => ({ name })) });
         if (url.endsWith("/auth/login")) return jsonResponse(authState);
         if (url.endsWith("/reviews/current")) return new Response(null, { status: 204 });
         if (url.endsWith("/progress")) return jsonResponse({
@@ -309,5 +309,27 @@ describe("login page", () => {
     expect(await screen.findByRole("link", { name: "Review" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "History" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change password" })).toBeInTheDocument();
+  });
+
+  it("uses a name input without exposing the account list in manual login mode", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) return jsonResponse({}, 401);
+      if (url.endsWith("/auth/names")) return jsonResponse({ login_name_mode: "manual", names: [] });
+      if (url.endsWith("/auth/login")) return jsonResponse(authState);
+      throw new Error(`Unexpected request: ${url} ${init?.method}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderWithAuth(<App />);
+
+    expect(await screen.findByRole("textbox", { name: "姓名" })).toBeInTheDocument();
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "姓名" }), "Hassan");
+    await user.type(screen.getByLabelText("密码"), "temporary-password");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(fetchMock.mock.calls.some(([, init]) => init?.body === JSON.stringify({ name: "Hassan", password: "temporary-password" }))).toBe(true);
   });
 });

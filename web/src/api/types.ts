@@ -14,12 +14,18 @@ export interface LoginName {
   name: FixedName;
 }
 
+export interface LoginOptions {
+  login_name_mode: "choices" | "manual";
+  names: readonly FixedName[];
+}
+
 export interface AuthState {
   id: string;
   name: FixedName;
   role: UserRole;
   must_change_password: boolean;
   csrf_token: string;
+  team_progress_visible: boolean;
 }
 
 export interface LoginPayload {
@@ -163,7 +169,14 @@ export function parseAuthState(value: unknown): AuthState {
   if (!isRecord(value)) {
     throw new Error("Invalid authentication response");
   }
-  const { id, name, role, must_change_password: mustChangePassword, csrf_token: csrfToken } = value;
+  const {
+    id,
+    name,
+    role,
+    must_change_password: mustChangePassword,
+    csrf_token: csrfToken,
+    team_progress_visible: teamProgressVisible,
+  } = value;
   if (
     typeof id !== "string" ||
     !UUID_PATTERN.test(id) ||
@@ -172,7 +185,8 @@ export function parseAuthState(value: unknown): AuthState {
     role !== expectedRole(name) ||
     typeof mustChangePassword !== "boolean" ||
     typeof csrfToken !== "string" ||
-    !csrfToken.trim()
+    !csrfToken.trim() ||
+    typeof teamProgressVisible !== "boolean"
   ) {
     throw new Error("Invalid authentication response");
   }
@@ -182,23 +196,32 @@ export function parseAuthState(value: unknown): AuthState {
     role,
     must_change_password: mustChangePassword,
     csrf_token: csrfToken,
+    team_progress_visible: teamProgressVisible,
   };
 }
 
-export function parseLoginNames(value: unknown): readonly FixedName[] {
-  if (!Array.isArray(value) || value.length !== FIXED_NAMES.length) {
+export function parseLoginOptions(value: unknown): LoginOptions {
+  if (!isRecord(value)) {
     throw new Error("Invalid fixed-name response");
   }
-  const names = value.map((entry) => {
+  const mode = value.login_name_mode;
+  if ((mode !== "choices" && mode !== "manual") || !Array.isArray(value.names)) {
+    throw new Error("Invalid fixed-name response");
+  }
+  const names = value.names.map((entry) => {
     if (!isRecord(entry) || !isFixedName(entry.name)) {
       throw new Error("Invalid fixed-name response");
     }
     return entry.name;
   });
-  if (new Set(names).size !== FIXED_NAMES.length) {
+  if (mode === "manual") {
+    if (names.length !== 0) throw new Error("Invalid fixed-name response");
+    return { login_name_mode: mode, names: [] };
+  }
+  if (names.length !== FIXED_NAMES.length || new Set(names).size !== FIXED_NAMES.length) {
     throw new Error("Invalid fixed-name response");
   }
-  return FIXED_NAMES;
+  return { login_name_mode: mode, names: FIXED_NAMES };
 }
 
 export function parseCandidateResponse(value: unknown): CandidateResponse {

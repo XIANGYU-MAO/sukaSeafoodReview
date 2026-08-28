@@ -192,6 +192,7 @@ def test_initial_migration_upgrades_a_fresh_database(tmp_path):
         "export_items",
         "candidate_import_previews",
         "image_origin_approvals",
+        "system_settings",
     }
     assert expected_tables == set(inspector.get_table_names())
 
@@ -248,6 +249,12 @@ def test_initial_migration_upgrades_a_fresh_database(tmp_path):
     assert species_columns["gbif_taxon_key"]["nullable"] is True
     assert species_columns["commons_category"]["nullable"] is True
     assert species_columns["fish_vista_filter"]["nullable"] is True
+
+    with engine.connect() as connection:
+        settings_row = connection.exec_driver_sql(
+            "SELECT id, login_name_mode, reviewer_team_progress_visible FROM system_settings"
+        ).one()
+    assert tuple(settings_row) == (1, "choices", 1)
 
     candidate_foreign_keys = {
         tuple(foreign_key["constrained_columns"])

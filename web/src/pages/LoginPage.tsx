@@ -4,7 +4,8 @@ import { ApiError, request } from "../api/client";
 import {
   type FixedName,
   FIXED_NAMES,
-  parseLoginNames,
+  parseLoginOptions,
+  type LoginOptions,
 } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { PillChoiceGroup } from "../components/PillChoiceGroup";
@@ -16,9 +17,10 @@ export { FIXED_NAMES } from "../api/types";
 export function LoginPage() {
   const { login, successMessageKey } = useAuth();
   const { locale, t, toggleLocale } = useI18n();
-  const [availableNames, setAvailableNames] = useState<readonly FixedName[] | null>(null);
+  const [loginOptions, setLoginOptions] = useState<LoginOptions | null>(null);
   const [namesError, setNamesError] = useState(false);
   const [selectedName, setSelectedName] = useState<FixedName | null>(null);
+  const [manualName, setManualName] = useState("");
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [errorKey, setErrorKey] = useState<MessageKey | null>(null);
@@ -32,12 +34,14 @@ export function LoginPage() {
     const controller = new AbortController();
     namesController.current = controller;
     setNamesError(false);
-    setAvailableNames(null);
+    setLoginOptions(null);
     try {
       const response = await request<unknown>("/auth/names", { signal: controller.signal });
-      const verifiedNames = parseLoginNames(response);
+      const verifiedOptions = parseLoginOptions(response);
       if (generation !== namesGeneration.current) return;
-      setAvailableNames(verifiedNames);
+      setLoginOptions(verifiedOptions);
+      setSelectedName(null);
+      setManualName("");
     } catch {
       if (controller.signal.aborted || generation !== namesGeneration.current) return;
       setNamesError(true);
@@ -55,14 +59,15 @@ export function LoginPage() {
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (pending) return;
-    if (!selectedName || !password) {
+    const submittedName = loginOptions?.login_name_mode === "manual" ? manualName.trim() : selectedName;
+    if (!submittedName || !password) {
       setErrorKey("loginMissingFields");
       return;
     }
     setPending(true);
     setErrorKey(null);
     try {
-      await login({ name: selectedName, password });
+      await login({ name: submittedName, password });
       setPassword("");
     } catch (failure) {
       if (failure instanceof ApiError && failure.status === 401) {
@@ -88,7 +93,7 @@ export function LoginPage() {
         <div className="brand-mark" aria-hidden="true">海</div>
         <p className="eyebrow">{t("loginEyebrow")}</p>
         <h1 id="login-title">{t("loginTitle")}</h1>
-        <p className="auth-intro">{t("loginIntro")}</p>
+        <p className="auth-intro">{t(loginOptions?.login_name_mode === "manual" ? "loginIntroManual" : "loginIntro")}</p>
 
         {successMessageKey ? <p className="notice notice--success">{t(successMessageKey)}</p> : null}
         {namesError ? (
@@ -98,18 +103,29 @@ export function LoginPage() {
               {t("retryNames")}
             </button>
           </div>
-        ) : availableNames ? (
+        ) : loginOptions ? (
           <form onSubmit={handleSubmit} noValidate>
-            <fieldset className="field-group" disabled={pending}>
+            {loginOptions.login_name_mode === "choices" ? <fieldset className="field-group" disabled={pending}>
               <legend>{t("chooseName")}</legend>
               <PillChoiceGroup
                 label={t("chooseName")}
-                options={availableNames}
+                options={loginOptions.names}
                 value={selectedName}
                 onChange={setSelectedName}
                 disabled={pending}
               />
-            </fieldset>
+            </fieldset> : <>
+              <label className="input-label" htmlFor="login-name">{t("name")}</label>
+              <input
+                id="login-name"
+                className="text-input"
+                type="text"
+                autoComplete="username"
+                value={manualName}
+                disabled={pending}
+                onChange={(event) => setManualName(event.target.value)}
+              />
+            </>}
 
             <label className="input-label" htmlFor="password">{t("password")}</label>
             <input

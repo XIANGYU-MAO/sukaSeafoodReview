@@ -48,6 +48,7 @@ export function App() {
     return <ChangePasswordPage forced={false} onCancel={() => setChangingPassword(false)} />;
   }
   const authenticatedUser = auth.user;
+  const showTeamProgress = authenticatedUser.role === "admin" || authenticatedUser.team_progress_visible;
 
   return (
     <Routes>
@@ -57,6 +58,7 @@ export function App() {
           <AuthenticatedShell
             name={authenticatedUser.name}
             isAdmin={authenticatedUser.role === "admin"}
+            showTeamProgress={showTeamProgress}
             onChangePassword={() => setChangingPassword(true)}
             onLogout={auth.logout}
           >
@@ -74,6 +76,7 @@ export function App() {
           <AuthenticatedShell
             name={authenticatedUser.name}
             isAdmin={authenticatedUser.role === "admin"}
+            showTeamProgress={showTeamProgress}
             onChangePassword={() => setChangingPassword(true)}
             onLogout={auth.logout}
           >
@@ -87,16 +90,17 @@ export function App() {
       />
       <Route
         path="/progress"
-        element={
+        element={showTeamProgress ?
           <AuthenticatedShell
             name={authenticatedUser.name}
             isAdmin={authenticatedUser.role === "admin"}
+            showTeamProgress={showTeamProgress}
             onChangePassword={() => setChangingPassword(true)}
             onLogout={auth.logout}
           >
             <TeamProgressPage retryBootstrap={auth.retryBootstrap} />
           </AuthenticatedShell>
-        }
+          : <Navigate to="/" replace />}
       />
       <Route
         path="/admin"
@@ -104,6 +108,7 @@ export function App() {
           authenticatedUser.name === "Mao" && authenticatedUser.role === "admin" ? <AuthenticatedShell
             name={authenticatedUser.name}
             isAdmin={authenticatedUser.role === "admin"}
+            showTeamProgress={showTeamProgress}
             onChangePassword={() => setChangingPassword(true)}
             onLogout={auth.logout}
           >
@@ -120,12 +125,13 @@ export function App() {
 interface AuthenticatedShellProps {
   name: string;
   isAdmin: boolean;
+  showTeamProgress: boolean;
   onChangePassword: () => void;
   onLogout: () => Promise<void>;
   children: ReactNode;
 }
 
-function AuthenticatedShell({ name, isAdmin, onChangePassword, onLogout, children }: AuthenticatedShellProps) {
+function AuthenticatedShell({ name, isAdmin, showTeamProgress, onChangePassword, onLogout, children }: AuthenticatedShellProps) {
   const { locale, t, toggleLocale } = useI18n();
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState(false);
@@ -153,7 +159,7 @@ function AuthenticatedShell({ name, isAdmin, onChangePassword, onLogout, childre
         <nav className="shell-navigation" aria-label={t("shellTitle")}>
           <NavLink to="/" end>{t("navReview")}</NavLink>
           <NavLink to="/history">{t("navHistory")}</NavLink>
-          <NavLink to="/progress">{t("navProgress")}</NavLink>
+          {showTeamProgress ? <NavLink to="/progress">{t("navProgress")}</NavLink> : null}
           {isAdmin ? <NavLink to="/admin">{t("navAdmin")}</NavLink> : null}
         </nav>
         <div className="user-actions">

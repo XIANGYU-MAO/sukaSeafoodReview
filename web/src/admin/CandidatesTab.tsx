@@ -115,8 +115,10 @@ export function CandidatesTab(props: AdminTabProps) {
       <label>结果<select value={filters.decision} onChange={(event) => setFilters({ ...filters, decision: event.target.value })}><option value="">全部</option><option value="APPROVED">保留</option><option value="REJECTED">拒绝</option><option value="UNSURE">不确定</option></select></label>
       <label>当前审核人<select value={filters.reviewer} onChange={(event) => setFilters({ ...filters, reviewer: event.target.value })}><option value="">全部</option>{props.users.map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}</select></label>
       <label>候选搜索<input type="search" aria-label="候选搜索" value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} /></label>
-      <button type="submit" className="secondary-button">应用候选筛选</button>
-      <button type="button" className="secondary-button" onClick={resetFilters}>重置候选筛选</button>
+      <div className="admin-filter-actions" role="group" aria-label="候选筛选操作">
+        <button type="submit" className="primary-button compact-button">应用候选筛选</button>
+        <button type="button" className="secondary-button" onClick={resetFilters}>重置候选筛选</button>
+      </div>
     </form></fieldset>
     <div className="inline-actions equal-action-row" role="group" aria-label="批量停用候选">
       <button type="button" className="danger-button" disabled={!filters.source || pending || query.unavailable || props.directoriesUnavailable} onClick={() => void bulkDisable("source")}>禁用所选来源</button>

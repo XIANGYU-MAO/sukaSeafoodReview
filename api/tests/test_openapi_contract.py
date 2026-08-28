@@ -16,6 +16,7 @@ FIXED_ROUTE_METHODS = {
     "/v1/history": {"get"},
     "/v1/history/{review_id}": {"patch"},
     "/v1/admin/users": {"get"},
+    "/v1/admin/settings": {"get", "patch"},
     "/v1/admin/sources": {"get"},
     "/v1/admin/species": {"get", "post"},
     "/v1/admin/species/{species_id}": {"patch"},
@@ -149,6 +150,7 @@ def test_authentication_responses_keep_web_runtime_fields(client):
         "role",
         "must_change_password",
         "csrf_token",
+        "team_progress_visible",
     }
     for path in ("/v1/auth/login", "/v1/auth/me"):
         method = "post" if path.endswith("login") else "get"
@@ -160,5 +162,4 @@ def test_authentication_responses_keep_web_runtime_fields(client):
     names_schema = openapi["paths"]["/v1/auth/names"]["get"]["responses"]["200"][
         "content"
     ]["application/json"]["schema"]
-    assert names_schema["type"] == "array"
-    assert names_schema["items"] == {"$ref": "#/components/schemas/LoginName"}
+    assert names_schema == {"$ref": "#/components/schemas/LoginOptionsResponse"}

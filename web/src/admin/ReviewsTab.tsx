@@ -304,8 +304,10 @@ export function ReviewsTab(props: AdminTabProps) {
               onChange={(event) => setFilters({ ...filters, to: event.target.value })}
             />
           </label>
-          <button className="secondary-button" type="submit">应用审核筛选</button>
-          <button className="secondary-button" type="button" onClick={resetFilters}>重置审核筛选</button>
+          <div className="admin-filter-actions" role="group" aria-label="审核筛选操作">
+            <button className="primary-button compact-button" type="submit">应用审核筛选</button>
+            <button className="secondary-button" type="button" onClick={resetFilters}>重置审核筛选</button>
+          </div>
         </form>
 
         <QueryBoundary query={query}>

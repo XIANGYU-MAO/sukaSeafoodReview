@@ -95,7 +95,7 @@ describe("authentication bootstrap", () => {
         meCalls += 1;
         return meCalls === 1 ? staleBootstrap.promise : activeBootstrap.promise;
       }
-      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse({ login_name_mode: "choices", names: fixedNames() }));
       if (url.endsWith("/auth/login")) return Promise.resolve(jsonResponse(authState));
       return Promise.reject(new Error(`Unexpected request: ${url}`));
     });
@@ -122,7 +122,7 @@ describe("authentication bootstrap", () => {
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse({}, 401));
-      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse({ login_name_mode: "choices", names: fixedNames() }));
       if (url.endsWith("/auth/login")) return Promise.resolve(jsonResponse(authState));
       if (url.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
       return Promise.reject(new Error(`Unexpected request: ${url}`));
@@ -156,7 +156,7 @@ describe("authentication bootstrap", () => {
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse({}, 401));
-      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse({ login_name_mode: "choices", names: fixedNames() }));
       if (url.endsWith("/auth/login")) return Promise.resolve(jsonResponse({}, 401));
       return Promise.reject(new Error(`Unexpected request: ${url}`));
     }));

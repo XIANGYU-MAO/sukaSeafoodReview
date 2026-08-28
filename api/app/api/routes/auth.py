@@ -13,7 +13,13 @@ from app.api.dependencies import (
 from app.config import Settings
 from app.database import get_db
 from app.models import Session
-from app.schemas.auth import AuthState, ChangePasswordRequest, LoginName, LoginRequest
+from app.schemas.auth import (
+    AuthState,
+    ChangePasswordRequest,
+    LoginName,
+    LoginOptionsResponse,
+    LoginRequest,
+)
 from app.services.auth import (
     FIXED_USERS,
     LOGIN_FAILURE_LIMIT,
@@ -31,6 +37,7 @@ from app.services.auth import (
     verify_dummy_password,
     verify_password,
 )
+from app.services.settings import get_system_settings
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -38,13 +45,20 @@ INVALID_CREDENTIALS = "Invalid credentials"
 TEMPORARILY_UNAVAILABLE = "Authentication temporarily unavailable"
 
 
-def public_state(auth: CurrentAuth, settings: Settings) -> AuthState:
+async def public_state(
+    auth: CurrentAuth, settings: Settings, db: AsyncSession
+) -> AuthState:
+    system_settings = await get_system_settings(db)
     return AuthState(
         id=auth.user.id,
         name=auth.user.name,
         role=auth.user.role,
         must_change_password=auth.user.must_change_password,
         csrf_token=csrf_token(auth.session.token_hash, settings.CSRF_SECRET),
+        team_progress_visible=(
+            auth.user.role == "admin"
+            or system_settings.reviewer_team_progress_visible
+        ),
     )
 
 
@@ -81,9 +95,17 @@ def clear_session_cookie(response: Response, settings: Settings) -> None:
     )
 
 
-@router.get("/names", response_model=list[LoginName])
-async def names() -> list[LoginName]:
-    return [LoginName(name=name) for name, _ in FIXED_USERS]
+@router.get("/names", response_model=LoginOptionsResponse)
+async def names(db: AsyncSession = Depends(get_db)) -> LoginOptionsResponse:
+    system_settings = await get_system_settings(db)
+    return LoginOptionsResponse(
+        login_name_mode=system_settings.login_name_mode,
+        names=(
+            [LoginName(name=name) for name, _ in FIXED_USERS]
+            if system_settings.login_name_mode == "choices"
+            else []
+        ),
+    )
 
 
 @router.post("/login", response_model=AuthState)
@@ -154,15 +176,16 @@ async def login(
     db.add(session)
     await db.commit()
     set_session_cookie(response, settings, raw_token)
-    return public_state(CurrentAuth(user=user, session=session), settings)
+    return await public_state(CurrentAuth(user=user, session=session), settings, db)
 
 
 @router.get("/me", response_model=AuthState)
 async def me(
     auth: CurrentAuth = Depends(get_current_auth),
     settings: Settings = Depends(get_runtime_settings),
+    db: AsyncSession = Depends(get_db),
 ) -> AuthState:
-    return public_state(auth, settings)
+    return await public_state(auth, settings, db)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)

@@ -5,6 +5,7 @@ from app.models.export import ExportAction, ExportBatch, ExportItem
 from app.models.imports import CandidateImportPreview
 from app.models.origins import ImageOriginApproval
 from app.models.review import Decision, IdempotencyCommand, Review, ReviewRevision
+from app.models.settings import SystemSetting
 
 __all__ = [
     "AuditEvent",
@@ -21,5 +22,6 @@ __all__ = [
     "ReviewRevision",
     "Session",
     "Species",
+    "SystemSetting",
     "User",
 ]

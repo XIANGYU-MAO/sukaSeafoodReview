@@ -17,7 +17,7 @@ describe("authenticated password and logout flows", () => {
       const url = String(input);
       if (url.endsWith("/auth/me")) return jsonResponse({ ...authState, must_change_password: true });
       if (url.endsWith("/auth/change-password")) return new Response(null, { status: 204 });
-      if (url.endsWith("/auth/names")) return jsonResponse(fixedNames());
+      if (url.endsWith("/auth/names")) return jsonResponse({ login_name_mode: "choices", names: fixedNames() });
       throw new Error(`Unexpected request: ${url} ${init?.method}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -107,7 +107,7 @@ describe("authenticated password and logout flows", () => {
           resolveLogout = resolve;
         });
       }
-      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+      if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse({ login_name_mode: "choices", names: fixedNames() }));
       return Promise.reject(new Error(`Unexpected request: ${url}`));
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -132,7 +132,7 @@ describe("authenticated password and logout flows", () => {
         if (url.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
         if (url.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
         if (url.endsWith("/auth/logout")) return Promise.resolve(jsonResponse({}, 401));
-        if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+        if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse({ login_name_mode: "choices", names: fixedNames() }));
         return Promise.reject(new Error(`Unexpected request: ${url}`));
       }),
     );
@@ -155,7 +155,7 @@ describe("authenticated password and logout flows", () => {
           logoutCalls += 1;
           return Promise.resolve(logoutCalls === 1 ? jsonResponse({}, 503) : new Response(null, { status: 204 }));
         }
-        if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+        if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse({ login_name_mode: "choices", names: fixedNames() }));
         return Promise.reject(new Error(`Unexpected request: ${url}`));
       }),
     );
@@ -182,7 +182,7 @@ describe("authenticated password and logout flows", () => {
           return meCalls === 1 ? staleBootstrap.promise : activeBootstrap.promise;
         }
         if (url.endsWith("/auth/logout")) return Promise.resolve(new Response(null, { status: 204 }));
-        if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse(fixedNames()));
+        if (url.endsWith("/auth/names")) return Promise.resolve(jsonResponse({ login_name_mode: "choices", names: fixedNames() }));
         return Promise.reject(new Error(`Unexpected request: ${url}`));
       }),
     );
@@ -204,7 +204,7 @@ describe("authenticated password and logout flows", () => {
       const url = String(input);
       if (url.endsWith("/auth/me")) return jsonResponse(authState);
       if (url.endsWith("/auth/change-password")) return new Response(null, { status: 204 });
-      if (url.endsWith("/auth/names")) return jsonResponse(fixedNames());
+      if (url.endsWith("/auth/names")) return jsonResponse({ login_name_mode: "choices", names: fixedNames() });
       if (url.endsWith("/auth/login")) {
         return jsonResponse({ ...authState, csrf_token: "next-session-csrf" });
       }

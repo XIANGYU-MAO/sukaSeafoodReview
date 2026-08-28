@@ -35,6 +35,8 @@ from app.schemas.admin import (
     SpeciesListResponse,
     SpeciesPatchRequest,
     SpeciesResponse,
+    SystemSettingsPatchRequest,
+    SystemSettingsResponse,
     TransferRequest,
 )
 from app.schemas.review import ReviewResponse
@@ -57,9 +59,27 @@ from app.services.admin import (
     reset_password_transaction,
     transfer_current,
 )
+from app.services.settings import get_system_settings, update_system_settings
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.get("/settings", response_model=SystemSettingsResponse)
+async def get_settings(
+    _: CurrentAuth = Depends(require_admin_access),
+    db: AsyncSession = Depends(get_db),
+) -> SystemSettingsResponse:
+    return await get_system_settings(db)
+
+
+@router.patch("/settings", response_model=SystemSettingsResponse)
+async def patch_settings(
+    payload: SystemSettingsPatchRequest,
+    auth: CurrentAuth = Depends(require_admin_csrf),
+    db: AsyncSession = Depends(get_db),
+) -> SystemSettingsResponse:
+    return await update_system_settings(db, auth.user.id, payload)
 
 
 def _raise_admin_error(exc: Exception) -> None:

@@ -2,6 +2,8 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 
+import "../styles/global.css";
+
 import { App } from "../App";
 import { deferred, renderWithAuth } from "../test/helpers";
 import {
@@ -99,6 +101,8 @@ it("resets candidate filters and immediately reloads the unfiltered first page",
   await openTab("候选图片");
   const candidatePanel = screen.getByRole("tabpanel", { name: "候选图片" });
   await within(candidatePanel).findByRole("button", { name: "编辑候选" });
+  expect(within(candidatePanel).getByRole("button", { name: "应用候选筛选" })).toHaveClass("primary-button");
+  expect(within(candidatePanel).getByRole("button", { name: "重置候选筛选" })).toHaveClass("secondary-button");
 
   await user.selectOptions(within(candidatePanel).getByLabelText("鱼种"), "SF001");
   await user.selectOptions(within(candidatePanel).getByLabelText("来源"), "GBIF");
@@ -132,6 +136,8 @@ it("resets review filters and immediately reloads the unfiltered first page", as
   await openTab("审核历史");
   const reviewPanel = screen.getByRole("tabpanel", { name: "审核历史" });
   await within(reviewPanel).findByRole("button", { name: "编辑审核" });
+  expect(within(reviewPanel).getByRole("button", { name: "应用审核筛选" })).toHaveClass("primary-button");
+  expect(within(reviewPanel).getByRole("button", { name: "重置审核筛选" })).toHaveClass("secondary-button");
 
   await user.selectOptions(within(reviewPanel).getByLabelText("成员"), IDS.hassan);
   await user.selectOptions(within(reviewPanel).getByLabelText("鱼种"), "SF001");
@@ -165,6 +171,7 @@ it("lets the administrator choose exactly which collectors appear in the generat
   await openTab("采集与导入");
 
   const sourceGroup = screen.getByRole("group", { name: "采集来源" });
+  expect(getComputedStyle(sourceGroup).display).toBe("flex");
   expect(within(sourceGroup).getAllByRole("button")).toHaveLength(8);
   expect(screen.getByText(/--source fish-vista/)).toBeInTheDocument();
   expect(screen.getByText(/--source ala/)).toBeInTheDocument();
@@ -183,6 +190,33 @@ it("lets the administrator choose exactly which collectors appear in the generat
     await user.click(selected);
   }
   expect(await screen.findByRole("alert")).toHaveTextContent("至少选择一个采集来源");
+});
+
+it("lets the administrator configure login identity entry and reviewer team visibility", async () => {
+  const fetchMock = mockAdmin((url, init) => {
+    if (url.endsWith("/admin/settings") && init?.method === "PATCH") {
+      return jsonResponse({
+        login_name_mode: "manual",
+        reviewer_team_progress_visible: false,
+      });
+    }
+  });
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("账号");
+
+  expect(await screen.findByRole("heading", { name: "访问设置" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "手动输入姓名" }));
+  await user.click(screen.getByRole("button", { name: "隐藏团队记录" }));
+  await user.click(screen.getByRole("button", { name: "保存访问设置" }));
+
+  expect(await screen.findByRole("status")).toHaveTextContent("访问设置已保存");
+  const update = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith("/admin/settings") && init?.method === "PATCH");
+  expect(JSON.parse(String(update?.[1]?.body))).toEqual({
+    login_name_mode: "manual",
+    reviewer_team_progress_visible: false,
+    reason: "更新登录与团队记录可见性",
+  });
 });
 
 it("approves an observed image host and automatically previews the retained CSV again", async () => {

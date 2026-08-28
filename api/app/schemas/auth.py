@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -7,6 +8,11 @@ from app.services.auth import NEW_PASSWORD_MAX_LENGTH, NEW_PASSWORD_MIN_LENGTH
 
 class LoginName(BaseModel):
     name: str
+
+
+class LoginOptionsResponse(BaseModel):
+    login_name_mode: Literal["choices", "manual"]
+    names: list[LoginName]
 
 
 class LoginRequest(BaseModel):
@@ -28,3 +34,4 @@ class AuthState(BaseModel):
     role: str
     must_change_password: bool
     csrf_token: str
+    team_progress_visible: bool

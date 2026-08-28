@@ -22,7 +22,13 @@ export const maoAuth = {
   role: "admin",
   must_change_password: false,
   csrf_token: "mao-csrf-token",
+  team_progress_visible: true,
 } as const;
+
+export const systemSettingsFixture = {
+  login_name_mode: "choices",
+  reviewer_team_progress_visible: true,
+};
 
 export const usersFixture = {
   total: 6,
@@ -213,6 +219,7 @@ export function jsonResponse(body: unknown, status = 200): Response {
 export function defaultAdminResponse(url: string): Response {
   if (url.endsWith("/auth/me")) return jsonResponse(maoAuth);
   if (url.endsWith("/progress")) return jsonResponse(progressFixture);
+  if (url.endsWith("/admin/settings")) return jsonResponse(systemSettingsFixture);
   if (url.includes("/admin/current")) return jsonResponse(currentFixture);
   if (url.includes("/admin/users")) return jsonResponse(usersFixture);
   if (url.includes("/admin/sources")) return jsonResponse(sourcesFixture);

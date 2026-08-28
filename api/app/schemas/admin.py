@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 import json
 import re
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -28,6 +28,19 @@ from app.species_codes import require_safe_species_code
 TrimmedReason = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)
 ]
+
+
+class SystemSettingsResponse(BaseModel):
+    login_name_mode: Literal["choices", "manual"]
+    reviewer_team_progress_visible: bool
+
+
+class SystemSettingsPatchRequest(SystemSettingsResponse):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: TrimmedReason
+
+
 TrimmedCode = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32)
 ]

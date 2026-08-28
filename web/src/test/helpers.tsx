@@ -11,6 +11,7 @@ export const authState = {
   role: "reviewer",
   must_change_password: false,
   csrf_token: "test-csrf-token",
+  team_progress_visible: true,
 } as const;
 
 export function jsonResponse(body: unknown, status = 200): Response {

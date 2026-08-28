@@ -156,7 +156,10 @@ def test_login_names_are_fixed_and_ordered(auth_client):
     response = auth_client.get("/v1/auth/names")
 
     assert response.status_code == 200
-    assert response.json() == [{"name": name} for name in FIXED_NAMES]
+    assert response.json() == {
+        "login_name_mode": "choices",
+        "names": [{"name": name} for name in FIXED_NAMES],
+    }
 
 
 def test_registration_route_does_not_exist(auth_client):
@@ -191,11 +194,13 @@ def test_temporary_password_login_returns_public_session_state(
         "role",
         "must_change_password",
         "csrf_token",
+        "team_progress_visible",
     }
     assert response.json()["name"] == "Hassan"
     assert response.json()["role"] == "reviewer"
     assert response.json()["must_change_password"] is True
     assert response.json()["csrf_token"]
+    assert response.json()["team_progress_visible"] is True
     assert "password_hash" not in response.text.lower()
     assert TEST_PASSWORD not in response.text
 
