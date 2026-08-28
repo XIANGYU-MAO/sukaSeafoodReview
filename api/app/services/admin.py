@@ -328,11 +328,29 @@ async def list_species(
             .limit(filters.limit)
         )
     ).all()
+    source_counts: dict[UUID, dict[str, int]] = {}
+    if rows:
+        source_rows = (
+            await session.execute(
+                select(
+                    Candidate.species_id,
+                    Candidate.source_dataset,
+                    func.count(Candidate.id),
+                )
+                .where(Candidate.species_id.in_([species.id for species, _ in rows]))
+                .group_by(Candidate.species_id, Candidate.source_dataset)
+                .order_by(Candidate.species_id, Candidate.source_dataset)
+            )
+        ).all()
+        for species_id, source_dataset, source_count in source_rows:
+            source_counts.setdefault(species_id, {})[source_dataset] = int(source_count)
     return SpeciesListResponse(
         total=total,
         items=[
             SpeciesResponse(
-                **species_snapshot(species), candidate_count=int(candidate_count)
+                **species_snapshot(species),
+                candidate_count=int(candidate_count),
+                source_counts=source_counts.get(species.id, {}),
             )
             for species, candidate_count in rows
         ],

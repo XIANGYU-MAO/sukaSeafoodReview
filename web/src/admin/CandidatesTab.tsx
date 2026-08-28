@@ -5,6 +5,7 @@ import { PageControls, QueryBoundary, adminMutation, decisionLabels, mutationMes
 import { parseCandidateList, parseCandidateReceipt, type AdminCandidate } from "./types";
 
 const LIMIT = 20;
+const EMPTY_CANDIDATE_FILTERS = { species: "", source: "", active: "", reviewed: "", decision: "", reviewer: "", search: "" };
 type Draft = { preview_url: string; original_url: string; species_id: string; active: boolean; reason: string; target: string; confirm: boolean };
 type BulkDisableReceipt = { matched: number; disabled: number; released: number };
 
@@ -18,8 +19,8 @@ function parseBulkDisableReceipt(value: unknown): BulkDisableReceipt {
 }
 
 export function CandidatesTab(props: AdminTabProps) {
-  const [filters, setFilters] = useState({ species: "", source: "", active: "", reviewed: "", decision: "", reviewer: "", search: "" });
-  const [applied, setApplied] = useState(filters);
+  const [filters, setFilters] = useState({ ...EMPTY_CANDIDATE_FILTERS });
+  const [applied, setApplied] = useState({ ...EMPTY_CANDIDATE_FILTERS });
   const [offset, setOffset] = useState(0);
   const [editing, setEditing] = useState<AdminCandidate | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -38,6 +39,15 @@ export function CandidatesTab(props: AdminTabProps) {
   }, [applied, offset]);
   const query = useAdminQuery(path, parseCandidateList, props.retryBootstrap);
   const sources = props.sources;
+
+  function resetFilters() {
+    const alreadyUnfiltered = offset === 0 && Object.values(applied).every((value) => value === "");
+    setFilters({ ...EMPTY_CANDIDATE_FILTERS });
+    setApplied({ ...EMPTY_CANDIDATE_FILTERS });
+    setOffset(0);
+    setNotice(null);
+    if (alreadyUnfiltered) query.reload();
+  }
 
   function edit(item: AdminCandidate) {
     setEditing(item); setDraft({ preview_url: item.preview_url, original_url: item.original_url, species_id: item.species.id, active: item.active, reason: "", target: "", confirm: false }); setNotice(null);
@@ -106,6 +116,7 @@ export function CandidatesTab(props: AdminTabProps) {
       <label>当前审核人<select value={filters.reviewer} onChange={(event) => setFilters({ ...filters, reviewer: event.target.value })}><option value="">全部</option>{props.users.map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}</select></label>
       <label>候选搜索<input type="search" aria-label="候选搜索" value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} /></label>
       <button type="submit" className="secondary-button">应用候选筛选</button>
+      <button type="button" className="secondary-button" onClick={resetFilters}>重置候选筛选</button>
     </form></fieldset>
     <div className="inline-actions equal-action-row" role="group" aria-label="批量停用候选">
       <button type="button" className="danger-button" disabled={!filters.source || pending || query.unavailable || props.directoriesUnavailable} onClick={() => void bulkDisable("source")}>禁用所选来源</button>

@@ -29,17 +29,19 @@ type EditDraft = {
   reason: string;
 };
 
+const EMPTY_REVIEW_FILTERS = {
+  reviewer: "",
+  species: "",
+  source: "",
+  decision: "",
+  current: "",
+  from: "",
+  to: "",
+};
+
 export function ReviewsTab(props: AdminTabProps) {
-  const [filters, setFilters] = useState({
-    reviewer: "",
-    species: "",
-    source: "",
-    decision: "",
-    current: "",
-    from: "",
-    to: "",
-  });
-  const [applied, setApplied] = useState(filters);
+  const [filters, setFilters] = useState({ ...EMPTY_REVIEW_FILTERS });
+  const [applied, setApplied] = useState({ ...EMPTY_REVIEW_FILTERS });
   const [offset, setOffset] = useState(0);
   const [editing, setEditing] = useState<AdminReviewItem | null>(null);
   const [draft, setDraft] = useState<EditDraft | null>(null);
@@ -63,6 +65,15 @@ export function ReviewsTab(props: AdminTabProps) {
     return `/admin/reviews?${query}`;
   }, [applied, offset]);
   const query = useAdminQuery(path, parseAdminReviewList, props.retryBootstrap);
+
+  function resetFilters() {
+    const alreadyUnfiltered = offset === 0 && Object.values(applied).every((value) => value === "");
+    setFilters({ ...EMPTY_REVIEW_FILTERS });
+    setApplied({ ...EMPTY_REVIEW_FILTERS });
+    setOffset(0);
+    setNotice(null);
+    if (alreadyUnfiltered) query.reload();
+  }
 
   function startEdit(item: AdminReviewItem) {
     setEditing(item);
@@ -294,6 +305,7 @@ export function ReviewsTab(props: AdminTabProps) {
             />
           </label>
           <button className="secondary-button" type="submit">应用审核筛选</button>
+          <button className="secondary-button" type="button" onClick={resetFilters}>重置审核筛选</button>
         </form>
 
         <QueryBoundary query={query}>

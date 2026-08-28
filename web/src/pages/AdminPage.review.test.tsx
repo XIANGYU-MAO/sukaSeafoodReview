@@ -48,7 +48,8 @@ it("guides collection through four steps with current downloads, copy, and speci
   expect(within(downloads).getAllByRole("link")).toHaveLength(2);
   expect(screen.getByRole("list", { name: "当前启用鱼种" })).toHaveTextContent("SF001 · 测试鱼");
   await user.click(screen.getByRole("button", { name: "复制命令" }));
-  expect(await screen.findByRole("status")).toHaveTextContent("命令已复制。");
+  expect(await screen.findByRole("button", { name: "已复制" })).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("命令已复制到剪贴板");
   await user.click(screen.getByRole("button", { name: "前往鱼种管理" }));
   expect(screen.getByRole("tab", { name: "鱼种管理" })).toHaveAttribute("aria-selected", "true");
 });
@@ -77,7 +78,8 @@ it("switches command syntax for Unix replenishment and accepts a CSV dropped ont
   expect(screen.getByRole("list", { name: "鱼种候选缺口" })).toHaveTextContent("SF002其他鱼当前 1还差 299");
   const limit = screen.getByRole("spinbutton", { name: "每个鱼种、每个来源最多采集" });
   fireEvent.change(limit, { target: { value: "250" } });
-  expect(screen.getByText(/python3 \.\/collect_fish_images\.py.*--max-per-species 250 --minimum-total-per-species 300 --resume/)).toBeInTheDocument();
+  expect(screen.getByText(/python \.\/collect_fish_images\.py.*--max-per-species 250 --minimum-total-per-species 300 --resume/)).toBeInTheDocument();
+  expect(screen.queryByText(/python3/)).not.toBeInTheDocument();
 
   const dropped = new File(["seafood_code\nSF001"], "dropped.csv", { type: "text/csv" });
   const dropZone = screen.getByText("把候选 CSV 拖到这里").closest(".csv-drop-zone");
@@ -88,6 +90,72 @@ it("switches command syntax for Unix replenishment and accepts a CSV dropped ont
   await screen.findByRole("button", { name: "提交导入" });
   const previewCall = fetchMock.mock.calls.find(([inputValue]) => String(inputValue).endsWith("/admin/imports/preview"));
   expect(previewCall?.[1]?.body).toBeInstanceOf(FormData);
+});
+
+it("resets candidate filters and immediately reloads the unfiltered first page", async () => {
+  const fetchMock = mockAdmin(() => undefined);
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("候选图片");
+  const candidatePanel = screen.getByRole("tabpanel", { name: "候选图片" });
+  await within(candidatePanel).findByRole("button", { name: "编辑候选" });
+
+  await user.selectOptions(within(candidatePanel).getByLabelText("鱼种"), "SF001");
+  await user.selectOptions(within(candidatePanel).getByLabelText("来源"), "GBIF");
+  await user.selectOptions(within(candidatePanel).getByLabelText("启用状态"), "false");
+  await user.type(within(candidatePanel).getByRole("searchbox", { name: "候选搜索" }), "needle");
+  await user.click(within(candidatePanel).getByRole("button", { name: "应用候选筛选" }));
+  await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => {
+    const url = String(input);
+    return url.includes("/admin/candidates?") && url.includes("species_code=SF001") && url.includes("source_dataset=GBIF") && url.includes("search=needle");
+  })).toBe(true));
+
+  await user.click(within(candidatePanel).getByRole("button", { name: "重置候选筛选" }));
+  expect(within(candidatePanel).getByLabelText("鱼种")).toHaveValue("");
+  expect(within(candidatePanel).getByLabelText("来源")).toHaveValue("");
+  expect(within(candidatePanel).getByLabelText("启用状态")).toHaveValue("");
+  expect(within(candidatePanel).getByRole("searchbox", { name: "候选搜索" })).toHaveValue("");
+  await waitFor(() => {
+    const calls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/admin/candidates?"));
+    const url = String(calls.at(-1)?.[0]);
+    expect(url).toContain("limit=20&offset=0");
+    expect(url).not.toContain("species_code=");
+    expect(url).not.toContain("source_dataset=");
+    expect(url).not.toContain("search=");
+  });
+});
+
+it("resets review filters and immediately reloads the unfiltered first page", async () => {
+  const fetchMock = mockAdmin(() => undefined);
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("审核历史");
+  const reviewPanel = screen.getByRole("tabpanel", { name: "审核历史" });
+  await within(reviewPanel).findByRole("button", { name: "编辑审核" });
+
+  await user.selectOptions(within(reviewPanel).getByLabelText("成员"), IDS.hassan);
+  await user.selectOptions(within(reviewPanel).getByLabelText("鱼种"), "SF001");
+  await user.selectOptions(within(reviewPanel).getByLabelText("来源"), "INATURALIST");
+  await user.selectOptions(within(reviewPanel).getByLabelText("结果"), "APPROVED");
+  await user.click(within(reviewPanel).getByRole("button", { name: "应用审核筛选" }));
+  await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => {
+    const url = String(input);
+    return url.includes("/admin/reviews?") && url.includes(`reviewer_id=${IDS.hassan}`) && url.includes("species_code=SF001") && url.includes("source_dataset=INATURALIST");
+  })).toBe(true));
+
+  await user.click(within(reviewPanel).getByRole("button", { name: "重置审核筛选" }));
+  expect(within(reviewPanel).getByLabelText("成员")).toHaveValue("");
+  expect(within(reviewPanel).getByLabelText("鱼种")).toHaveValue("");
+  expect(within(reviewPanel).getByLabelText("来源")).toHaveValue("");
+  expect(within(reviewPanel).getByLabelText("结果")).toHaveValue("");
+  await waitFor(() => {
+    const calls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/admin/reviews?"));
+    const url = String(calls.at(-1)?.[0]);
+    expect(url).toContain("limit=20&offset=0");
+    expect(url).not.toContain("reviewer_id=");
+    expect(url).not.toContain("species_code=");
+    expect(url).not.toContain("source_dataset=");
+  });
 });
 
 it("lets the administrator choose exactly which collectors appear in the generated command", async () => {

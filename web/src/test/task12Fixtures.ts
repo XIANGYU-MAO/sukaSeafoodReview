@@ -48,6 +48,7 @@ export const speciesItems = [
     active: true,
     sort_order: 10,
     candidate_count: 2,
+    source_counts: { INATURALIST: 1, GBIF: 1 },
   },
   {
     id: IDS.species2,
@@ -62,6 +63,7 @@ export const speciesItems = [
     active: true,
     sort_order: 20,
     candidate_count: 1,
+    source_counts: { WIKIMEDIA_COMMONS: 1 },
   },
 ];
 

@@ -35,6 +35,7 @@ export interface AdminSpecies extends AdminSpeciesSummary {
   fish_vista_filter: string | null;
   sort_order?: number;
   candidate_count?: number;
+  source_counts?: Record<string, number>;
 }
 
 export interface AdminSpeciesList { total: number; items: Required<AdminSpecies>[] }
@@ -378,9 +379,9 @@ export function parseExportConflict(errorBody: unknown): { code: "EXPORT_SCOPE_O
 }
 
 function parseSpeciesFull(value: unknown): Required<AdminSpecies> {
-  const item = object(value); exact(item, ["id", "code", "name_zh", "name_en", "scientific_name", "inat_taxon_id", "gbif_taxon_key", "commons_category", "fish_vista_filter", "active", "sort_order", "candidate_count"]);
+  const item = object(value); exact(item, ["id", "code", "name_zh", "name_en", "scientific_name", "inat_taxon_id", "gbif_taxon_key", "commons_category", "fish_vista_filter", "active", "sort_order", "candidate_count", "source_counts"]);
   const summary = Object.fromEntries(["id", "code", "name_zh", "name_en", "scientific_name", "active"].map((key) => [key, item[key]]));
-  return { ...parseSpeciesSummary(summary), inat_taxon_id: item.inat_taxon_id === null ? null : positive(item.inat_taxon_id), gbif_taxon_key: item.gbif_taxon_key === null ? null : positive(item.gbif_taxon_key), commons_category: optionalText(item.commons_category, 512), fish_vista_filter: optionalText(item.fish_vista_filter, 255), sort_order: signedInteger(item.sort_order), candidate_count: integer(item.candidate_count) };
+  return { ...parseSpeciesSummary(summary), inat_taxon_id: item.inat_taxon_id === null ? null : positive(item.inat_taxon_id), gbif_taxon_key: item.gbif_taxon_key === null ? null : positive(item.gbif_taxon_key), commons_category: optionalText(item.commons_category, 512), fish_vista_filter: optionalText(item.fish_vista_filter, 255), sort_order: signedInteger(item.sort_order), candidate_count: integer(item.candidate_count), source_counts: countMap(item.source_counts) };
 }
 function parseSpeciesSummary(value: unknown): AdminSpeciesSummary {
   const item = object(value); exact(item, ["id", "code", "name_zh", "name_en", "scientific_name", "active"]);

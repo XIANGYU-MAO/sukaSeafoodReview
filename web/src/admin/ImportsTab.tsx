@@ -76,6 +76,7 @@ export function ImportsTab(props: AdminTabProps) {
   const [minimumPerSpecies, setMinimumPerSpecies] = useState(300);
   const [selectedSources, setSelectedSources] = useState<string[]>(DEFAULT_COLLECTOR_SOURCES);
   const [smithsonianApiKey, setSmithsonianApiKey] = useState("");
+  const [copyState, setCopyState] = useState<"idle" | "success" | "error">("idle");
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const generation = useRef(0);
   const operationKind = useRef<"preview" | "commit" | null>(null);
@@ -86,7 +87,7 @@ export function ImportsTab(props: AdminTabProps) {
   const hasActiveSpecies = props.species.some((species) => species.active);
   const activeSpecies = props.species.filter((species) => species.active);
   const command = useMemo(() => {
-    const python = platform === "windows" ? "python" : "python3";
+    const python = "python";
     const separator = platform === "windows" ? ".\\" : "./";
     const resume = collectionMode === "replenish" ? " --resume" : "";
     const sources = COLLECTOR_SOURCES
@@ -98,6 +99,8 @@ export function ImportsTab(props: AdminTabProps) {
       : "";
     return `${python} ${separator}collect_fish_images.py --config ${separator}species_config.json${sources}${key} --max-per-species ${maxPerSpecies} --minimum-total-per-species ${minimumPerSpecies}${resume}`;
   }, [collectionMode, maxPerSpecies, minimumPerSpecies, platform, selectedSources, smithsonianApiKey]);
+
+  useEffect(() => setCopyState("idle"), [command]);
 
   function toggleSource(code: string) {
     if (selectedSources.includes(code)) {
@@ -259,9 +262,9 @@ export function ImportsTab(props: AdminTabProps) {
   async function copyCommand() {
     try {
       await navigator.clipboard.writeText(command);
-      setNotice({ kind: "success", text: "命令已复制。" });
+      setCopyState("success");
     } catch {
-      setNotice({ kind: "error", text: "复制失败，请手动选择命令。" });
+      setCopyState("error");
     }
   }
 
@@ -309,7 +312,7 @@ export function ImportsTab(props: AdminTabProps) {
           <button type="button" className={`pill-choice${collectionMode === "initial" ? " pill-choice--selected" : ""}`} aria-pressed={collectionMode === "initial"} onClick={() => setCollectionMode("initial")}>首次采集</button>
           <button type="button" className={`pill-choice${collectionMode === "replenish" ? " pill-choice--selected" : ""}`} aria-pressed={collectionMode === "replenish"} onClick={() => setCollectionMode("replenish")}>数量不足时补采</button>
         </div></fieldset>
-        <div className="command-option-group command-option-group--wide"><div className="admin-field-label"><strong>采集来源</strong><HelpHint context="字段" label="来源选择说明">只会请求已选中的来源，不选的来源完全不会访问。建议先保留全部免密来源；某个来源质量不合适时可取消。Smithsonian 需要免费的 Open Access API Key，密钥只写进你本地复制的命令，不会上传到本系统。</HelpHint></div><div className="command-pill-group" role="group" aria-label="采集来源">
+        <div className="command-option-group command-option-group--wide"><div className="admin-field-label"><strong>采集来源</strong><HelpHint context="字段" label="来源选择说明">只会请求已选中的来源，不选的来源完全不会访问。建议先保留全部免密来源；某个来源质量不合适时可取消。Smithsonian 需要免费的 Open Access API Key，密钥只写进你本地复制的命令，不会上传到本系统。</HelpHint></div><div className="command-pill-group command-pill-group--sources" role="group" aria-label="采集来源">
           {COLLECTOR_SOURCES.map((source) => {
             const selected = selectedSources.includes(source.code);
             return <button key={source.code} type="button" className={`pill-choice${selected ? " pill-choice--selected" : ""}`} aria-pressed={selected} onClick={() => toggleSource(source.code)}>{source.label}</button>;
@@ -323,8 +326,15 @@ export function ImportsTab(props: AdminTabProps) {
         const shortfall = Math.max(0, minimumPerSpecies - species.candidate_count);
         return <li key={species.id} className={shortfall === 0 ? "collector-shortfalls__reached" : ""}><strong>{species.code}</strong><span>{species.name_zh}</span><span>当前 {species.candidate_count}</span><span>{shortfall ? `还差 ${shortfall}` : "已达到"}</span></li>;
       })}</ul> : null}
-      <p className="collector-command"><code>{command}</code></p>
-      <button type="button" className="secondary-button" onClick={() => void copyCommand()}>复制命令</button>
+      <div className="collector-command-panel">
+        <strong>运行命令</strong>
+        <p className="collector-command"><code>{command}</code></p>
+        <div className="collector-copy-row">
+          <button type="button" className="secondary-button collector-copy-button" onClick={() => void copyCommand()}>{copyState === "success" ? "已复制" : copyState === "error" ? "重新复制" : "复制命令"}</button>
+          {copyState === "success" ? <span className="collector-copy-feedback collector-copy-feedback--success" role="status">命令已复制到剪贴板。</span> : null}
+          {copyState === "error" ? <span className="collector-copy-feedback collector-copy-feedback--error" role="alert">复制失败，请手动选择命令或重试。</span> : null}
+        </div>
+      </div>
       <p>输出文件为 <code>output/candidates.csv</code>。“首次采集”会重写这份本地 CSV；“数量不足时补采”自动添加 <code>--resume</code>，保留旧行并合并去重。上传时服务器还会再次去重。</p>
     </section>
     <section className="admin-card">

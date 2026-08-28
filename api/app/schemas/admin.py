@@ -91,6 +91,7 @@ class SpeciesResponse(BaseModel):
     active: bool
     sort_order: int
     candidate_count: int
+    source_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class SpeciesListResponse(BaseModel):

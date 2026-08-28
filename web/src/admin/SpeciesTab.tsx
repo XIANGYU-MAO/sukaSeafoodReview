@@ -1,11 +1,21 @@
 import { useMemo, useState } from "react";
 
 import { ApiError } from "../api/client";
-import { PageControls, QueryBoundary, adminMutation, mutationMessage, useAdminQuery, type AdminTabProps } from "./common";
+import { PageControls, QueryBoundary, adminMutation, mutationMessage, sourceLabel, useAdminQuery, type AdminTabProps } from "./common";
 import { HelpHint } from "./HelpHint";
 import { isSafeSpeciesCode, parseSpeciesList, parseSpeciesReceipt, type AdminSpecies } from "./types";
 
 const LIMIT = 20;
+const CANDIDATE_SOURCE_ORDER = [
+  "FISH_VISTA",
+  "INATURALIST",
+  "GBIF",
+  "WIKIMEDIA_COMMONS",
+  "ATLAS_OF_LIVING_AUSTRALIA",
+  "OBIS",
+  "NOAA_PHOTO_LIBRARY",
+  "SMITHSONIAN_OPEN_ACCESS",
+] as const;
 interface Draft { code: string; name_zh: string; name_en: string; scientific_name: string; inat_taxon_id: string; gbif_taxon_key: string; commons_category: string; fish_vista_filter: string; sort_order: string; active: boolean; reason: string }
 const EMPTY: Draft = { code: "", name_zh: "", name_en: "", scientific_name: "", inat_taxon_id: "", gbif_taxon_key: "", commons_category: "", fish_vista_filter: "", sort_order: "0", active: true, reason: "" };
 
@@ -68,7 +78,7 @@ export function SpeciesTab(props: AdminTabProps) {
       <th><TableHeading label="候选数">已导入到这个鱼种下的候选图片总数。</TableHeading></th>
       <th><TableHeading label="状态">启用后可参与采集、导入和审核；停用仍保留历史。</TableHeading></th>
       <th><TableHeading label="操作">进入编辑表单修改鱼种资料或停用鱼种。</TableHeading></th>
-    </tr></thead><tbody>{data.items.map((item) => <tr key={item.id}><th>{item.code}</th><td>{item.name_zh}</td><td>{item.name_en}</td><td><em>{item.scientific_name}</em></td><td>{item.sort_order}</td><td>{item.candidate_count}</td><td>{item.active ? "启用" : "停用"}</td><td><button disabled={unavailable || props.directoriesUnavailable} type="button" className="secondary-button" aria-label={`编辑 ${item.code}`} onClick={() => startEdit(item)}>编辑</button></td></tr>)}</tbody></table></div><PageControls offset={offset} total={data.total} limit={LIMIT} onChange={setOffset} disabled={unavailable || props.directoriesUnavailable} /></> : <p>没有鱼种。</p>}</QueryBoundary>
+    </tr></thead><tbody>{data.items.map((item) => <tr key={item.id}><th>{item.code}</th><td>{item.name_zh}</td><td>{item.name_en}</td><td><em>{item.scientific_name}</em></td><td>{item.sort_order}</td><td><span className="species-candidate-count"><span>{item.candidate_count}</span><HelpHint context="操作" label={`候选来源明细：${item.code}`}><span className="species-source-breakdown"><strong>合计 {item.candidate_count}</strong>{candidateSourceRows(item.source_counts).map(([label, count]) => <span key={label}><span>{label}</span><b>{count}</b></span>)}</span></HelpHint></span></td><td>{item.active ? "启用" : "停用"}</td><td><button disabled={unavailable || props.directoriesUnavailable} type="button" className="secondary-button" aria-label={`编辑 ${item.code}`} onClick={() => startEdit(item)}>编辑</button></td></tr>)}</tbody></table></div><PageControls offset={offset} total={data.total} limit={LIMIT} onChange={setOffset} disabled={unavailable || props.directoriesUnavailable} /></> : <p>没有鱼种。</p>}</QueryBoundary>
     {mode ? <fieldset className="admin-fieldset" disabled={query.unavailable || props.directoriesUnavailable}><section className="admin-card"><h3>{mode === "create" ? "新增鱼种" : `编辑 ${selected?.code}`}</h3>
       {mode === "create" ? <div className="admin-form-field"><FieldLabel htmlFor="species-code" label="鱼种代码">唯一且创建后不能修改；建议使用稳定的大写字母和数字代码。</FieldLabel><input id="species-code" value={draft.code} onChange={(event) => setDraft({ ...draft, code: event.target.value.toUpperCase() })} /></div> : <p className="admin-field-label"><span>代码（不可修改）：<strong>{selected?.code}</strong></span><HelpHint context="字段" label="鱼种代码">代码用于 CSV、文件夹和训练标签，创建后不能修改。</HelpHint></p>}
       <div className="admin-form-grid">
@@ -85,7 +95,7 @@ export function SpeciesTab(props: AdminTabProps) {
       </div></details>
       <div className="admin-check-field"><label className="check-label"><input type="checkbox" checked={draft.active} onChange={(event) => { setDraft({ ...draft, active: event.target.checked }); setStopConfirm(false); }} />启用</label><HelpHint context="字段" label="启用">启用后可参与采集、导入和审核；停用不会删除已有候选和历史。</HelpHint></div>
       <div className="admin-form-field"><FieldLabel htmlFor="species-reason" label="鱼种修改原因">记录为什么新增或修改，方便之后查看管理操作历史。</FieldLabel><textarea id="species-reason" value={draft.reason} onChange={(event) => setDraft({ ...draft, reason: event.target.value })} /></div>
-      <div className="inline-actions equal-action-row" role="group" aria-label="鱼种表单操作">{mode === "edit" && selected?.active ? <button type="button" className="danger-button" onClick={() => setDraft({ ...draft, active: false })}>停用鱼种</button> : null}<button type="button" className="primary-button compact-button" disabled={pending} onClick={() => void save()}>{pending ? "保存中…" : mode === "create" ? "创建鱼种" : stopConfirm ? "确认停用并保存" : "保存鱼种"}</button><button type="button" className="secondary-button" onClick={close}>{mode === "create" ? "取消新增" : "取消"}</button></div>
+      <div className="inline-actions equal-action-row species-form-actions" role="group" aria-label="鱼种表单操作">{mode === "edit" && selected?.active ? <button type="button" className="danger-button" onClick={() => setDraft({ ...draft, active: false })}>停用鱼种</button> : null}<button type="button" className="primary-button compact-button" disabled={pending} onClick={() => void save()}>{pending ? "保存中…" : mode === "create" ? "创建鱼种" : stopConfirm ? "确认停用并保存" : "保存鱼种"}</button><button type="button" className="secondary-button" onClick={close}>{mode === "create" ? "取消新增" : "取消"}</button></div>
     </section></fieldset> : null}
   </div>;
 }
@@ -96,6 +106,16 @@ function FieldLabel({ htmlFor, label, children }: { htmlFor: string; label: stri
 
 function TableHeading({ label, children }: { label: string; children: string }) {
   return <span className="admin-table-heading"><span>{label}</span><HelpHint context="表头" label={label}>{children}</HelpHint></span>;
+}
+
+function candidateSourceRows(counts: Record<string, number>): [string, number][] {
+  const byLabel = new Map<string, number>();
+  for (const code of CANDIDATE_SOURCE_ORDER) byLabel.set(sourceLabel(code), 0);
+  for (const [code, count] of Object.entries(counts)) {
+    const label = sourceLabel(code);
+    byLabel.set(label, (byLabel.get(label) ?? 0) + count);
+  }
+  return [...byLabel.entries()];
 }
 
 function sourceOverrides(draft: Draft): Pick<AdminSpecies, "inat_taxon_id" | "gbif_taxon_key" | "commons_category" | "fish_vista_filter"> | null {

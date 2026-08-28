@@ -91,6 +91,7 @@ def test_species_list_filters_sorts_paginates_and_counts_candidates(settings):
     item = response.json()["items"][0]
     assert item["code"] == "SF002"
     assert item["candidate_count"] == 1
+    assert item["source_counts"] == {"Wikimedia": 1}
     assert set(item) == {
         "id",
         "code",
@@ -104,6 +105,7 @@ def test_species_list_filters_sorts_paginates_and_counts_candidates(settings):
         "active",
         "sort_order",
         "candidate_count",
+        "source_counts",
     }
 
 

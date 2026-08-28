@@ -271,6 +271,15 @@ describe("species and review administration", () => {
     await user.unhover(scientificHeadingHelp);
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
+    const sourceBreakdown = screen.getByRole("button", { name: "操作说明：候选来源明细：SF001" });
+    await user.hover(sourceBreakdown);
+    const sourceTooltip = screen.getByRole("tooltip");
+    expect(sourceTooltip).toHaveTextContent("合计 2");
+    expect(within(sourceTooltip).getByText("iNaturalist").parentElement).toHaveTextContent("iNaturalist1");
+    expect(within(sourceTooltip).getByText("GBIF").parentElement).toHaveTextContent("GBIF1");
+    expect(within(sourceTooltip).getByText("NOAA 图片库").parentElement).toHaveTextContent("NOAA 图片库0");
+    await user.unhover(sourceBreakdown);
+
     await user.click(screen.getByRole("button", { name: "新增鱼种" }));
     for (const label of ["鱼种代码", "中文名", "英文名", "学名", "排序", "启用", "鱼种修改原因"]) {
       expect(screen.getByRole("button", { name: `字段说明：${label}` })).toBeInTheDocument();
