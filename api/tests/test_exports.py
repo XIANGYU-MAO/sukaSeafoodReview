@@ -544,6 +544,41 @@ def _successful_initial_sync(settings):
     return seed, rows[0]
 
 
+def test_successful_receipt_clears_pending_when_candidate_and_review_versions_differ(settings):
+    seed = create_seed(settings)
+    asyncio.run(
+        mutate(
+            settings,
+            Candidate,
+            seed.candidate_ids[0],
+            version=2,
+        )
+    )
+
+    with TestClient(create_app(settings)) as client:
+        batch = create_batch(client, seed)
+        _, rows = download(client, seed, batch.json()["id"])
+        applied = receipt(
+            client,
+            batch.json()["id"],
+            rows[0]["receipt_token"],
+            [success_receipt(rows[0])],
+        )
+        counts = client.get(
+            "/v1/admin/exports/pending-counts", headers=mao_headers(seed)
+        )
+        next_batch = client.post(
+            "/v1/admin/exports", json={}, headers=mao_headers(seed, csrf=True)
+        )
+
+    assert applied.status_code == 200
+    assert applied.json()["status"] == "completed"
+    assert counts.status_code == 200
+    assert counts.json() == {"SF001": 0, "SF002": 0}
+    assert next_batch.status_code == 200
+    assert next_batch.json() == {"code": "NO_WORK", "created": False, "batch": None}
+
+
 @pytest.mark.parametrize("desired", [Decision.REJECTED, Decision.UNSURE, None])
 def test_locally_present_candidate_becoming_absent_emits_remove(settings, desired):
     seed, local = _successful_initial_sync(settings)

@@ -353,7 +353,6 @@ async def derive_deltas(
                         previous_path = None
                 elif (
                     local_item.review_id != current.id
-                    or local_item.review_version != current.version
                     or local_item.candidate_version != candidate.version
                     or original_changed
                     or _metadata_changed(local_item, candidate, species)
