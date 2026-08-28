@@ -1932,6 +1932,11 @@ h1 {
   border: 0;
 }
 
+.command-option-group--wide,
+.command-number-field--wide {
+  grid-column: 1 / -1;
+}
+
 .command-option-group legend {
   margin-bottom: 0.55rem;
   font-weight: 800;

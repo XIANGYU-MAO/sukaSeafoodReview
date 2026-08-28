@@ -20,6 +20,7 @@ FIXED_ROUTE_METHODS = {
     "/v1/admin/species": {"get", "post"},
     "/v1/admin/species/{species_id}": {"patch"},
     "/v1/admin/candidates": {"get"},
+    "/v1/admin/candidates/bulk-disable": {"post"},
     "/v1/admin/candidates/{candidate_id}": {"patch"},
     "/v1/admin/reviews": {"get"},
     "/v1/admin/reviews/{review_id}": {"patch"},

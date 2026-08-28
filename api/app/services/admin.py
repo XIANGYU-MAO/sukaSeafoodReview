@@ -37,6 +37,8 @@ from app.schemas.admin import (
     AdminUserListResponse,
     AdminUserSummary,
     CandidateAdminResponse,
+    CandidateBulkDisableRequest,
+    CandidateBulkDisableResponse,
     CandidateFilters,
     CandidateListResponse,
     CandidatePatchRequest,
@@ -531,6 +533,64 @@ async def list_candidates(
             await _candidate_response(session, candidate) for candidate in candidates
         ],
     )
+
+
+async def bulk_disable_candidates(
+    session: AsyncSession,
+    actor_id: UUID,
+    payload: CandidateBulkDisableRequest,
+) -> CandidateBulkDisableResponse:
+    try:
+        await acquire_sync_generation_lock(session)
+        statement = select(Candidate)
+        if payload.source_dataset is not None:
+            scope = "source"
+            value = payload.source_dataset
+            statement = statement.where(Candidate.source_dataset == value)
+        else:
+            scope = "species"
+            value = str(payload.species_code)
+            statement = statement.join(Species, Species.id == Candidate.species_id).where(
+                Species.code == value
+            )
+        candidates = list(
+            (
+                await session.scalars(
+                    statement.with_for_update().execution_options(populate_existing=True)
+                )
+            ).all()
+        )
+        disabled = 0
+        released = 0
+        for candidate in candidates:
+            if not candidate.active:
+                continue
+            disabled += 1
+            if candidate.current_reviewer_id is not None:
+                released += 1
+            candidate.active = False
+            candidate.current_reviewer_id = None
+            candidate.current_started_at = None
+            candidate.version += 1
+        result = CandidateBulkDisableResponse(
+            matched=len(candidates), disabled=disabled, released=released
+        )
+        await audited_change(
+            session,
+            action="CANDIDATE_BULK_DISABLE",
+            actor_id=actor_id,
+            object_type="CandidateSelection",
+            object_id=f"{scope}:{value}",
+            reason=payload.reason,
+            before={"scope": scope, "value": value, "matched": len(candidates)},
+            after={"disabled": disabled, "released": released},
+        )
+        await session.commit()
+        return result
+    except BaseException:
+        if session.in_transaction():
+            await session.rollback()
+        raise
 
 
 async def _lock_target(session: AsyncSession, target_id: UUID | None) -> User | None:

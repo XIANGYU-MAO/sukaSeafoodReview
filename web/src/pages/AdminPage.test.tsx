@@ -109,6 +109,36 @@ describe("admin authorization and accessible shell", () => {
 });
 
 describe("progress/current and candidate safety", () => {
+  it("bulk-disables the selected candidate source without editing cards one by one", async () => {
+    const fetchMock = mockAdmin((url, init) => {
+      if (url.endsWith("/admin/candidates/bulk-disable") && init?.method === "POST") {
+        return jsonResponse({ matched: 1, disabled: 1, released: 0 });
+      }
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+    renderWithAuth(<App />, "/admin");
+    await openTab("候选图片");
+
+    const disableSource = screen.getByRole("button", { name: "禁用所选来源" });
+    const disableSpecies = screen.getByRole("button", { name: "禁用所选鱼种" });
+    expect(disableSource).toBeDisabled();
+    expect(disableSpecies).toBeDisabled();
+    await user.selectOptions(screen.getByRole("combobox", { name: "来源" }), "INATURALIST");
+    await user.selectOptions(screen.getByRole("combobox", { name: "鱼种" }), "SF001");
+    expect(disableSource).toBeEnabled();
+    expect(disableSpecies).toBeEnabled();
+    await user.click(disableSource);
+
+    expect(await screen.findByRole("status")).toHaveTextContent("已停用 1 张候选图片");
+    const call = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/admin/candidates/bulk-disable"));
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+      source_dataset: "INATURALIST",
+      reason: "管理员批量停用来源：INATURALIST",
+    });
+    expect(new Headers(call?.[1]?.headers).get("X-CSRF-Token")).toBe("mao-csrf-token");
+  });
+
   it("releases with exact version, reason, confirmation and CSRF; conflicts preserve the draft", async () => {
     let mutations = 0;
     const fetchMock = mockAdmin((url, init) => {

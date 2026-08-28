@@ -6,6 +6,16 @@ import { parseCandidateList, parseCandidateReceipt, type AdminCandidate } from "
 
 const LIMIT = 20;
 type Draft = { preview_url: string; original_url: string; species_id: string; active: boolean; reason: string; target: string; confirm: boolean };
+type BulkDisableReceipt = { matched: number; disabled: number; released: number };
+
+function parseBulkDisableReceipt(value: unknown): BulkDisableReceipt {
+  if (!value || typeof value !== "object") throw new Error("INVALID_BULK_DISABLE_RECEIPT");
+  const root = value as Record<string, unknown>;
+  for (const key of ["matched", "disabled", "released"] as const) {
+    if (!Number.isInteger(root[key]) || Number(root[key]) < 0) throw new Error("INVALID_BULK_DISABLE_RECEIPT");
+  }
+  return { matched: Number(root.matched), disabled: Number(root.disabled), released: Number(root.released) };
+}
 
 export function CandidatesTab(props: AdminTabProps) {
   const [filters, setFilters] = useState({ species: "", source: "", active: "", reviewed: "", decision: "", reviewer: "", search: "" });
@@ -65,6 +75,26 @@ export function CandidatesTab(props: AdminTabProps) {
     } finally { setPending(false); }
   }
 
+  async function bulkDisable(scope: "source" | "species") {
+    if (pending) return;
+    const value = scope === "source" ? filters.source : filters.species;
+    if (!value) return;
+    const label = scope === "source" ? `来源 ${sourceLabel(value)}` : `鱼种 ${value}`;
+    if (!window.confirm(`确认停用${label}下的全部候选图片？正在查看的任务会被释放，已有审核历史会保留。`)) return;
+    const body = scope === "source"
+      ? { source_dataset: value, reason: `管理员批量停用来源：${value}` }
+      : { species_code: value, reason: `管理员批量停用鱼种：${value}` };
+    setPending(true); setNotice(null);
+    try {
+      const raw = await adminMutation<unknown>("/admin/candidates/bulk-disable", { method: "POST", body, csrfToken: props.csrfToken }, props.retryBootstrap);
+      const result = parseBulkDisableReceipt(raw);
+      setNotice({ kind: "success", text: `已停用 ${result.disabled} 张候选图片${result.released ? `，并释放 ${result.released} 个正在查看的任务` : ""}。` });
+      query.reload();
+    } catch (error) {
+      setNotice({ kind: "error", text: mutationMessage(error) });
+    } finally { setPending(false); }
+  }
+
   return <div className="admin-stack">
     {notice ? <div role={notice.kind === "error" ? "alert" : "status"} className={`notice notice--${notice.kind}`}>{notice.text}</div> : null}
     <fieldset className="admin-fieldset" disabled={query.unavailable || props.directoriesUnavailable}><form className="admin-filters" onSubmit={(event) => { event.preventDefault(); setOffset(0); setApplied(filters); }}>
@@ -77,6 +107,10 @@ export function CandidatesTab(props: AdminTabProps) {
       <label>候选搜索<input type="search" aria-label="候选搜索" value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} /></label>
       <button type="submit" className="secondary-button">应用候选筛选</button>
     </form></fieldset>
+    <div className="inline-actions equal-action-row" role="group" aria-label="批量停用候选">
+      <button type="button" className="danger-button" disabled={!filters.source || pending || query.unavailable || props.directoriesUnavailable} onClick={() => void bulkDisable("source")}>禁用所选来源</button>
+      <button type="button" className="danger-button" disabled={!filters.species || pending || query.unavailable || props.directoriesUnavailable} onClick={() => void bulkDisable("species")}>禁用所选鱼种</button>
+    </div>
     <QueryBoundary query={query}>{(data, unavailable) => data.items.length ? <><div className="admin-card-grid admin-review-card-grid">{data.items.map((item) => <CandidateCard key={item.id} item={item} disabled={unavailable || props.directoriesUnavailable} onEdit={() => edit(item)} />)}</div><PageControls offset={offset} total={data.total} limit={LIMIT} onChange={setOffset} disabled={unavailable || props.directoriesUnavailable} /></> : <p>没有符合条件的候选图片。</p>}</QueryBoundary>
     {editing && draft ? <fieldset className="admin-fieldset" disabled={query.unavailable || props.directoriesUnavailable}><section className="admin-card"><h3>编辑候选 {editing.id}</h3>
       <label>预览图地址<input aria-label="预览图地址" value={draft.preview_url} onChange={(event) => setDraft({ ...draft, preview_url: event.target.value })} /></label>

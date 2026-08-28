@@ -23,6 +23,8 @@ def test_normalize_license_maps_common_cc_variants():
     assert normalize_license("CC BY-NC-SA 4.0") == "CC-BY-NC-SA"
     assert normalize_license("cc-by 4.0") == "CC-BY"
     assert normalize_license("https://creativecommons.org/publicdomain/zero/1.0/") == "CC0"
+    assert normalize_license("CC-BY-NC 4.0 (Int)") == "CC-BY-NC"
+    assert normalize_license("http://creativecommons.org/licenses/by/4.0/legalcode") == "CC-BY"
 
 
 def test_allowed_license_rejects_nd_and_all_rights_reserved():
@@ -30,6 +32,8 @@ def test_allowed_license_rejects_nd_and_all_rights_reserved():
     assert allowed_license("CC-BY-NC-SA") is True
     assert allowed_license("CC-BY-ND") is False
     assert allowed_license("CC-BY-NC-ND") is False
+    assert allowed_license("CC-BY-NC-custom-restrictions") is False
+    assert allowed_license("terms: CC-BY-NC-custom-restrictions") is False
     assert allowed_license(None) is False
     assert allowed_license("") is False
 
@@ -175,6 +179,237 @@ def test_parse_commons_page_extracts_license_and_artist():
     assert row["license"] == "CC-BY-SA"
     assert row["creator"] == "Jane Doe"
     assert row["source_url"].endswith("File:Fish.jpg")
+
+
+def test_parse_ala_occurrence_keeps_exact_licensed_images():
+    parser = getattr(collector_module, "parse_ala_occurrence", lambda *_args: [])
+    occurrence = {
+        "uuid": "ala-record-1",
+        "scientificName": "Scomberomorus commerson",
+        "references": "https://biocache.ala.org.au/occurrences/ala-record-1",
+        "largeImageUrl": "https://images.ala.org.au/image/proxyImageThumbnailLarge?imageId=image-1",
+        "imageUrl": "https://images.ala.org.au/image/proxyImage?imageId=image-1",
+        "images": ["image-1"],
+        "license": "CC-BY-NC 4.0 (Int)",
+        "recordedBy": ["Example Observer"],
+        "country": "Australia",
+        "stateProvince": "Queensland",
+        "eventDate": 1760313600000,
+        "identificationVerificationStatus": "research",
+    }
+
+    rows = parser(
+        occurrence,
+        "TENGGIRI",
+        "康氏马鲛",
+        "Scomberomorus commerson",
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["source_dataset"] == "ATLAS_OF_LIVING_AUSTRALIA"
+    assert rows[0]["source_record_id"] == "occ:ala-record-1/image:image-1"
+    assert rows[0]["image_url"] == occurrence["imageUrl"]
+    assert rows[0]["license"] == "CC-BY-NC"
+    assert rows[0]["source_country"] == "Australia"
+
+
+def test_parse_obis_occurrence_splits_associated_media_and_requires_a_usable_license():
+    parser = getattr(collector_module, "parse_obis_occurrence", lambda *_args: [])
+    occurrence = {
+        "id": "obis-record-1",
+        "scientificName": "Scomberomorus commerson",
+        "associatedMedia": "https://media.example.org/one.jpg | https://media.example.org/two.jpg",
+        "license": "https://creativecommons.org/licenses/by/4.0/",
+        "recordedBy": "Marine Observer",
+        "country": "Malaysia",
+        "locality": "Sabah",
+        "eventDate": "2024-04-05T00:00:00Z",
+        "basisOfRecord": "HumanObservation",
+        "dataset_id": "dataset-1",
+    }
+
+    rows = parser(
+        occurrence,
+        "TENGGIRI",
+        "康氏马鲛",
+        "Scomberomorus commerson",
+    )
+
+    assert [row["image_url"] for row in rows] == [
+        "https://media.example.org/one.jpg",
+        "https://media.example.org/two.jpg",
+    ]
+    assert all(row["source_dataset"] == "OBIS" for row in rows)
+    assert all(row["license"] == "CC-BY" for row in rows)
+    assert rows[1]["source_record_id"] == "occ:obis-record-1/media:2"
+
+
+def test_parse_smithsonian_record_only_keeps_cc0_media_for_the_exact_species():
+    parser = getattr(collector_module, "parse_smithsonian_record", lambda *_args: [])
+    record = {
+        "id": "edan-record-1",
+        "title": "Scomberomorus commerson",
+        "content": {
+            "indexedStructured": {"scientific_name": ["Scomberomorus commerson"]},
+            "descriptiveNonRepeating": {
+                "record_link": "https://n2t.net/ark:/65665/example",
+                "data_source": "NMNH - Fishes Division",
+                "online_media": {
+                    "media": [
+                        {
+                            "type": "Images",
+                            "content": "https://ids.si.edu/ids/deliveryService?id=NMNH-example",
+                            "thumbnail": "https://ids.si.edu/ids/deliveryService?id=NMNH-example&max=640",
+                            "guid": "media-1",
+                            "usage": {"access": "CC0"},
+                        },
+                        {
+                            "type": "Images",
+                            "content": "https://ids.si.edu/ids/deliveryService?id=restricted",
+                            "guid": "media-2",
+                            "usage": {"access": "Usage conditions apply"},
+                        },
+                    ]
+                },
+            },
+        },
+    }
+
+    rows = parser(
+        record,
+        "TENGGIRI",
+        "康氏马鲛",
+        "Scomberomorus commerson",
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["source_dataset"] == "SMITHSONIAN_OPEN_ACCESS"
+    assert rows[0]["license"] == "CC0"
+    assert rows[0]["image_url"].endswith("NMNH-example")
+    assert rows[0]["source_record_id"] == "record:edan-record-1/media:media-1"
+
+
+def test_parse_noaa_search_page_keeps_exact_species_images_credited_to_noaa():
+    parser = getattr(collector_module, "parse_noaa_search_page", lambda *_args: [])
+    page = """
+    <div class='ngdl-photo ngdl-photo--digital-library-list' id="photo-1" data-photo-modal-id="83945">
+      <a href="/noaa-collections/search/photo-library/item?search_api_fulltext=Pristigenys%20alta&amp;page=0">
+        <div class="c-field c-field--name-field-media-ngdl-photo c-field--type-image">
+        <img title="A short bigeye (Pristigenys alta) (Image credit: NOAA/NMFS/SEFSC)"
+             src="/sites/default/files/styles/max_650x650/public/fish.jpg" alt="A short bigeye (Pristigenys alta)" />
+        </div>
+      </a>
+      <a class="media-download-link" href="/media/ngdl/download-photo/photo-1">Download</a>
+    </div>
+    <div class='ngdl-photo ngdl-photo--digital-library-list' id="photo-2">
+      <img title="Another fish (Pristigenys alta) (Image credit: Courtesy of Private Photographer)" src="/private.jpg" />
+      <a class="media-download-link" href="/media/ngdl/download-photo/photo-2">Download</a>
+    </div>
+    <div class='ngdl-photo ngdl-photo--digital-library-list' id="photo-3">
+      <img title="A different fish (Pristigenys altae) (Image credit: NOAA/NMFS/SEFSC)" src="/different.jpg" />
+      <a class="media-download-link" href="/media/ngdl/download-photo/photo-3">Download</a>
+    </div>
+    """
+
+    rows = parser(page, "BIGEYE", "短大眼鲷", "Pristigenys alta")
+
+    assert len(rows) == 1
+    assert rows[0]["source_dataset"] == "NOAA_PHOTO_LIBRARY"
+    assert rows[0]["source_record_id"] == "photo:photo-1"
+    assert rows[0]["image_url"] == "https://www.noaa.gov/media/ngdl/download-photo/photo-1"
+    assert rows[0]["license"] == "PUBLIC-DOMAIN"
+    assert rows[0]["creator"] == "NOAA/NMFS/SEFSC"
+
+
+@pytest.mark.parametrize("source", ["ala", "obis", "smithsonian", "noaa"])
+def test_cli_accepts_each_new_source(source):
+    parsed = collector_module.parse_args(["--source", source])
+    assert parsed.sources == [source]
+
+
+def test_cli_accepts_repeated_sources_without_collecting_unselected_sources():
+    parsed = collector_module.parse_args(
+        ["--source", "inat", "--source", "ala", "--source", "noaa"]
+    )
+    assert parsed.sources == ["inat", "ala", "noaa"]
+
+
+def test_local_dedupe_reports_only_unique_rows_and_resume_preserves_existing_state():
+    existing = {
+        "seafood_code": "TENGGIRI",
+        "image_url": "https://images.example.test/fish.jpg",
+        "source_record_id": "old-record",
+        "status": "APPROVED",
+        "verified_by": "Mao",
+    }
+    recollected = {
+        "seafood_code": "TENGGIRI",
+        "image_url": "https://images.example.test/fish.jpg",
+        "source_record_id": "new-record",
+        "status": "CANDIDATE",
+        "verified_by": "",
+    }
+    unique = {
+        "seafood_code": "TENGGIRI",
+        "image_url": "https://images.example.test/other.jpg",
+        "source_record_id": "other-record",
+        "status": "CANDIDATE",
+    }
+
+    assert collector_module.dedupe_metadata([recollected, recollected, unique]) == [
+        recollected,
+        unique,
+    ]
+    assert collector_module.merge_resume_rows([existing], [recollected, unique]) == [
+        existing,
+        unique,
+    ]
+
+
+def test_resume_scans_past_existing_source_rows_to_find_new_candidates(monkeypatch, tmp_path):
+    config = tmp_path / "species_config.json"
+    config.write_text(json.dumps(dynamic_config()), encoding="utf-8")
+    output = tmp_path / "output"
+    old = {
+        "seafood_code": "FISH_A",
+        "source_dataset": "INATURALIST",
+        "source_record_id": "old",
+        "image_url": "https://images.example.test/old.jpg",
+    }
+    collector_module.write_manifest([old], output / "candidates.csv")
+    limits = []
+
+    class FakeCollector:
+        def __init__(self, **_kwargs):
+            pass
+
+        def collect_inat(self, species, max_rows):
+            limits.append((species["seafood_code"], max_rows))
+            if species["seafood_code"] != "FISH_A":
+                return []
+            return [
+                old,
+                {
+                    "seafood_code": "FISH_A",
+                    "source_dataset": "INATURALIST",
+                    "source_record_id": "new",
+                    "image_url": "https://images.example.test/new.jpg",
+                },
+            ][:max_rows]
+
+    monkeypatch.setattr(collector_module, "Collector", FakeCollector)
+    result = collector_module.main([
+        "--config", str(config),
+        "--source", "inat",
+        "--species", "FISH_A",
+        "--max-per-species", "1",
+        "--resume",
+        "--output-dir", str(output),
+    ])
+
+    assert result == 0
+    assert limits == [("FISH_A", 2)]
+    assert [row["source_record_id"] for row in collector_module.read_manifest(output / "candidates.csv")] == ["old", "new"]
 
 
 def test_stable_image_id_is_repeatable_and_species_scoped():

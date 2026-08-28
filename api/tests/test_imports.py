@@ -93,6 +93,32 @@ def valid_row(**changes: str) -> dict[str, str]:
     return row
 
 
+@pytest.mark.parametrize(
+    "source_dataset",
+    [
+        "ATLAS_OF_LIVING_AUSTRALIA",
+        "NOAA_PHOTO_LIBRARY",
+        "OBIS",
+        "SMITHSONIAN_OPEN_ACCESS",
+    ],
+)
+def test_import_accepts_each_collector_source(source_dataset):
+    row = valid_row(
+        source_dataset=source_dataset,
+        source_record_id=f"{source_dataset.lower()}-1",
+        source_url="https://records.example.test/one",
+        image_url="https://images.example.test/fish.jpg",
+        license="CC0",
+    )
+
+    normalized = normalize_legacy_row(
+        row,
+        image_origin_allowlist=("images.example.test",),
+    )
+
+    assert normalized.source_dataset == source_dataset
+
+
 async def import_factory(settings):
     engine = create_async_engine(settings.DATABASE_URL)
     return engine, async_sessionmaker(engine, expire_on_commit=False)
@@ -271,9 +297,13 @@ def test_preview_accepts_utf8_bom_and_reports_stable_source_species_counts():
 
     assert preview.total == 4
     assert preview.source_counts == {
+        "ATLAS_OF_LIVING_AUSTRALIA": 0,
         "FISH_VISTA": 1,
         "GBIF": 1,
         "INATURALIST": 1,
+        "NOAA_PHOTO_LIBRARY": 0,
+        "OBIS": 0,
+        "SMITHSONIAN_OPEN_ACCESS": 0,
         "WIKIMEDIA_COMMONS": 1,
     }
 

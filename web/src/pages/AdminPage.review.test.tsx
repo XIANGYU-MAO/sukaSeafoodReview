@@ -90,6 +90,33 @@ it("switches command syntax for Unix replenishment and accepts a CSV dropped ont
   expect(previewCall?.[1]?.body).toBeInstanceOf(FormData);
 });
 
+it("lets the administrator choose exactly which collectors appear in the generated command", async () => {
+  mockAdmin(() => undefined);
+  const user = userEvent.setup();
+  renderWithAuth(<App />, "/admin");
+  await openTab("采集与导入");
+
+  const sourceGroup = screen.getByRole("group", { name: "采集来源" });
+  expect(within(sourceGroup).getAllByRole("button")).toHaveLength(8);
+  expect(screen.getByText(/--source fish-vista/)).toBeInTheDocument();
+  expect(screen.getByText(/--source ala/)).toBeInTheDocument();
+  expect(screen.getByText(/--source obis/)).toBeInTheDocument();
+  expect(screen.getByText(/--source noaa/)).toBeInTheDocument();
+  expect(screen.queryByText(/--source smithsonian/)).not.toBeInTheDocument();
+
+  await user.click(within(sourceGroup).getByRole("button", { name: "NOAA 图片库" }));
+  expect(screen.queryByText(/--source noaa/)).not.toBeInTheDocument();
+  await user.click(within(sourceGroup).getByRole("button", { name: "Smithsonian 开放资源" }));
+  expect(screen.getByLabelText("Smithsonian API Key")).toBeInTheDocument();
+  await user.type(screen.getByLabelText("Smithsonian API Key"), "example-key");
+  expect(screen.getByText(/--source smithsonian.*--smithsonian-api-key example-key/)).toBeInTheDocument();
+
+  for (const selected of within(sourceGroup).getAllByRole("button", { pressed: true })) {
+    await user.click(selected);
+  }
+  expect(await screen.findByRole("alert")).toHaveTextContent("至少选择一个采集来源");
+});
+
 it("approves an observed image host and automatically previews the retained CSV again", async () => {
   let previewCount = 0;
   const blocked = {

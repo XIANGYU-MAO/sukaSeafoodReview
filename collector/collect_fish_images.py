@@ -8,7 +8,9 @@ The collector is deliberately conservative:
 - no candidate is automatically accepted for training;
 - manual review fields remain REVIEW/UNASSIGNED.
 
-Supported sources: Fish-Vista, iNaturalist, GBIF and Wikimedia Commons.
+Supported sources: Fish-Vista, iNaturalist, GBIF, Wikimedia Commons,
+Atlas of Living Australia, OBIS, Smithsonian Open Access, and the NOAA Photo
+Library.
 """
 
 from __future__ import annotations
@@ -19,13 +21,14 @@ import hashlib
 import html
 import io
 import json
+import os
 import re
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 
@@ -58,6 +61,31 @@ INAT_TAXA_API = "https://api.inaturalist.org/v1/taxa"
 GBIF_MATCH_API = "https://api.gbif.org/v1/species/match"
 GBIF_OCC_API = "https://api.gbif.org/v1/occurrence/search"
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+ALA_API = "https://api.ala.org.au/occurrences/occurrences/search"
+OBIS_API = "https://api.obis.org/v3/occurrence"
+SMITHSONIAN_SEARCH_API = "https://api.si.edu/openaccess/api/v1.0/search"
+SMITHSONIAN_CONTENT_API = "https://api.si.edu/openaccess/api/v1.0/content"
+NOAA_SEARCH_URL = "https://www.noaa.gov/noaa-collections/search/photo-library"
+ALL_SOURCES = (
+    "fish-vista",
+    "inat",
+    "gbif",
+    "commons",
+    "ala",
+    "obis",
+    "noaa",
+    "smithsonian",
+)
+SOURCE_DATASET_CODES = {
+    "fish-vista": "FISH_VISTA",
+    "inat": "INATURALIST",
+    "gbif": "GBIF",
+    "commons": "WIKIMEDIA_COMMONS",
+    "ala": "ATLAS_OF_LIVING_AUSTRALIA",
+    "obis": "OBIS",
+    "noaa": "NOAA_PHOTO_LIBRARY",
+    "smithsonian": "SMITHSONIAN_OPEN_ACCESS",
+}
 
 ALLOWED_LICENSES = {"CC0", "CC-BY", "CC-BY-SA", "CC-BY-NC", "CC-BY-NC-SA", "PUBLIC-DOMAIN"}
 CONFIG_SCHEMA_VERSION = 2
@@ -132,6 +160,8 @@ def normalize_license(value: Any) -> str:
     tokens = tokens.replace("http://creativecommons.org/licenses/", "")
     tokens = tokens.replace("creativecommons.org/licenses/", "")
     tokens = tokens.strip("/")
+    tokens = re.sub(r"/(?:legalcode|deed(?:\.[a-z-]+)?)$", "", tokens)
+    tokens = re.sub(r"-\((?:int|international)\)$", "", tokens)
     tokens = re.sub(r"(?:^|-)cc-?", "cc-", tokens)
     tokens = re.sub(r"(?:-\d+)+(?:/)?$", "", tokens).strip("-/")
     tokens = re.sub(r"-?\d+(?:\.\d+)?(?:/)?$", "", tokens).strip("-/")
@@ -143,7 +173,10 @@ def normalize_license(value: Any) -> str:
         code = "CC-" + tokens.upper()
     else:
         # Scan free text such as "CC BY-NC-SA 4.0".
-        m = re.search(r"cc-?(by(?:-nc)?(?:-sa|-nd)?(?:-sa|-nd)?)", low)
+        m = re.search(
+            r"(?:^|-)cc-?(by(?:-nc)?(?:-sa|-nd)?)(?:-\d+(?:\.\d+)?)?(?:-\((?:int|international)\))?$",
+            low,
+        )
         if m:
             code = "CC-" + m.group(1).upper()
         else:
@@ -158,7 +191,9 @@ def normalize_license(value: Any) -> str:
         "CC-BY-ND": "CC-BY-ND",
         "CC-BY-NC-ND": "CC-BY-NC-ND",
     }
-    return canonical.get(code, code)
+    if code in canonical:
+        return canonical[code]
+    return code
 
 
 def allowed_license(value: Any) -> bool:
@@ -175,6 +210,14 @@ def clean_html(value: Any) -> str:
 
 def norm_species(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def text_contains_exact_scientific_name(value: Any, scientific_name: str) -> bool:
+    parts = [re.escape(part) for part in scientific_name.strip().split()]
+    if not parts:
+        return False
+    pattern = r"\s+".join(parts)
+    return re.search(rf"(?<![A-Za-z]){pattern}(?![A-Za-z])", str(value or ""), flags=re.I) is not None
 
 
 def fish_vista_exact_match(candidate: Any, scientific_name: str) -> bool:
@@ -347,6 +390,248 @@ def parse_commons_page(page: dict[str, Any], seafood_code: str, app_label: str, 
     return row
 
 
+def _source_date(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value / 1000, tz=timezone.utc).date().isoformat()
+        except (OSError, OverflowError, ValueError):
+            return ""
+    return str(value or "")
+
+
+def parse_ala_occurrence(
+    occurrence: dict[str, Any], seafood_code: str, app_label: str, scientific_name: str
+) -> list[dict[str, str]]:
+    if norm_species(occurrence.get("scientificName")) != norm_species(scientific_name):
+        return []
+    lic = normalize_license(occurrence.get("license"))
+    if lic not in ALLOWED_LICENSES:
+        return []
+    occurrence_id = str(occurrence.get("uuid") or occurrence.get("id") or "").strip()
+    if not occurrence_id:
+        return []
+    images = [str(value).strip() for value in occurrence.get("images") or [] if str(value).strip()]
+    if not images and occurrence.get("imageUrl"):
+        images = ["primary"]
+    source_url = str(
+        occurrence.get("references")
+        or f"https://biocache.ala.org.au/occurrences/{quote(occurrence_id)}"
+    )
+    creator = occurrence.get("recordedBy") or ""
+    if isinstance(creator, list):
+        creator = ", ".join(clean_html(item) for item in creator if clean_html(item))
+    rows: list[dict[str, str]] = []
+    for index, image_id in enumerate(images):
+        image_url = str(occurrence.get("imageUrl") or "") if index == 0 else ""
+        if not image_url and image_id != "primary":
+            image_url = f"https://images.ala.org.au/image/proxyImage?imageId={quote(image_id)}"
+        if not image_url:
+            continue
+        source_record_id = f"occ:{occurrence_id}/image:{image_id}"
+        row = base_row(seafood_code, app_label, scientific_name)
+        row.update(
+            {
+                "image_id": stable_image_id(
+                    seafood_code, "ATLAS_OF_LIVING_AUSTRALIA", source_record_id
+                ),
+                "source_dataset": "ATLAS_OF_LIVING_AUSTRALIA",
+                "source_record_id": source_record_id,
+                "source_taxon_match": "EXACT",
+                "source_url": source_url,
+                "image_url": image_url,
+                "creator": clean_html(creator),
+                "license": lic,
+                "license_url": str(occurrence.get("license") or ""),
+                "attribution": clean_html(creator),
+                "source_observation_quality": str(
+                    occurrence.get("identificationVerificationStatus")
+                    or occurrence.get("basisOfRecord")
+                    or ""
+                ),
+                "source_country": str(occurrence.get("country") or ""),
+                "source_location": str(
+                    occurrence.get("locality") or occurrence.get("stateProvince") or ""
+                ),
+                "source_date": _source_date(occurrence.get("eventDate")),
+                "original_group_id": f"ALA-OCC-{occurrence_id}",
+            }
+        )
+        rows.append(row)
+    return rows
+
+
+def parse_obis_occurrence(
+    occurrence: dict[str, Any], seafood_code: str, app_label: str, scientific_name: str
+) -> list[dict[str, str]]:
+    if norm_species(occurrence.get("scientificName")) != norm_species(scientific_name):
+        return []
+    lic = normalize_license(occurrence.get("license"))
+    if lic not in ALLOWED_LICENSES:
+        return []
+    occurrence_id = str(occurrence.get("id") or occurrence.get("occurrenceID") or "").strip()
+    if not occurrence_id:
+        return []
+    media_value = occurrence.get("associatedMedia") or ""
+    media_values = media_value if isinstance(media_value, list) else re.split(
+        r"\s*[|;]\s*|,\s*(?=https?://)", str(media_value)
+    )
+    urls = [str(value).strip() for value in media_values if str(value).strip().startswith("https://")]
+    creator = occurrence.get("recordedBy") or ""
+    if isinstance(creator, list):
+        creator = ", ".join(clean_html(item) for item in creator if clean_html(item))
+    source_url = str(
+        occurrence.get("references") or f"https://obis.org/occurrence/{quote(occurrence_id)}"
+    )
+    rows: list[dict[str, str]] = []
+    for index, image_url in enumerate(urls, start=1):
+        source_record_id = f"occ:{occurrence_id}/media:{index}"
+        row = base_row(seafood_code, app_label, scientific_name)
+        row.update(
+            {
+                "image_id": stable_image_id(seafood_code, "OBIS", source_record_id),
+                "source_dataset": "OBIS",
+                "source_record_id": source_record_id,
+                "source_taxon_match": "EXACT",
+                "source_url": source_url,
+                "image_url": image_url,
+                "creator": clean_html(creator),
+                "license": lic,
+                "license_url": str(occurrence.get("license") or ""),
+                "attribution": clean_html(creator),
+                "source_observation_quality": str(occurrence.get("basisOfRecord") or ""),
+                "source_country": str(occurrence.get("country") or ""),
+                "source_location": str(occurrence.get("locality") or ""),
+                "source_date": _source_date(occurrence.get("eventDate")),
+                "original_group_id": f"OBIS-OCC-{occurrence_id}",
+            }
+        )
+        rows.append(row)
+    return rows
+
+
+def parse_smithsonian_record(
+    record: dict[str, Any], seafood_code: str, app_label: str, scientific_name: str
+) -> list[dict[str, str]]:
+    content = record.get("content") or {}
+    indexed = content.get("indexedStructured") or {}
+    scientific_names = indexed.get("scientific_name") or []
+    if isinstance(scientific_names, str):
+        scientific_names = [scientific_names]
+    if norm_species(scientific_name) not in {norm_species(value) for value in scientific_names}:
+        return []
+    record_id = str(record.get("id") or "").strip()
+    if not record_id:
+        return []
+    descriptive = content.get("descriptiveNonRepeating") or {}
+    media = ((descriptive.get("online_media") or {}).get("media") or [])
+    source_url = str(descriptive.get("record_link") or f"https://www.si.edu/object/{quote(record_id)}")
+    if source_url.startswith("http://"):
+        source_url = "https://" + source_url[len("http://") :]
+    data_source = clean_html(descriptive.get("data_source") or "Smithsonian Institution")
+    rows: list[dict[str, str]] = []
+    for index, item in enumerate(media, start=1):
+        if str(item.get("type") or "").casefold() not in {"image", "images", "stillimage"}:
+            continue
+        if normalize_license((item.get("usage") or {}).get("access")) != "CC0":
+            continue
+        image_url = str(item.get("content") or "").strip()
+        if not image_url.startswith("https://"):
+            continue
+        media_id = str(item.get("guid") or index)
+        source_record_id = f"record:{record_id}/media:{media_id}"
+        row = base_row(seafood_code, app_label, scientific_name)
+        row.update(
+            {
+                "image_id": stable_image_id(
+                    seafood_code, "SMITHSONIAN_OPEN_ACCESS", source_record_id
+                ),
+                "source_dataset": "SMITHSONIAN_OPEN_ACCESS",
+                "source_record_id": source_record_id,
+                "source_taxon_match": "EXACT",
+                "source_url": source_url,
+                "image_url": image_url,
+                "creator": data_source,
+                "license": "CC0",
+                "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution": data_source,
+                "source_observation_quality": "MUSEUM_COLLECTION",
+                "original_group_id": f"SMITHSONIAN-RECORD-{record_id}",
+                "image_context": "MUSEUM",
+            }
+        )
+        rows.append(row)
+    return rows
+
+
+def _html_attribute(fragment: str, name: str) -> str:
+    match = re.search(rf"\b{re.escape(name)}\s*=\s*(['\"])(.*?)\1", fragment, flags=re.I | re.S)
+    return html.unescape(match.group(2)).strip() if match else ""
+
+
+def parse_noaa_search_page(
+    page: str, seafood_code: str, app_label: str, scientific_name: str
+) -> list[dict[str, str]]:
+    starts = []
+    for match in re.finditer(r"<div\b[^>]*>", page, flags=re.I | re.S):
+        classes = _html_attribute(match.group(0), "class").split()
+        if "ngdl-photo" in classes:
+            starts.append(match.start())
+    chunks = [
+        page[start : starts[index + 1] if index + 1 < len(starts) else len(page)]
+        for index, start in enumerate(starts)
+    ]
+    rows: list[dict[str, str]] = []
+    for chunk in chunks:
+        opening = re.match(r"<div\b[^>]*>", chunk, flags=re.I | re.S)
+        image = re.search(r"<img\b[^>]*>", chunk, flags=re.I | re.S)
+        download = re.search(
+            r"<a\b[^>]*class\s*=\s*(['\"])[^'\"]*\bmedia-download-link\b[^'\"]*\1[^>]*>",
+            chunk,
+            flags=re.I | re.S,
+        )
+        if not opening or not image or not download:
+            continue
+        title = _html_attribute(image.group(0), "title") or _html_attribute(image.group(0), "alt")
+        if not text_contains_exact_scientific_name(title, scientific_name):
+            continue
+        credit_match = re.search(r"\(Image credit:\s*(.*?)\)\s*$", title, flags=re.I)
+        credit = clean_html(credit_match.group(1)) if credit_match else ""
+        credit_upper = credit.upper()
+        if "COURTESY" in credit_upper or not any(
+            marker in credit_upper
+            for marker in ("NOAA", "NMFS", "SEFSC", "NEFSC", "AFSC", "NWFSC", "PIFSC")
+        ):
+            continue
+        photo_id = _html_attribute(opening.group(0), "id")
+        image_url = urljoin("https://www.noaa.gov", _html_attribute(download.group(0), "href"))
+        if not photo_id or not image_url.startswith("https://"):
+            continue
+        source_link = re.search(r"<a\b[^>]*href\s*=\s*(['\"])(.*?)\1", chunk, flags=re.I | re.S)
+        source_url = urljoin("https://www.noaa.gov", html.unescape(source_link.group(2))) if source_link else NOAA_SEARCH_URL
+        source_record_id = f"photo:{photo_id}"
+        row = base_row(seafood_code, app_label, scientific_name)
+        row.update(
+            {
+                "image_id": stable_image_id(
+                    seafood_code, "NOAA_PHOTO_LIBRARY", source_record_id
+                ),
+                "source_dataset": "NOAA_PHOTO_LIBRARY",
+                "source_record_id": source_record_id,
+                "source_taxon_match": "EXACT_TITLE",
+                "source_url": source_url,
+                "image_url": image_url,
+                "creator": credit,
+                "license": "PUBLIC-DOMAIN",
+                "license_url": "https://www.noaa.gov/disclaimer",
+                "attribution": title,
+                "source_observation_quality": "NOAA_CREDITED",
+                "original_group_id": f"NOAA-PHOTO-{photo_id}",
+            }
+        )
+        rows.append(row)
+    return rows
+
+
 def parse_fish_vista_row(
     record: dict[str, str],
     source_split: str,
@@ -402,6 +687,7 @@ def parse_fish_vista_row(
 @dataclass
 class Collector:
     session: requests.Session
+    smithsonian_api_key: str | None = None
     delay_seconds: float = 1.05
     commons_delay_seconds: float = 6.5
     max_retries: int = 4
@@ -601,6 +887,128 @@ class Collector:
                         return out
         return out
 
+    def collect_ala(self, species: dict[str, Any], max_rows: int) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        start = 0
+        page_size = min(100, max(20, max_rows))
+        while len(out) < max_rows:
+            data = self.get_json(
+                ALA_API,
+                {
+                    "q": f'scientificName:"{species["scientific_name"]}"',
+                    "fq": "multimedia:Image",
+                    "pageSize": page_size,
+                    "start": start,
+                },
+            )
+            occurrences = data.get("occurrences") or []
+            if not occurrences:
+                break
+            for occurrence in occurrences:
+                for row in parse_ala_occurrence(
+                    occurrence,
+                    species["seafood_code"],
+                    species["app_label"],
+                    species["scientific_name"],
+                ):
+                    out.append(row)
+                    if len(out) >= max_rows:
+                        return out
+            start += len(occurrences)
+            if start >= int(data.get("totalRecords") or 0):
+                break
+        return out
+
+    def collect_obis(self, species: dict[str, Any], max_rows: int) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        after: str | None = None
+        scanned = 0
+        scan_limit = max(1000, max_rows * 20)
+        page_size = min(1000, max(100, max_rows * 5))
+        while len(out) < max_rows and scanned < scan_limit:
+            params: dict[str, Any] = {
+                "scientificname": species["scientific_name"],
+                "size": page_size,
+            }
+            if after:
+                params["after"] = after
+            data = self.get_json(OBIS_API, params)
+            occurrences = data.get("results") or []
+            if not occurrences:
+                break
+            for occurrence in occurrences:
+                for row in parse_obis_occurrence(
+                    occurrence,
+                    species["seafood_code"],
+                    species["app_label"],
+                    species["scientific_name"],
+                ):
+                    out.append(row)
+                    if len(out) >= max_rows:
+                        return out
+            scanned += len(occurrences)
+            next_after = str(occurrences[-1].get("id") or "").strip()
+            if not next_after or next_after == after or len(occurrences) < page_size:
+                break
+            after = next_after
+        return out
+
+    def collect_smithsonian(self, species: dict[str, Any], max_rows: int) -> list[dict[str, str]]:
+        if not self.smithsonian_api_key:
+            raise ValueError(
+                "Smithsonian requires --smithsonian-api-key (free key from api.data.gov)"
+            )
+        out: list[dict[str, str]] = []
+        start = 0
+        page_size = min(100, max(10, max_rows * 2))
+        while len(out) < max_rows:
+            data = self.get_json(
+                SMITHSONIAN_SEARCH_API,
+                {
+                    "api_key": self.smithsonian_api_key,
+                    "q": f'{species["scientific_name"]} online_media_type:Images media_usage:CC0',
+                    "start": start,
+                    "rows": page_size,
+                },
+            )
+            response = data.get("response") or {}
+            records = response.get("rows") or []
+            if not records:
+                break
+            for summary in records:
+                record = summary
+                if not (((record.get("content") or {}).get("descriptiveNonRepeating") or {}).get("online_media")):
+                    record_id = str(summary.get("id") or "").strip()
+                    if not record_id:
+                        continue
+                    detail = self.get_json(
+                        f"{SMITHSONIAN_CONTENT_API}/{quote(record_id, safe='')}/",
+                        {"api_key": self.smithsonian_api_key},
+                    )
+                    record = detail.get("response") or detail
+                for row in parse_smithsonian_record(
+                    record,
+                    species["seafood_code"],
+                    species["app_label"],
+                    species["scientific_name"],
+                ):
+                    out.append(row)
+                    if len(out) >= max_rows:
+                        return out
+            start += len(records)
+            if start >= int(response.get("rowCount") or 0):
+                break
+        return out
+
+    def collect_noaa(self, species: dict[str, Any], max_rows: int) -> list[dict[str, str]]:
+        url = f"{NOAA_SEARCH_URL}?search_api_fulltext={quote(species['scientific_name'])}"
+        return parse_noaa_search_page(
+            self.get_text(url),
+            species["seafood_code"],
+            species["app_label"],
+            species["scientific_name"],
+        )[:max_rows]
+
 
 def _config_text(
     value: Any,
@@ -769,7 +1177,18 @@ def dedupe_metadata(rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    p.add_argument("--source", choices=["all", "fish-vista", "inat", "gbif", "commons"], default="all")
+    p.add_argument(
+        "--source",
+        dest="sources",
+        action="append",
+        choices=["all", *ALL_SOURCES],
+        help="Source to collect. Repeat for multiple sources. Default: all sources that need no API key.",
+    )
+    p.add_argument(
+        "--smithsonian-api-key",
+        default=os.environ.get("SMITHSONIAN_API_KEY"),
+        help="Free Smithsonian Open Access API key. Can also be set with SMITHSONIAN_API_KEY.",
+    )
     p.add_argument("--species", action="append", help="Seafood code, e.g. FISH_A. Repeat for multiple. Default: all configured species.")
     p.add_argument("--max-per-species", type=int, default=100, help="Maximum candidate rows per species per source (default 100).")
     p.add_argument("--minimum-total-per-species", type=int, help="Collect only the shortfall needed for each species to reach this server candidate total.")
@@ -794,8 +1213,21 @@ def main(argv: list[str] | None = None) -> int:
 
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json,text/csv,*/*"})
-    collector = Collector(session=session, delay_seconds=1.05, commons_delay_seconds=6.5)
-    sources = [args.source] if args.source != "all" else ["fish-vista", "inat", "gbif", "commons"]
+    collector = Collector(
+        session=session,
+        smithsonian_api_key=args.smithsonian_api_key,
+        delay_seconds=1.05,
+        commons_delay_seconds=6.5,
+    )
+    requested_sources = args.sources or ["all"]
+    if "all" in requested_sources:
+        sources = [
+            source
+            for source in ALL_SOURCES
+            if source != "smithsonian" or args.smithsonian_api_key
+        ]
+    else:
+        sources = list(dict.fromkeys(requested_sources))
 
     manifest = args.output_dir / "candidates.csv"
     existing_rows: list[dict[str, str]] = []
@@ -805,6 +1237,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Resume mode: loaded {len(existing_rows)} existing candidate rows from {manifest}", file=sys.stderr)
         else:
             print(f"Resume mode: no existing manifest found at {manifest}; starting from empty", file=sys.stderr)
+    existing_source_counts: dict[tuple[str, str], int] = {}
+    for row in existing_rows:
+        key = (row.get("seafood_code", ""), row.get("source_dataset", ""))
+        existing_source_counts[key] = existing_source_counts.get(key, 0) + 1
 
     rows: list[dict[str, str]] = []
     seen_rows = {
@@ -829,16 +1265,27 @@ def main(argv: list[str] | None = None) -> int:
             if remaining == 0:
                 break
             source_limit = args.max_per_species if remaining is None else min(args.max_per_species, remaining)
+            fetch_limit = source_limit + existing_source_counts.get(
+                (species["seafood_code"], SOURCE_DATASET_CODES[source]), 0
+            )
             print(f"[{species['seafood_code']}] collecting {source} metadata...", file=sys.stderr)
             try:
                 if source == "fish-vista":
-                    found = collector.collect_fish_vista(species, source_limit)
+                    found = collector.collect_fish_vista(species, fetch_limit)
                 elif source == "inat":
-                    found = collector.collect_inat(species, source_limit)
+                    found = collector.collect_inat(species, fetch_limit)
                 elif source == "gbif":
-                    found = collector.collect_gbif(species, source_limit)
+                    found = collector.collect_gbif(species, fetch_limit)
                 elif source == "commons":
-                    found = collector.collect_commons(species, source_limit)
+                    found = collector.collect_commons(species, fetch_limit)
+                elif source == "ala":
+                    found = collector.collect_ala(species, fetch_limit)
+                elif source == "obis":
+                    found = collector.collect_obis(species, fetch_limit)
+                elif source == "noaa":
+                    found = collector.collect_noaa(species, fetch_limit)
+                elif source == "smithsonian":
+                    found = collector.collect_smithsonian(species, fetch_limit)
                 else:  # pragma: no cover
                     found = []
                 accepted = []

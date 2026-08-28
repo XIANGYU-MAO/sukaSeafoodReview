@@ -352,6 +352,85 @@ def test_candidate_list_supports_admin_filters_and_safe_nested_summaries(setting
     assert "token" not in response.text.lower()
 
 
+def test_bulk_disable_candidates_by_source_or_species_releases_open_work_and_audits(settings):
+    seed = asyncio.run(seed_catalog(settings))
+
+    async def assign(db):
+        candidate = await db.get(Candidate, seed.candidate_ids[0])
+        candidate.current_reviewer_id = seed.user_ids["Hassan"]
+        candidate.current_started_at = datetime.now(timezone.utc)
+
+    asyncio.run(mutate_database(settings, assign))
+    headers = admin_headers(seed, csrf=True)
+    with TestClient(create_app(settings)) as client:
+        by_source = client.post(
+            "/v1/admin/candidates/bulk-disable",
+            headers=headers,
+            json={
+                "source_dataset": "iNaturalist",
+                "reason": "停用这个来源的候选",
+            },
+        )
+        by_species = client.post(
+            "/v1/admin/candidates/bulk-disable",
+            headers=headers,
+            json={
+                "species_code": "SF002",
+                "reason": "停用这个鱼种的候选",
+            },
+        )
+
+    async def load():
+        engine = create_async_engine(settings.DATABASE_URL)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as db:
+            candidates = list(
+                (await db.scalars(select(Candidate).order_by(Candidate.source_record_id))).all()
+            )
+            audits = list(
+                (await db.scalars(select(AuditEvent).order_by(AuditEvent.created_at))).all()
+            )
+        await engine.dispose()
+        return candidates, audits
+
+    candidates, audits = asyncio.run(load())
+    assert by_source.status_code == 200
+    assert by_source.json() == {"matched": 4, "disabled": 4, "released": 1}
+    assert by_species.status_code == 200
+    assert by_species.json() == {"matched": 1, "disabled": 1, "released": 0}
+    assert all(candidate.active is False for candidate in candidates)
+    assert all(candidate.current_reviewer_id is None for candidate in candidates)
+    assert all(candidate.version == 2 for candidate in candidates)
+    assert [audit.action for audit in audits] == [
+        "CANDIDATE_BULK_DISABLE",
+        "CANDIDATE_BULK_DISABLE",
+    ]
+    assert audits[0].object_id == "source:iNaturalist"
+    assert audits[1].object_id == "species:SF002"
+
+
+def test_bulk_disable_requires_exactly_one_scope(settings):
+    seed = asyncio.run(seed_catalog(settings))
+    headers = admin_headers(seed, csrf=True)
+    with TestClient(create_app(settings)) as client:
+        missing = client.post(
+            "/v1/admin/candidates/bulk-disable",
+            headers=headers,
+            json={"reason": "缺少范围"},
+        )
+        both = client.post(
+            "/v1/admin/candidates/bulk-disable",
+            headers=headers,
+            json={
+                "source_dataset": "iNaturalist",
+                "species_code": "SF001",
+                "reason": "范围冲突",
+            },
+        )
+
+    assert missing.status_code == both.status_code == 422
+
+
 def test_candidate_safe_patch_validates_https_increments_version_once_and_audits(
     settings,
 ):

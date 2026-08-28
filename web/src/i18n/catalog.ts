@@ -14,7 +14,16 @@ export const STATUSES = [
   "PENDING",
   "COMPLETED",
 ] as const;
-export const SOURCES = ["FISH_VISTA", "GBIF", "INATURALIST", "WIKIMEDIA_COMMONS"] as const;
+export const SOURCES = [
+  "ATLAS_OF_LIVING_AUSTRALIA",
+  "FISH_VISTA",
+  "GBIF",
+  "INATURALIST",
+  "NOAA_PHOTO_LIBRARY",
+  "OBIS",
+  "SMITHSONIAN_OPEN_ACCESS",
+  "WIKIMEDIA_COMMONS",
+] as const;
 export const REJECTION_REASONS = [
   "WRONG_SPECIES",
   "NOT_WHOLE_FISH",
@@ -61,15 +70,23 @@ const statuses: Record<Locale, Record<(typeof STATUSES)[number], string>> = {
 
 const sources: Record<Locale, Record<(typeof SOURCES)[number], string>> = {
   zh: {
+    ATLAS_OF_LIVING_AUSTRALIA: "澳大利亚生命地图集",
     FISH_VISTA: "Fish-Vista 鱼类数据集",
     GBIF: "GBIF 全球生物多样性信息平台",
     INATURALIST: "iNaturalist",
+    NOAA_PHOTO_LIBRARY: "NOAA 图片库",
+    OBIS: "OBIS 海洋生物地理信息系统",
+    SMITHSONIAN_OPEN_ACCESS: "Smithsonian 开放资源",
     WIKIMEDIA_COMMONS: "维基共享资源",
   },
   en: {
+    ATLAS_OF_LIVING_AUSTRALIA: "Atlas of Living Australia",
     FISH_VISTA: "Fish-Vista dataset",
     GBIF: "GBIF occurrence",
     INATURALIST: "iNaturalist observation",
+    NOAA_PHOTO_LIBRARY: "NOAA Photo Library",
+    OBIS: "Ocean Biodiversity Information System",
+    SMITHSONIAN_OPEN_ACCESS: "Smithsonian Open Access",
     WIKIMEDIA_COMMONS: "Wikimedia Commons",
   },
 };

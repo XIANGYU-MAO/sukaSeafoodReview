@@ -100,12 +100,16 @@ export function PageControls({ offset, total, limit, onChange, disabled = false 
 }
 
 export const sourceLabels: Record<string, string> = {
+  ATLAS_OF_LIVING_AUSTRALIA: "澳大利亚生命地图集",
   INATURALIST: "iNaturalist",
   iNaturalist: "iNaturalist",
   GBIF: "GBIF",
   WIKIMEDIA_COMMONS: "维基共享资源",
   Wikimedia: "维基共享资源",
   FISH_VISTA: "Fish-Vista",
+  NOAA_PHOTO_LIBRARY: "NOAA 图片库",
+  OBIS: "OBIS 海洋生物地理信息系统",
+  SMITHSONIAN_OPEN_ACCESS: "Smithsonian 开放资源",
 };
 export function sourceLabel(code: string): string { return sourceLabels[code] ?? code; }
 

@@ -13,6 +13,7 @@ DEFAULT_IMAGE_ORIGIN_ALLOWLIST = (
     "caos.boldsystems.org",
     "cdn.floridamuseum.ufl.edu",
     "collections.nmnh.si.edu",
+    "ids.si.edu",
     "data.nhm.ac.uk",
     "huggingface.co",
     "pictures.snsb.info",
@@ -24,6 +25,8 @@ DEFAULT_IMAGE_ORIGIN_ALLOWLIST = (
     ".fishair.org",
     ".fish-vista.org",
     ".fishvista.org",
+    "images.ala.org.au",
+    "www.noaa.gov",
     ".example.test",
     ".e2e.test",
 )

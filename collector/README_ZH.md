@@ -2,8 +2,9 @@
 
 **中文** | [English](README.md)
 
-这个本地工具根据当前鱼种目录，从 Fish-Vista、iNaturalist、GBIF 和 Wikimedia
-Commons 收集带许可证的候选图片 metadata，并写入稳定的
+这个本地工具根据当前鱼种目录，从 Fish-Vista、iNaturalist、GBIF、Wikimedia
+Commons、Atlas of Living Australia（ALA）、OBIS、NOAA Photo Library 和
+Smithsonian Open Access 收集带许可证的候选图片 metadata，并写入稳定的
 `output/candidates.csv` manifest。候选记录不会自动成为训练数据。
 
 ## 配置当前鱼种目录
@@ -14,7 +15,7 @@ Commons 收集带许可证的候选图片 metadata，并写入稳定的
 
 ```powershell
 Copy-Item .\species_config.example.json .\species_config.json
-python .\collect_fish_images.py --config .\species_config.json --source all --max-per-species 100 --minimum-total-per-species 300
+python .\collect_fish_images.py --config .\species_config.json --source inat --source gbif --source ala --source obis --max-per-species 100 --minimum-total-per-species 300
 python .\collect_fish_images.py --config .\species_config.json --source commons --species FISH_A --resume
 ```
 
@@ -37,9 +38,16 @@ py -m venv .venv
 py -m pip install -r requirements.txt
 ```
 
-`--source` 可选 `all`、`fish-vista`、`inat`、`gbif` 或 `commons`。没有
-`--species` 时，会采集所有已配置鱼种。`--resume` 会把后续结果合并进已有 manifest，
-不会覆盖现有候选行。默认只收 metadata；`--download-images` 为可选项。
+`--source` 可选 `all`、`fish-vista`、`inat`、`gbif`、`commons`、`ala`、
+`obis`、`noaa` 或 `smithsonian`，需要多个来源时可重复填写。没有 `--species`
+时，会采集所有已配置鱼种。单次生成时会先在本次 CSV 内按“鱼种 + 图片地址”去重。
+不加 `--resume` 会重写本地 `output/candidates.csv`；加上后会保留旧行，再把新行合并
+去重。管理后台导入时还会按来源身份和同鱼种图片地址再次去重。
+
+Smithsonian 需要免费 API Key：勾选该来源后使用管理后台生成的命令，或手动添加
+`--smithsonian-api-key YOUR_KEY`。也可以设置本地环境变量
+`SMITHSONIAN_API_KEY`。密钥不需要上传到审核系统。默认只收 metadata；
+`--download-images` 为可选项。
 
 `--minimum-total-per-species 300` 表示服务器中每个鱼种至少希望有 300 个候选。采集器
 根据配置中的 `candidate_count` 跳过已达标鱼种，只采集未达标鱼种的缺口，并在缺口
@@ -54,7 +62,9 @@ py -m pip install -r requirements.txt
 
 iNaturalist 在精确 taxon 解析后只查询 Research Grade observation；GBIF 只保留
 带许可证的 still-image media；Fish-Vista 使用配置中的精确 filter；Commons 使用
-配置中的 category。单个鱼种/来源失败时会输出错误，其他来源仍会继续采集。
+配置中的 category；ALA 和 OBIS 只保留精确学名且许可证可用的图片；Smithsonian
+只保留精确学名的 CC0 图片；NOAA 只保留标题含精确学名并明确标注 NOAA 机构署名的
+图片，第三方 Courtesy 图片会跳过。单个鱼种/来源失败时会输出错误，其他来源仍会继续采集。
 
 ## 审核与原图
 

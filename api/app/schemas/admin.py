@@ -419,6 +419,28 @@ class CandidateVersionReason(BaseModel):
     reason: TrimmedReason
 
 
+class CandidateBulkDisableRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_dataset: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ] | None = None
+    species_code: TrimmedCode | None = None
+    reason: TrimmedReason
+
+    @model_validator(mode="after")
+    def require_one_scope(self) -> CandidateBulkDisableRequest:
+        if (self.source_dataset is None) == (self.species_code is None):
+            raise ValueError("exactly one bulk-disable scope is required")
+        return self
+
+
+class CandidateBulkDisableResponse(BaseModel):
+    matched: int = Field(ge=0)
+    disabled: int = Field(ge=0)
+    released: int = Field(ge=0)
+
+
 class TransferRequest(CandidateVersionReason):
     new_reviewer_id: UUID
 

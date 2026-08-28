@@ -3,7 +3,8 @@
 [中文](README_ZH.md) | **English**
 
 This local tool collects licensed candidate-image metadata from Fish-Vista,
-iNaturalist, GBIF, and Wikimedia Commons for the active fish catalog. It writes
+iNaturalist, GBIF, Wikimedia Commons, the Atlas of Living Australia (ALA),
+OBIS, the NOAA Photo Library, and Smithsonian Open Access. It writes
 the stable manifest contract to `output/candidates.csv`; candidate records are
 not training-approved automatically.
 
@@ -16,7 +17,7 @@ tracked example, then replace its fictional entries with the active catalog:
 
 ```powershell
 Copy-Item .\species_config.example.json .\species_config.json
-python .\collect_fish_images.py --config .\species_config.json --source all --max-per-species 100 --minimum-total-per-species 300
+python .\collect_fish_images.py --config .\species_config.json --source inat --source gbif --source ala --source obis --max-per-species 100 --minimum-total-per-species 300
 python .\collect_fish_images.py --config .\species_config.json --source commons --species FISH_A --resume
 ```
 
@@ -40,10 +41,16 @@ py -m venv .venv
 py -m pip install -r requirements.txt
 ```
 
-Use `--source` to choose `all`, `fish-vista`, `inat`, `gbif`, or `commons`.
-With no `--species` arguments, every configured species is collected. Use
-`--resume` to merge later collection runs into the existing manifest without
-overwriting existing candidate rows. `--minimum-total-per-species 300` skips
+Use repeatable `--source` options to choose `all`, `fish-vista`, `inat`, `gbif`,
+`commons`, `ala`, `obis`, `noaa`, or `smithsonian`. With no `--species`
+arguments, every configured species is collected. Each run deduplicates its own
+rows by species and image URL. Without `--resume`, the local manifest is
+rewritten; with it, new rows are merged and deduplicated against the existing
+manifest. The server independently deduplicates again during upload.
+
+Smithsonian requires a free Open Access API key. Pass
+`--smithsonian-api-key YOUR_KEY` or set `SMITHSONIAN_API_KEY`; the key remains
+local and is never part of the CSV. `--minimum-total-per-species 300` skips
 species already at 300 server candidates and collects only each remaining
 shortfall, stopping once it is filled. A source may not have enough usable
 images, and import deduplication can leave the server below the target; import
@@ -60,8 +67,11 @@ unrecognized licenses are excluded.
 
 iNaturalist queries Research Grade observations after exact taxon resolution.
 GBIF keeps licensed still-image media. Fish-Vista uses the configured exact
-filter, and Commons reads the configured category. A source failure is reported
-for that species and source while the remaining collection continues.
+filter, and Commons reads the configured category. ALA and OBIS require exact
+scientific-name matches and usable media licenses. Smithsonian keeps exact-name
+CC0 media only. NOAA keeps exact-name results with explicit NOAA-agency credit
+and excludes third-party courtesy images. A source failure is reported for that
+species and source while the remaining collection continues.
 
 ## Review and originals
 

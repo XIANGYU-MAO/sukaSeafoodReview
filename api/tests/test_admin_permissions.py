@@ -58,6 +58,11 @@ def mutation_cases(seed):
             {"version": 1, "creator": "Updated", "reason": "correct source"},
         ),
         (
+            "post",
+            "/v1/admin/candidates/bulk-disable",
+            {"source_dataset": "iNaturalist", "reason": "disable source"},
+        ),
+        (
             "patch",
             f"/v1/admin/reviews/{review_id}",
             {"version": 1, "decision": "UNSURE", "reason": "moderation"},

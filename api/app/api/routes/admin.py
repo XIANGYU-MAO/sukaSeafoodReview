@@ -19,6 +19,8 @@ from app.schemas.admin import (
     AdminSourceListResponse,
     AdminUserListResponse,
     CandidateAdminResponse,
+    CandidateBulkDisableRequest,
+    CandidateBulkDisableResponse,
     CandidateFilters,
     CandidateListResponse,
     CandidatePatchRequest,
@@ -39,6 +41,7 @@ from app.schemas.review import ReviewResponse
 from app.services.admin import (
     AdminConflict,
     AdminObjectNotFound,
+    bulk_disable_candidates,
     create_species,
     edit_admin_review,
     list_admin_reviews,
@@ -133,6 +136,17 @@ async def get_candidates(
     db: AsyncSession = Depends(get_db),
 ) -> CandidateListResponse:
     return await list_candidates(db, filters)
+
+
+@router.post(
+    "/candidates/bulk-disable", response_model=CandidateBulkDisableResponse
+)
+async def bulk_disable(
+    payload: CandidateBulkDisableRequest,
+    auth: CurrentAuth = Depends(require_admin_csrf),
+    db: AsyncSession = Depends(get_db),
+) -> CandidateBulkDisableResponse:
+    return await bulk_disable_candidates(db, auth.user.id, payload)
 
 
 @router.patch("/candidates/{candidate_id}", response_model=CandidateAdminResponse)

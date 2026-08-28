@@ -49,6 +49,20 @@ type Confirmation = "normal" | "skip" | null;
 type CommandPlatform = "windows" | "unix";
 type CollectionMode = "initial" | "replenish";
 
+const COLLECTOR_SOURCES = [
+  { code: "fish-vista", label: "Fish-Vista" },
+  { code: "inat", label: "iNaturalist" },
+  { code: "gbif", label: "GBIF" },
+  { code: "commons", label: "维基共享资源" },
+  { code: "ala", label: "澳大利亚生命地图集" },
+  { code: "obis", label: "OBIS 海洋生物地理信息系统" },
+  { code: "noaa", label: "NOAA 图片库" },
+  { code: "smithsonian", label: "Smithsonian 开放资源" },
+] as const;
+const DEFAULT_COLLECTOR_SOURCES = COLLECTOR_SOURCES
+  .filter((source) => source.code !== "smithsonian")
+  .map((source) => source.code);
+
 export function ImportsTab(props: AdminTabProps) {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
@@ -60,6 +74,8 @@ export function ImportsTab(props: AdminTabProps) {
   const [collectionMode, setCollectionMode] = useState<CollectionMode>("initial");
   const [maxPerSpecies, setMaxPerSpecies] = useState(100);
   const [minimumPerSpecies, setMinimumPerSpecies] = useState(300);
+  const [selectedSources, setSelectedSources] = useState<string[]>(DEFAULT_COLLECTOR_SOURCES);
+  const [smithsonianApiKey, setSmithsonianApiKey] = useState("");
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const generation = useRef(0);
   const operationKind = useRef<"preview" | "commit" | null>(null);
@@ -73,8 +89,28 @@ export function ImportsTab(props: AdminTabProps) {
     const python = platform === "windows" ? "python" : "python3";
     const separator = platform === "windows" ? ".\\" : "./";
     const resume = collectionMode === "replenish" ? " --resume" : "";
-    return `${python} ${separator}collect_fish_images.py --config ${separator}species_config.json --source all --max-per-species ${maxPerSpecies} --minimum-total-per-species ${minimumPerSpecies}${resume}`;
-  }, [collectionMode, maxPerSpecies, minimumPerSpecies, platform]);
+    const sources = COLLECTOR_SOURCES
+      .filter((source) => selectedSources.includes(source.code))
+      .map((source) => ` --source ${source.code}`)
+      .join("");
+    const key = selectedSources.includes("smithsonian") && smithsonianApiKey
+      ? ` --smithsonian-api-key ${smithsonianApiKey}`
+      : "";
+    return `${python} ${separator}collect_fish_images.py --config ${separator}species_config.json${sources}${key} --max-per-species ${maxPerSpecies} --minimum-total-per-species ${minimumPerSpecies}${resume}`;
+  }, [collectionMode, maxPerSpecies, minimumPerSpecies, platform, selectedSources, smithsonianApiKey]);
+
+  function toggleSource(code: string) {
+    if (selectedSources.includes(code)) {
+      if (selectedSources.length === 1) {
+        setNotice({ kind: "error", text: "至少选择一个采集来源。" });
+        return;
+      }
+      setSelectedSources(selectedSources.filter((source) => source !== code));
+    } else {
+      setSelectedSources([...selectedSources, code]);
+    }
+    setNotice(null);
+  }
 
   useEffect(() => {
     mounted.current = true;
@@ -273,6 +309,13 @@ export function ImportsTab(props: AdminTabProps) {
           <button type="button" className={`pill-choice${collectionMode === "initial" ? " pill-choice--selected" : ""}`} aria-pressed={collectionMode === "initial"} onClick={() => setCollectionMode("initial")}>首次采集</button>
           <button type="button" className={`pill-choice${collectionMode === "replenish" ? " pill-choice--selected" : ""}`} aria-pressed={collectionMode === "replenish"} onClick={() => setCollectionMode("replenish")}>数量不足时补采</button>
         </div></fieldset>
+        <div className="command-option-group command-option-group--wide"><div className="admin-field-label"><strong>采集来源</strong><HelpHint context="字段" label="来源选择说明">只会请求已选中的来源，不选的来源完全不会访问。建议先保留全部免密来源；某个来源质量不合适时可取消。Smithsonian 需要免费的 Open Access API Key，密钥只写进你本地复制的命令，不会上传到本系统。</HelpHint></div><div className="command-pill-group" role="group" aria-label="采集来源">
+          {COLLECTOR_SOURCES.map((source) => {
+            const selected = selectedSources.includes(source.code);
+            return <button key={source.code} type="button" className={`pill-choice${selected ? " pill-choice--selected" : ""}`} aria-pressed={selected} onClick={() => toggleSource(source.code)}>{source.label}</button>;
+          })}
+        </div></div>
+        {selectedSources.includes("smithsonian") ? <div className="command-number-field command-number-field--wide"><label htmlFor="smithsonian-api-key">Smithsonian API Key</label><input id="smithsonian-api-key" type="password" autoComplete="off" value={smithsonianApiKey} onChange={(event) => setSmithsonianApiKey(event.target.value.replace(/[^A-Za-z0-9_-]/g, ""))} /><small>先在 api.data.gov 免费申请；未填写时 Smithsonian 会提示缺少密钥，其余来源仍可继续。</small></div> : null}
         <div className="command-number-field command-number-field--target"><div className="admin-field-label"><label htmlFor="collector-minimum">每个鱼种候选数至少达到</label><HelpHint context="字段" label="最低候选目标">这是服务器中每个鱼种希望达到的候选图片总数。最新鱼种配置会记录当前数量；采集器只补不足的鱼种，达到目标的会跳过。来源图片可能不足或被系统判重，所以一次未达到时，先导入 CSV，再重新下载最新配置继续补采。</HelpHint></div><input id="collector-minimum" type="number" min="1" max="10000" value={minimumPerSpecies} onChange={(event) => setMinimumPerSpecies(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></div>
         <div className="command-number-field"><div className="admin-field-label"><label htmlFor="collector-max">每个鱼种、每个来源最多采集</label><HelpHint context="字段" label="采集数量参数">这是每个鱼种在每个来源尝试收集的上限，不是最终保证数量。审核后不够时，调大这个数字并选择“数量不足时补采”；采集器保留旧 CSV，导入时系统也会按来源身份和原图地址自动去重。</HelpHint></div><input id="collector-max" type="number" min="1" max="10000" value={maxPerSpecies} onChange={(event) => setMaxPerSpecies(Math.max(1, Math.min(10000, Number(event.target.value) || 1)))} /></div>
       </div>
@@ -282,7 +325,7 @@ export function ImportsTab(props: AdminTabProps) {
       })}</ul> : null}
       <p className="collector-command"><code>{command}</code></p>
       <button type="button" className="secondary-button" onClick={() => void copyCommand()}>复制命令</button>
-      <p>输出文件为 <code>output/candidates.csv</code>。审核后数量不够时，不用清空或重做：提高参数后补采，再导入新 CSV，重复图片会自动跳过。</p>
+      <p>输出文件为 <code>output/candidates.csv</code>。“首次采集”会重写这份本地 CSV；“数量不足时补采”自动添加 <code>--resume</code>，保留旧行并合并去重。上传时服务器还会再次去重。</p>
     </section>
     <section className="admin-card">
       <h3>4. 预检查并导入</h3>
