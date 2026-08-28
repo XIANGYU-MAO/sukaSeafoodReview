@@ -9,6 +9,8 @@ deploy/.env
 deploy/*.report.json
 web/node_modules/
 web/dist/
+web/public/portal/
+web/public/validator/
 local_sync/.build/
 local_sync/build/
 local_sync/dist/

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="SukaSeafood project portal for sustainable seafood data tools.">
+  <title>SukaSeafood · 项目入口</title>
+  <link rel="stylesheet" href="./portal.css">
+  <script src="./portal.js" defer></script>
+</head>
+<body>
+  <div class="ocean-glow ocean-glow--one" aria-hidden="true"></div>
+  <div class="ocean-glow ocean-glow--two" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <a class="brand" href="/sukaseafood/" aria-label="SukaSeafood home">
+      <span class="brand-mark" aria-hidden="true">S</span>
+      <span>
+        <strong>SukaSeafood</strong>
+        <small data-i18n="brandTagline">可信数据 · 更好选择</small>
+      </span>
+    </a>
+    <button class="language-toggle" type="button" data-locale-toggle aria-label="Switch language">English</button>
+  </header>
+
+  <main>
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow" data-i18n="eyebrow">SUSTAINABLE SEAFOOD DATA PROJECT</p>
+        <h1 id="hero-title" data-i18n="heroTitle">让海鲜数据真正可用</h1>
+        <p class="hero-intro" data-i18n="heroIntro">把分散的可持续性、价格、供应、食谱与图片资料整理成一致、可验证的数据，帮助团队构建更清晰的海鲜选择体验。</p>
+        <div class="hero-actions">
+          <a class="primary-action" href="/sukaseafood/validator/" data-tool="validator">
+            <span data-i18n="openValidator">打开 CSV Validator</span>
+            <span aria-hidden="true">↗</span>
+          </a>
+          <a class="secondary-action" href="/sukaseafood/review/" data-tool="review">
+            <span data-i18n="openReview">进入 Image Review</span>
+            <span aria-hidden="true">↗</span>
+          </a>
+        </div>
+      </div>
+
+      <div class="data-orbit" aria-label="SukaSeafood data domains">
+        <div class="orbit-core"><span>SS</span><small data-i18n="trustedCore">可信数据核心</small></div>
+        <span class="orbit-chip orbit-chip--one" data-i18n="chipSustainability">可持续性</span>
+        <span class="orbit-chip orbit-chip--two" data-i18n="chipPrice">价格趋势</span>
+        <span class="orbit-chip orbit-chip--three" data-i18n="chipSupply">供应地点</span>
+        <span class="orbit-chip orbit-chip--four" data-i18n="chipVision">鱼类图像</span>
+      </div>
+    </section>
+
+    <section class="tools-section" aria-labelledby="tools-title">
+      <div class="section-heading">
+        <p class="eyebrow" data-i18n="toolsEyebrow">PROJECT TOOLS</p>
+        <h2 id="tools-title" data-i18n="toolsTitle">从这里开始</h2>
+        <p data-i18n="toolsIntro">两个独立工具分别保护结构化数据质量和计算机视觉训练图片质量。</p>
+      </div>
+
+      <div class="tool-grid">
+        <a class="tool-card tool-card--validator" href="/sukaseafood/validator/" data-tool="validator">
+          <div class="tool-icon" aria-hidden="true">CSV</div>
+          <div>
+            <p class="tool-index">01</p>
+            <h3>CSV Validator</h3>
+            <p data-i18n="validatorDescription">检查字段、类型、允许值和重复记录；下载模板并生成规范化 CSV。</p>
+            <span class="card-link"><span data-i18n="launchTool">打开工具</span> <span aria-hidden="true">→</span></span>
+          </div>
+        </a>
+
+        <a class="tool-card tool-card--review" href="/sukaseafood/review/" data-tool="review">
+          <div class="tool-icon" aria-hidden="true">IMG</div>
+          <div>
+            <p class="tool-index">02</p>
+            <h3>Image Review</h3>
+            <p data-i18n="reviewDescription">协作审核候选鱼类图片，记录决定并维护计算机视觉训练数据质量。</p>
+            <span class="card-link"><span data-i18n="enterReview">进入审核</span> <span aria-hidden="true">→</span></span>
+          </div>
+        </a>
+      </div>
+    </section>
+
+    <section class="workflow" aria-labelledby="workflow-title">
+      <div class="section-heading section-heading--compact">
+        <p class="eyebrow" data-i18n="workflowEyebrow">DATA WORKFLOW</p>
+        <h2 id="workflow-title" data-i18n="workflowTitle">让来源可追溯，让结果可复核</h2>
+      </div>
+      <ol class="workflow-list">
+        <li><span>01</span><strong data-i18n="flowCollect">收集公开来源</strong><small data-i18n="flowCollectDetail">保留来源与快照信息</small></li>
+        <li><span>02</span><strong data-i18n="flowNormalize">统一数据结构</strong><small data-i18n="flowNormalizeDetail">对齐物种、地点与时间</small></li>
+        <li><span>03</span><strong data-i18n="flowValidate">验证数据质量</strong><small data-i18n="flowValidateDetail">发现缺失、格式与重复问题</small></li>
+        <li><span>04</span><strong data-i18n="flowReview">人工复核图片</strong><small data-i18n="flowReviewDetail">保留明确的审核决定</small></li>
+      </ol>
+    </section>
+  </main>
+
+  <footer>
+    <p data-i18n="privacy">CSV 文件只在你的浏览器中处理，不会上传。</p>
+    <p>© 2026 SukaSeafood · Monash University FIT5120</p>
+  </footer>
+</body>
+</html>

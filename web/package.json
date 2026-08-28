@@ -4,9 +4,12 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "build:static": "node scripts/build-static-assets.mjs",
+    "predev": "npm run build:static",
     "dev": "vite",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "prebuild": "npm run build:static",
     "build": "tsc --noEmit && vite build"
   },
   "dependencies": {

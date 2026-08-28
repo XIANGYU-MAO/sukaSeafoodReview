@@ -1,0 +1,11 @@
+**
+!validator.html
+!web/
+!web/**
+web/node_modules/
+web/dist/
+web/public/portal/
+web/public/validator/
+web/.env
+web/.env.*
+web/**/*.log

@@ -66,6 +66,8 @@ def test_windows_deploy_has_safe_ssh_hash_stage_and_preserves_state():
     assert "test ! -e '$RemoteStage'" in script
     assert "find '$RemoteStage' -xdev -depth -delete" in script
     assert "Remove-Item -Recurse" not in script
+    assert '"validator.html"' in script
+    assert '".dockerignore"' in script
 
 
 def test_windows_deploy_whatif_performs_no_network():
@@ -93,6 +95,9 @@ def test_review_preflight_is_content_aware_and_has_no_live_default():
     assert '"status":"ok"' in script.replace(" ", "")
     assert "SukaSeafood" in script
     assert "--public" in script
+    assert "http://127.0.0.1:8080/portal/" in script
+    assert "http://127.0.0.1:8080/validator/" in script
+    assert "/sukaseafood/validator/" in script
     assert "/sukaseafood/review" in script
     assert "/sukaseafood/api/v1/health" in script
     assert 'first="${1:-}"' in script

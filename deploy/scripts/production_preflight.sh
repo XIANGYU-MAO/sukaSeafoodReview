@@ -27,9 +27,17 @@ api_body="$("${COMPOSE[@]}" exec -T review-api python -c \
 [[ "$api_body" == '{"status":"ok"}' ]]
 web_body="$("${COMPOSE[@]}" exec -T review-web wget --quiet --output-document=- http://127.0.0.1:8080/healthz)"
 grep -F "SukaSeafood" <<<"$web_body" >/dev/null
+portal_body="$("${COMPOSE[@]}" exec -T review-web wget --quiet --output-document=- http://127.0.0.1:8080/portal/)"
+grep -F "PROJECT TOOLS" <<<"$portal_body" >/dev/null
+validator_body="$("${COMPOSE[@]}" exec -T review-web wget --quiet --output-document=- http://127.0.0.1:8080/validator/)"
+grep -F "SukaSeafood Team CSV Validator" <<<"$validator_body" >/dev/null
 
 if [[ "$public" == true ]]; then
-    review_body="$(curl --fail --silent --show-error --max-time 15 https://findai.top/sukaseafood/review)"
+    public_portal="$(curl --fail --silent --show-error --max-time 15 https://findai.top/sukaseafood/)"
+    grep -F "PROJECT TOOLS" <<<"$public_portal" >/dev/null
+    public_validator="$(curl --fail --silent --show-error --max-time 15 https://findai.top/sukaseafood/validator/)"
+    grep -F "SukaSeafood Team CSV Validator" <<<"$public_validator" >/dev/null
+    review_body="$(curl --fail --silent --show-error --max-time 15 https://findai.top/sukaseafood/review/)"
     grep -F "SukaSeafood" <<<"$review_body" >/dev/null
     public_health="$(curl --fail --silent --show-error --max-time 15 https://findai.top/sukaseafood/api/v1/health)"
     [[ "${public_health// /}" == '{"status":"ok"}' ]]

@@ -41,7 +41,7 @@ try {
         Invoke-Native "git" @(
             "archive", "--format=tar", "--output=$Archive", $Revision, "--",
             "api", "web", "local_sync", "deploy",
-            "docker-compose.yml", "docker-compose.production.yml"
+            "docker-compose.yml", "docker-compose.production.yml", "validator.html", ".dockerignore"
         )
     }
     finally {

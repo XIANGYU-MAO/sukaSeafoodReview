@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>SukaSeafood Team CSV Validator</title>
+<style>
+:root{--bg:#f5f7fb;--panel:#fff;--panel2:#f8fafc;--text:#162033;--muted:#667085;--line:#dfe4ec;--accent:#0f766e;--danger:#b42318;--warn:#b54708;--ok:#067647;--shadow:0 8px 28px rgba(16,24,40,.08)}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1320;--panel:#121a29;--panel2:#182235;--text:#edf2f7;--muted:#9ba8bc;--line:#29364b;--accent:#2dd4bf;--danger:#f97066;--warn:#fdb022;--ok:#32d583;--shadow:0 8px 28px rgba(0,0,0,.28)}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,select,input{font:inherit}.app{max-width:1320px;margin:auto;padding:24px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px}.brand{display:flex;gap:12px;align-items:center}.logo{width:44px;height:44px;border-radius:14px;background:linear-gradient(135deg,var(--accent),#2563eb);display:grid;place-items:center;color:#fff;font-weight:800;font-size:18px;box-shadow:var(--shadow)}h1{font-size:22px;margin:0}.lang{display:flex;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:4px;box-shadow:var(--shadow)}.lang button{border:0;background:transparent;color:var(--muted);padding:7px 11px;border-radius:999px;cursor:pointer}.lang button.active{background:var(--accent);color:#fff}.grid{display:grid;grid-template-columns:300px 1fr;gap:18px}@media(max-width:900px){.grid{grid-template-columns:1fr}.app{padding:14px}.topbar{align-items:flex-start}.side{position:static!important}}.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow)}.side{padding:18px;position:sticky;top:16px;align-self:start}.side h2,.main h2{font-size:15px;margin:0 0 12px}.select{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:10px 12px;border-radius:10px}.desc{color:var(--muted);font-size:13px;margin-top:10px}.actions{display:grid;gap:8px;margin-top:16px}.btn{border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:10px 12px;border-radius:10px;cursor:pointer;text-align:center;font-weight:600}.btn:hover{border-color:var(--accent)}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn.small{padding:7px 10px;font-size:12px}.btn.danger{color:var(--danger)}.main{display:grid;gap:16px;min-width:0}.section{padding:18px;min-width:0}.sectionHead{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}.sectionHead p{margin:2px 0 0;color:var(--muted);font-size:13px}.fieldGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px}.field{border:1px solid var(--line);background:var(--panel2);border-radius:12px;padding:10px 12px;position:relative}.fieldTop{display:flex;align-items:center;justify-content:space-between;gap:8px}.fieldName{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;font-weight:700}.req{font-size:10px;color:var(--danger)}.optional{font-size:10px;color:var(--muted)}.infoWrap{display:flex;align-items:center;gap:7px}.qmark{width:16px;height:16px;border-radius:50%;border:1px solid var(--line);background:var(--panel);color:var(--muted);display:grid;place-items:center;cursor:help;flex:none;font-size:10px;font-weight:800;line-height:1;padding:0}.tip{display:none;position:absolute;z-index:40;left:12px;right:12px;top:42px;padding:10px 11px;border-radius:10px;background:var(--text);color:var(--bg);box-shadow:var(--shadow);font-size:12px}.qmark:hover+.tip,.qmark:focus+.tip{display:block}.example{margin-top:7px;font-size:11px;color:var(--muted)}.drop{border:1.5px dashed var(--line);border-radius:14px;padding:28px;text-align:center;background:var(--panel2);transition:.15s}.drop.drag{border-color:var(--accent)}.drop strong{display:block;margin-bottom:4px}.drop .muted{color:var(--muted);font-size:12px}.drop input{display:none}.drop label{display:inline-block;margin-top:10px;color:var(--accent);cursor:pointer;font-weight:700}.summary{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 12px}.pill{padding:5px 8px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);font-size:11px}.pill.err{color:var(--danger)}.pill.warn{color:var(--warn)}.pill.ok{color:var(--ok)}.issueList{display:grid;gap:7px;max-height:340px;overflow:auto}.issue{display:grid;grid-template-columns:70px 1fr auto;gap:8px;align-items:start;border:1px solid var(--line);border-radius:10px;padding:9px 10px;background:var(--panel2)}.issue .sev{font-size:10px;font-weight:800;text-transform:uppercase}.issue.error .sev{color:var(--danger)}.issue.warning .sev{color:var(--warn)}.issue .loc{font-family:ui-monospace,monospace;font-size:11px;color:var(--muted)}.empty{color:var(--muted);padding:12px 0}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.tableWrap{width:100%;max-width:100%;overflow:auto;border:1px solid var(--line);border-radius:12px}.preview{border-collapse:collapse;width:max-content;min-width:100%}.preview th,.preview td{border-bottom:1px solid var(--line);border-right:1px solid var(--line);padding:7px 9px;text-align:left;white-space:nowrap;font-size:12px;max-width:320px;overflow:hidden;text-overflow:ellipsis}.preview th{position:sticky;top:0;background:var(--panel2);z-index:2}.preview th:last-child,.preview td:last-child{border-right:0}.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand"><div class="logo">SS</div><div><h1 data-i18n="title">SukaSeafood Team CSV Validator</h1></div></div>
+    <div class="lang"><button id="btnEn" data-lang="en">EN</button><button id="btnZh" data-lang="zh">中文</button></div>
+  </div>
+  <div class="grid">
+    <aside class="card side">
+      <h2 data-i18n="dataset">CSV type</h2>
+      <select id="datasetSelect" class="select"></select>
+      <div id="datasetDesc" class="desc"></div>
+      <div class="actions">
+        <button id="downloadTemplate" class="btn primary" data-i18n="downloadTemplate">Download CSV template</button>
+        <button id="loadExample" class="btn" data-i18n="loadExample">Load example row</button>
+        <button id="clearData" class="btn danger" data-i18n="clear">Clear current data</button>
+      </div>
+    </aside>
+    <main class="main">
+      <section class="card section">
+        <div class="sectionHead"><div><h2 data-i18n="fields">Expected CSV columns</h2><p data-i18n="fieldHelp">Hover or focus the small ? to see why a column is needed.</p></div></div>
+        <div id="fieldGrid" class="fieldGrid"></div>
+      </section>
+      <section class="card section">
+        <div class="sectionHead"><div><h2 data-i18n="upload">Upload teammate CSV</h2><p data-i18n="uploadHelp">Checks column names, missing required columns, basic types, allowed values and duplicates. Database foreign-key resolution is intentionally not checked here.</p></div></div>
+        <div id="dropZone" class="drop"><strong data-i18n="dropTitle">Drop a CSV here</strong><span class="muted" data-i18n="dropSub">or choose a file from your computer</span><br><label for="fileInput" data-i18n="choose">Choose CSV</label><input id="fileInput" type="file" accept=".csv,text/csv" /></div>
+      </section>
+      <section id="resultSection" class="card section hidden">
+        <div class="sectionHead"><div><h2 data-i18n="validation">Validation</h2><p id="fileMeta"></p></div><div class="toolbar"><button id="downloadClean" class="btn small primary" data-i18n="downloadClean">Download normalized CSV</button></div></div>
+        <div id="summary" class="summary"></div>
+        <div id="issueList" class="issueList"></div>
+      </section>
+      <section id="previewSection" class="card section hidden">
+        <div class="sectionHead"><div><h2 data-i18n="preview">CSV preview</h2><p data-i18n="previewHelp">Extra columns are kept; they are only reported as warnings.</p></div></div>
+        <div class="tableWrap"><table id="previewTable" class="preview"></table></div>
+      </section>
+    </main>
+  </div>
+</div>
+<script>
+const I18N={
+ en:{title:'SukaSeafood Team CSV Validator',dataset:'CSV type',downloadTemplate:'Download CSV template',loadExample:'Load example row',clear:'Clear current data',fields:'Expected CSV columns',fieldHelp:'Hover or focus the small ? to see why a column is needed.',upload:'Upload teammate CSV',uploadHelp:'Checks column names, missing required columns, basic types, allowed values and duplicates. Database foreign-key resolution is intentionally not checked here.',dropTitle:'Drop a CSV here',dropSub:'or choose a file from your computer',choose:'Choose CSV',validation:'Validation',downloadClean:'Download normalized CSV',preview:'CSV preview',previewHelp:'Extra columns are kept; they are only reported as warnings.',required:'required',optional:'optional',example:'Example',rows:'rows',errors:'errors',warnings:'warnings',valid:'valid',noIssues:'No validation issues.',unknownColumns:'Extra columns',missingColumns:'Missing required columns',file:'File',noData:'No CSV loaded.'},
+ zh:{title:'SukaSeafood 组员 CSV 校验工具',dataset:'CSV 类型',downloadTemplate:'下载 CSV 模板',loadExample:'载入示例行',clear:'清空当前数据',fields:'预期 CSV 列',fieldHelp:'鼠标悬停或聚焦小 ?，查看为什么需要这一列。',upload:'上传组员 CSV',uploadHelp:'检查列名、缺失必填列、基础类型、允许值和重复记录。数据库外键解析不在这里检查。',dropTitle:'把 CSV 拖到这里',dropSub:'或从电脑选择文件',choose:'选择 CSV',validation:'校验结果',downloadClean:'下载规范化 CSV',preview:'CSV 预览',previewHelp:'额外列会保留，只作为 warning 提示。',required:'必填',optional:'可选',example:'示例',rows:'行',errors:'错误',warnings:'警告',valid:'通过',noIssues:'没有发现校验问题。',unknownColumns:'额外列',missingColumns:'缺失必填列',file:'文件',noData:'尚未载入 CSV。'}
+};
+const WHY=(en,zh)=>({en,zh});
+const F=(key,opt={})=>({key,required:!!opt.required,type:opt.type||'text',values:opt.values||null,example:opt.example??'',why:opt.why||WHY('','')});
+const SCHEMAS={
+ wwf:{name:{en:'WWF sustainability profiles',zh:'WWF 可持续性 profiles'},desc:{en:'WWF source rows for the final I1 database format.',zh:'按最终 I1 数据库格式整理的 WWF 来源数据。'},fields:[
+  F('source_record_key',{required:true,example:'page-8-row-3',why:WHY('Identifies the exact source record.','标识具体来源记录。')}),
+  F('common_name_raw',{required:true,example:'Tilapia',why:WHY('Common name exactly as written in the source.','原样保留来源中的 common name。')}),
+  F('scientific_name_raw',{required:true,example:'Oreochromis niloticus',why:WHY('Scientific name exactly as written in the source.','原样保留来源学名。')}),
+  F('rating',{required:true,type:'enum',values:['BEST_CHOICE','REDUCE','AVOID'],example:'REDUCE',why:WHY('WWF sustainability rating.','WWF 可持续性评级。')}),
+  F('origin_raw',{example:'Malaysia',why:WHY('Source origin text when available.','来源提供时保存 origin 原文。')}),
+  F('origin_code',{example:'MY',why:WHY('Normalized origin code when available.','有标准化 origin code 时保存。')}),
+  F('production_type',{type:'enum',values:['WILD_CAPTURE','AQUACULTURE'],example:'AQUACULTURE',why:WHY('Capture or aquaculture type when provided.','来源提供时记录捕捞或养殖类型。')}),
+  F('production_method_raw',{example:'Cage/Pond culture',why:WHY('Source production-method wording.','原样保留来源 production method。')}),
+  F('production_method_code',{example:'CAGE_POND',why:WHY('Normalized production-method code when available.','有标准化 production method code 时保存。')}),
+  F('certification_raw',{example:'ASC',why:WHY('Certification text from the source.','来源中的认证信息。')}),
+  F('notes_raw',{example:'Hulu Perak profile',why:WHY('Other useful source notes.','其他有用的来源备注。')})
+ ],unique:[['source_record_key','scientific_name_raw']],example:{source_record_key:'page-8-row-3',common_name_raw:'Tilapia',scientific_name_raw:'Oreochromis niloticus',rating:'REDUCE',origin_raw:'Malaysia',origin_code:'MY',production_type:'AQUACULTURE',production_method_raw:'Cage/Pond culture',production_method_code:'CAGE_POND',certification_raw:'ASC',notes_raw:'Hulu Perak profile'}},
+
+ recipe:{name:{en:'RecipeDB recipes',zh:'RecipeDB 食谱'},desc:{en:'RecipeDB source fields used by the final I1 recipe table.',zh:'最终 I1 recipe 表使用的 RecipeDB 来源字段。'},fields:[
+  F('external_recipe_id',{required:true,example:'RDB-12345',why:WHY('RecipeDB/source record ID.','RecipeDB / 来源记录 ID。')}),
+  F('title',{required:true,example:'Grilled Mackerel',why:WHY('Recipe title.','食谱标题。')}),
+  F('description',{example:'Spiced grilled fish',why:WHY('Optional recipe description.','可选食谱描述。')}),
+  F('ingredients_json',{required:true,type:'json',example:'[{"name":"mackerel"}]',why:WHY('Structured ingredient data.','结构化 ingredient 数据。')}),
+  F('instructions_json',{required:true,type:'json',example:'[{"step":1,"text":"Grill the fish"}]',why:WHY('Structured cooking instructions.','结构化做法步骤。')}),
+  F('prep_time_minutes',{type:'int',example:'15',why:WHY('Preparation time in minutes when available.','有数据时保存准备时间（分钟）。')}),
+  F('cook_time_minutes',{type:'int',example:'20',why:WHY('Cooking time in minutes when available.','有数据时保存烹饪时间（分钟）。')}),
+  F('total_time_minutes',{type:'int',example:'35',why:WHY('Total time in minutes when available.','有数据时保存总时间（分钟）。')}),
+  F('servings',{type:'num',example:'4',why:WHY('Serving count when available.','有数据时保存 servings。')}),
+  F('cuisine',{example:'Malaysian',why:WHY('Cuisine/category when available.','有数据时保存 cuisine / category。')}),
+  F('nutrition_json',{type:'json',example:'{"protein_g":30}',why:WHY('Nutrition data when RecipeDB provides it.','RecipeDB 提供时保存 nutrition。')}),
+  F('source_url',{example:'https://...',why:WHY('Original recipe URL when available.','有数据时保存原始食谱 URL。')})
+ ],unique:[['external_recipe_id']],example:{external_recipe_id:'RDB-12345',title:'Grilled Mackerel',description:'Spiced grilled fish',ingredients_json:'[{"name":"mackerel"}]',instructions_json:'[{"step":1,"text":"Grill the fish"}]',prep_time_minutes:'15',cook_time_minutes:'20',total_time_minutes:'35',servings:'4',cuisine:'Malaysian',nutrition_json:'{"protein_g":30}',source_url:''}},
+
+ cooking:{name:{en:'Cooking suitability',zh:'Cooking suitability'},desc:{en:'Fish and cooking-method suitability data for the final I1 format.',zh:'最终 I1 格式使用的鱼种与 cooking method suitability 数据。'},fields:[
+  F('scientific_name',{required:true,example:'Rastrelliger kanagurta',why:WHY('Identifies the seafood without using a database UUID.','不用数据库 UUID 也能标识鱼种。')}),
+  F('cooking_method_code',{required:true,example:'GRILL',why:WHY('Agreed cooking-method code.','团队约定的 cooking method code。')}),
+  F('suitability_score',{required:true,type:'int',example:'4',why:WHY('Suitability score from 1 to 5.','Suitability score，范围 1–5。')}),
+  F('reason_en',{required:true,example:'Firm flesh holds up well to grilling.',why:WHY('Explains the suitability score.','解释 suitability score。')}),
+  F('reason_ms',{example:'Isi pejal sesuai dipanggang.',why:WHY('Optional Malay explanation.','可选马来文说明。')})
+ ],unique:[['scientific_name','cooking_method_code']],example:{scientific_name:'Rastrelliger kanagurta',cooking_method_code:'GRILL',suitability_score:'4',reason_en:'Firm flesh holds up well to grilling.',reason_ms:'Isi pejal sesuai dipanggang.'}},
+
+ landing:{name:{en:'Supply landing points',zh:'渔获上岸量'},desc:{en:'Monthly OpenDOSM fish-landings rows. Database IDs and source-snapshot IDs are resolved during import.',zh:'OpenDOSM 每月渔获上岸量。数据库 ID 与来源快照 ID 在导入时解析。'},fields:[
+  F('period_month',{required:true,type:'date',example:'2026-08-01',why:WHY('Month represented by the row; use the first day of the month.','该行对应月份；统一填写当月第一天。')}),
+  F('scope_level',{required:true,type:'enum',values:['NATIONAL','COAST','COAST_STATE'],example:'COAST_STATE',why:WHY('Aggregation level used by supply_landing_point.','supply_landing_point 使用的汇总层级。')}),
+  F('coast_code',{required:true,type:'enum',values:['all','east','west','borneo'],example:'west',why:WHY('Normalized coast code. Use all for national rows.','标准化海岸代码；全国数据填写 all。')}),
+  F('state_name',{required:true,example:'Perak',why:WHY('State label, or all for national/coast totals without a state.','州名称；无具体州的全国或海岸汇总填写 all。')}),
+  F('landings_mt',{required:true,type:'num',example:'12450.375',why:WHY('Reported fish landings in metric tonnes; cannot be negative.','渔获上岸量，单位为公吨，不得为负数。')})
+ ],unique:[['period_month','coast_code','state_name']],example:{period_month:'2026-08-01',scope_level:'COAST_STATE',coast_code:'west',state_name:'Perak',landings_mt:'12450.375'}},
+
+ price_item:{name:{en:'PriceCatcher items',zh:'PriceCatcher 商品'},desc:{en:'Official PriceCatcher item catalogue rows. Database IDs are derived from the external item code.',zh:'PriceCatcher 官方商品目录；数据库 ID 根据外部商品编号生成。'},fields:[
+  F('external_item_code',{required:true,example:'PC-FISH-001',why:WHY('Stable item identifier from PriceCatcher.','PriceCatcher 的稳定商品编号。')}),
+  F('official_item_name',{required:true,example:'IKAN KEMBUNG',why:WHY('Official item name exactly as published.','官方发布的商品名称原文。')}),
+  F('unit_raw',{required:true,example:'1kg',why:WHY('Unit wording exactly as published.','官方发布的单位原文。')}),
+  F('unit_code',{required:true,example:'RM_PER_KG',why:WHY('Normalized unit used by the backend.','后端使用的标准化单位。')}),
+  F('item_group',{example:'SEAFOOD',why:WHY('Optional PriceCatcher item group.','可选 PriceCatcher 商品组。')}),
+  F('item_category',{example:'FISH',why:WHY('Optional PriceCatcher item category.','可选 PriceCatcher 商品分类。')}),
+  F('product_form',{required:true,type:'enum',values:['WHOLE','CUT','FILLET','HEAD','COOKED','OTHER'],example:'WHOLE',why:WHY('Physical form defined by the database enum.','数据库枚举定义的商品形态。')}),
+  F('size_descriptor',{example:'medium',why:WHY('Optional size or grade wording.','可选尺寸或等级说明。')}),
+  F('active',{type:'enum',values:['true','false'],example:'true',why:WHY('Whether this item remains available for matching.','该商品是否继续参与匹配。')})
+ ],unique:[['external_item_code']],example:{external_item_code:'PC-FISH-001',official_item_name:'IKAN KEMBUNG',unit_raw:'1kg',unit_code:'RM_PER_KG',item_group:'SEAFOOD',item_category:'FISH',product_form:'WHOLE',size_descriptor:'medium',active:'true'}},
+
+ price_mapping:{name:{en:'Price item mappings',zh:'价格商品映射'},desc:{en:'Maps a seafood species to a PriceCatcher item using natural identifiers instead of UUIDs.',zh:'使用自然标识把鱼种映射到 PriceCatcher 商品，不要求填写 UUID。'},fields:[
+  F('scientific_name',{required:true,example:'Rastrelliger kanagurta',why:WHY('Canonical seafood scientific name used to resolve seafood_item_id.','用于解析 seafood_item_id 的标准学名。')}),
+  F('external_item_code',{required:true,example:'PC-FISH-001',why:WHY('PriceCatcher item code used to resolve pricecatcher_item_id.','用于解析 pricecatcher_item_id 的 PriceCatcher 商品编号。')}),
+  F('mapping_type',{required:true,type:'enum',values:['EXACT','COMMON_NAME','MARKET_VARIANT','MARKET_GROUP'],example:'EXACT',why:WHY('How confidently the item maps to the species.','商品与鱼种的映射方式。')}),
+  F('priority',{required:true,type:'int',example:'1',why:WHY('Positive ranking; lower numbers are preferred.','正整数优先级；数值越小优先级越高。')}),
+  F('is_default_for_generic',{required:true,type:'enum',values:['true','false'],example:'true',why:WHY('Whether this is the default mapping for a generic market name.','是否为通用市场名称的默认映射。')}),
+  F('requires_variant_confirmation',{required:true,type:'enum',values:['true','false'],example:'false',why:WHY('Whether the app must confirm a market variant before showing price.','展示价格前是否需要确认市场品种。')}),
+  F('notes',{example:'Exact official item match.',why:WHY('Optional mapping review note.','可选映射审核备注。')})
+ ],unique:[['scientific_name','external_item_code']],example:{scientific_name:'Rastrelliger kanagurta',external_item_code:'PC-FISH-001',mapping_type:'EXACT',priority:'1',is_default_for_generic:'true',requires_variant_confirmation:'false',notes:'Exact official item match.'}},
+
+ price_summary:{name:{en:'Price summaries',zh:'价格汇总'},desc:{en:'30-day and 90-day PriceCatcher summary rows. Natural item and location keys are resolved during import.',zh:'PriceCatcher 30 天与 90 天价格汇总；导入时解析商品和地点自然键。'},fields:[
+  F('external_item_code',{required:true,example:'PC-FISH-001',why:WHY('PriceCatcher item represented by the summary.','该汇总对应的 PriceCatcher 商品。')}),
+  F('location_level',{required:true,type:'enum',values:['STATE','DISTRICT'],example:'STATE',why:WHY('Location aggregation level.','地点汇总层级。')}),
+  F('location_name',{required:true,example:'Perak',why:WHY('Location name used to resolve location_id.','用于解析 location_id 的地点名称。')}),
+  F('window_days',{required:true,type:'enum',values:['30','90'],example:'30',why:WHY('Only the product-defined 30-day and 90-day windows are accepted.','只接受产品定义的 30 天或 90 天窗口。')}),
+  F('period_start',{required:true,type:'date',example:'2026-08-01',why:WHY('First date included in the summary window.','汇总窗口的起始日期。')}),
+  F('period_end',{required:true,type:'date',example:'2026-08-30',why:WHY('Last date included in the summary window.','汇总窗口的结束日期。')}),
+  F('median_price',{required:true,type:'num',example:'12.50',why:WHY('Median observed price in RM per kg.','每公斤令吉价格中位数。')}),
+  F('p25_price',{type:'num',example:'10.90',why:WHY('Optional 25th-percentile price.','可选价格第 25 百分位。')}),
+  F('p75_price',{type:'num',example:'14.20',why:WHY('Optional 75th-percentile price.','可选价格第 75 百分位。')}),
+  F('observation_count',{required:true,type:'int',example:'320',why:WHY('Number of source observations; cannot be negative.','来源观测数量，不得为负数。')}),
+  F('premise_count',{required:true,type:'int',example:'42',why:WHY('Number of premises represented; cannot be negative.','覆盖商户数量，不得为负数。')}),
+  F('distinct_day_count',{required:true,type:'int',example:'27',why:WHY('Number of distinct observed days; cannot be negative.','不同观测日期数量，不得为负数。')}),
+  F('quality_status',{required:true,type:'enum',values:['DISPLAYABLE','INSUFFICIENT_DATA','REJECTED'],example:'DISPLAYABLE',why:WHY('Whether the summary is safe to display.','该汇总是否达到展示标准。')}),
+  F('calculation_version',{required:true,example:'price-i1-v1',why:WHY('Version of the aggregation logic.','价格汇总算法版本。')}),
+  F('calculated_at',{required:true,type:'datetime',example:'2026-08-31T09:00:00+08:00',why:WHY('ISO-8601 timestamp when the summary was calculated.','汇总计算时间，使用 ISO-8601 格式。')})
+ ],unique:[['external_item_code','location_level','location_name','window_days','period_end','calculation_version']],example:{external_item_code:'PC-FISH-001',location_level:'STATE',location_name:'Perak',window_days:'30',period_start:'2026-08-01',period_end:'2026-08-30',median_price:'12.50',p25_price:'10.90',p75_price:'14.20',observation_count:'320',premise_count:'42',distinct_day_count:'27',quality_status:'DISPLAYABLE',calculation_version:'price-i1-v1',calculated_at:'2026-08-31T09:00:00+08:00'}},
+
+ price_trend:{name:{en:'Price trend points',zh:'价格趋势点'},desc:{en:'Weekly PriceCatcher trend rows used by the price chart.',zh:'价格图表使用的 PriceCatcher 每周趋势数据。'},fields:[
+  F('external_item_code',{required:true,example:'PC-FISH-001',why:WHY('PriceCatcher item represented by the trend point.','该趋势点对应的 PriceCatcher 商品。')}),
+  F('location_level',{required:true,type:'enum',values:['STATE','DISTRICT'],example:'STATE',why:WHY('Location aggregation level.','地点汇总层级。')}),
+  F('location_name',{required:true,example:'Perak',why:WHY('Location name used to resolve location_id.','用于解析 location_id 的地点名称。')}),
+  F('week_start',{required:true,type:'date',example:'2026-08-24',why:WHY('First date of the represented week.','该周的起始日期。')}),
+  F('weekly_median',{required:true,type:'num',example:'12.80',why:WHY('Weekly median price in RM per kg.','每公斤令吉周价格中位数。')}),
+  F('observation_count',{required:true,type:'int',example:'75',why:WHY('Number of source observations; cannot be negative.','来源观测数量，不得为负数。')}),
+  F('premise_count',{required:true,type:'int',example:'18',why:WHY('Number of premises represented; cannot be negative.','覆盖商户数量，不得为负数。')}),
+  F('quality_status',{required:true,type:'enum',values:['DISPLAYABLE','INSUFFICIENT_DATA','REJECTED'],example:'DISPLAYABLE',why:WHY('Whether the point is safe to display.','该趋势点是否达到展示标准。')}),
+  F('calculation_version',{required:true,example:'price-i1-v1',why:WHY('Version of the aggregation logic.','价格汇总算法版本。')})
+ ],unique:[['external_item_code','location_level','location_name','week_start','calculation_version']],example:{external_item_code:'PC-FISH-001',location_level:'STATE',location_name:'Perak',week_start:'2026-08-24',weekly_median:'12.80',observation_count:'75',premise_count:'18',quality_status:'DISPLAYABLE',calculation_version:'price-i1-v1'}},
+
+ cv_model:{name:{en:'CV model metadata',zh:'CV 模型 metadata'},desc:{en:'Metadata fields kept in the final I1 cv_model_version table.',zh:'最终 I1 cv_model_version 表保留的 metadata 字段。'},fields:[
+  F('version_name',{required:true,example:'cv-i1-v1',why:WHY('Identifies the CV model/version.','标识 CV 模型版本。')}),
+  F('input_contract',{required:true,type:'json',example:'{"subject":"whole_fish","max_mb":10}',why:WHY('Defines accepted CV input.','定义 CV 接受的输入。')}),
+  F('metrics',{required:true,type:'json',example:'{"top3_accuracy":0.90}',why:WHY('Stores model validation metrics.','保存模型验证指标。')}),
+  F('confidence_threshold',{type:'num',example:'0.65',why:WHY('Low-confidence threshold when used.','使用时保存低置信度 threshold。')})
+ ],unique:[['version_name']],example:{version_name:'cv-i1-v1',input_contract:'{"subject":"whole_fish","max_mb":10}',metrics:'{"top3_accuracy":0.90}',confidence_threshold:'0.65'}}
+};
+
+let lang=localStorage.getItem('ss_csv_lang')||'en',currentKey='wwf',headers=[],rows=[],issues=[],fileName='';
+const $=id=>document.getElementById(id),t=k=>I18N[lang][k]||k,isBlank=v=>String(v??'').trim()==='';
+function init(){bind();renderLang();populate();selectDataset(currentKey,false)}
+function bind(){document.querySelectorAll('.lang button').forEach(b=>b.onclick=()=>{lang=b.dataset.lang;localStorage.setItem('ss_csv_lang',lang);renderLang();populate();selectDataset(currentKey,false);if(rows.length)validate();});$('datasetSelect').onchange=e=>selectDataset(e.target.value);$('downloadTemplate').onclick=downloadTemplate;$('loadExample').onclick=loadExample;$('clearData').onclick=()=>clearData();$('fileInput').onchange=e=>{if(e.target.files[0])readFile(e.target.files[0])};$('downloadClean').onclick=downloadNormalized;const dz=$('dropZone');['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('drag')}));['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag')}));dz.addEventListener('drop',e=>{const f=e.dataTransfer.files[0];if(f)readFile(f)})}
+function renderLang(){document.documentElement.lang=lang==='zh'?'zh-CN':'en';document.querySelectorAll('[data-i18n]').forEach(el=>el.textContent=t(el.dataset.i18n));document.querySelectorAll('.lang button').forEach(b=>b.classList.toggle('active',b.dataset.lang===lang))}
+function populate(){const s=$('datasetSelect');s.innerHTML='';Object.entries(SCHEMAS).forEach(([k,v])=>{const o=document.createElement('option');o.value=k;o.textContent=v.name[lang];s.appendChild(o)});s.value=currentKey}
+function selectDataset(k,clear=true){currentKey=k;$('datasetSelect').value=k;$('datasetDesc').textContent=SCHEMAS[k].desc[lang];renderFields();if(clear)clearData(false);else if(rows.length)validate()}
+function renderFields(){const s=SCHEMAS[currentKey];$('fieldGrid').innerHTML=s.fields.map(f=>`<div class="field"><div class="fieldTop"><div class="infoWrap"><span class="fieldName">${esc(f.key)}</span><button class="qmark" aria-label="?">?</button><div class="tip">${esc(f.why[lang])}</div></div><span class="${f.required?'req':'optional'}">${f.required?t('required'):t('optional')}</span></div><div class="example">${t('example')}: <code>${esc(f.example)}</code>${f.values?` · ${esc(f.values.join(' | '))}`:''}</div></div>`).join('')}
+function clearData(resetInput=true){headers=[];rows=[];issues=[];fileName='';$('resultSection').classList.add('hidden');$('previewSection').classList.add('hidden');if(resetInput)$('fileInput').value=''}
+function downloadTemplate(){const s=SCHEMAS[currentKey],h=s.fields.map(f=>f.key),r=s.fields.map(f=>f.example);downloadBlob(`${currentKey}_template.csv`,toCsv(h,[Object.fromEntries(h.map((x,i)=>[x,r[i]]))]),'text/csv;charset=utf-8')}
+function loadExample(){const s=SCHEMAS[currentKey];headers=s.fields.map(f=>f.key);rows=[{...s.example}];fileName='example.csv';validate();showPreview()}
+function readFile(f){fileName=f.name;const r=new FileReader();r.onload=()=>{try{const parsed=parseCsv(String(r.result||''));headers=parsed.headers;rows=parsed.rows;validate();showPreview()}catch(e){headers=[];rows=[];issues=[{sev:'error',row:'-',col:'CSV',en:e.message,zh:'CSV 无法解析：'+e.message}];showResults()}};r.readAsText(f,'utf-8')}
+function parseCsv(text){text=text.replace(/^\uFEFF/,'');const data=[];let row=[],cell='',q=false;for(let i=0;i<text.length;i++){const c=text[i],n=text[i+1];if(q){if(c==='"'&&n==='"'){cell+='"';i++}else if(c==='"')q=false;else cell+=c}else{if(c==='"')q=true;else if(c===','){row.push(cell);cell=''}else if(c==='\n'){row.push(cell);data.push(row);row=[];cell=''}else if(c!=='\r')cell+=c}}if(q)throw new Error('Unclosed quoted field');if(cell!==''||row.length){row.push(cell);data.push(row)}while(data.length&&data[data.length-1].every(v=>v===''))data.pop();if(!data.length)throw new Error('Empty CSV');const headers=data[0].map(v=>v.trim());if(headers.some(x=>!x))throw new Error('Blank column name');if(new Set(headers).size!==headers.length)throw new Error('Duplicate column names');const rows=data.slice(1).filter(r=>r.some(v=>String(v).trim()!=='')).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??''])));return{headers,rows}}
+function addIssue(sev,row,col,en,zh){issues.push({sev,row,col,en,zh})}
+function validate(){issues=[];const s=SCHEMAS[currentKey],expected=s.fields.map(f=>f.key),missing=s.fields.filter(f=>f.required&&!headers.includes(f.key)).map(f=>f.key),extra=headers.filter(h=>!expected.includes(h));if(missing.length)addIssue('error','-','columns',`Missing required columns: ${missing.join(', ')}`,`缺失必填列：${missing.join(', ')}`);if(extra.length)addIssue('warning','-','columns',`Extra columns: ${extra.join(', ')}`,`存在额外列：${extra.join(', ')}`);rows.forEach((r,i)=>validateRow(r,i+2,s));for(const keyset of s.unique||[]){if(!keyset.every(k=>headers.includes(k)))continue;const seen=new Map();rows.forEach((r,i)=>{const key=keyset.map(k=>String(r[k]??'').trim()).join('\u0001');if(keyset.some(k=>isBlank(r[k])))return;if(seen.has(key))addIssue('error',i+2,keyset.join('+'),`Duplicate key; first appears on row ${seen.get(key)}.`,`重复唯一键；首次出现在第 ${seen.get(key)} 行。`);else seen.set(key,i+2)})}showResults();showPreview()}
+function validateRow(r,rowNo,s){for(const f of s.fields){if(!headers.includes(f.key))continue;const v=String(r[f.key]??'').trim();if(f.required&&!v){addIssue('error',rowNo,f.key,`Required value is empty. ${f.why.en}`,`必填值为空。${f.why.zh}`);continue}if(!v)continue;let ok=true;if(f.type==='int')ok=/^-?\d+$/.test(v);else if(f.type==='num')ok=Number.isFinite(Number(v));else if(f.type==='date')ok=/^\d{4}-\d{2}-\d{2}$/.test(v)&&!Number.isNaN(Date.parse(v+'T00:00:00Z'));else if(f.type==='datetime')ok=!Number.isNaN(Date.parse(v));else if(f.type==='json'){try{JSON.parse(v)}catch{ok=false}}else if(f.type==='enum')ok=f.values.includes(v);if(!ok)addIssue('error',rowNo,f.key,`Invalid ${f.type} value "${v}"${f.values?`; allowed: ${f.values.join(' | ')}`:''}.`,`无效的 ${f.type} 值“${v}”${f.values?`；允许值：${f.values.join(' | ')}`:''}。`)}
+ if(currentKey==='cooking'&&headers.includes('suitability_score')&&!isBlank(r.suitability_score)){const n=Number(r.suitability_score);if(!(Number.isInteger(n)&&n>=1&&n<=5))addIssue('error',rowNo,'suitability_score','Must be an integer from 1 to 5.','必须是 1–5 的整数。')}
+ if(currentKey==='recipe'){
+   for(const k of ['prep_time_minutes','cook_time_minutes','total_time_minutes']){
+     if(headers.includes(k)&&!isBlank(r[k])&&Number(r[k])<0)addIssue('error',rowNo,k,'Must be 0 or greater.','必须大于等于 0。');
+   }
+   if(headers.includes('servings')&&!isBlank(r.servings)&&Number(r.servings)<=0)addIssue('error',rowNo,'servings','Must be greater than 0.','必须大于 0。');
+ }
+ if(currentKey==='cv_model'&&headers.includes('confidence_threshold')&&!isBlank(r.confidence_threshold)){
+   const n=Number(r.confidence_threshold);
+   if(!(Number.isFinite(n)&&n>=0&&n<=1))addIssue('error',rowNo,'confidence_threshold','Must be between 0 and 1.','必须在 0 到 1 之间。');
+ }
+ if(currentKey==='landing'){
+   if(headers.includes('period_month')&&!isBlank(r.period_month)&&!/^\d{4}-\d{2}-01$/.test(String(r.period_month).trim()))addIssue('error',rowNo,'period_month','Must be the first day of a month.','必须填写当月第一天。');
+   if(headers.includes('landings_mt')&&!isBlank(r.landings_mt)&&Number(r.landings_mt)<0)addIssue('error',rowNo,'landings_mt','Must be 0 or greater.','必须大于等于 0。');
+ }
+ if(currentKey==='price_mapping'&&headers.includes('priority')&&!isBlank(r.priority)&&Number(r.priority)<=0)addIssue('error',rowNo,'priority','Must be a positive integer.','必须是正整数。');
+ if(currentKey==='price_summary'){
+   for(const k of ['median_price','p25_price','p75_price','observation_count','premise_count','distinct_day_count']){
+     if(headers.includes(k)&&!isBlank(r[k])&&Number(r[k])<0)addIssue('error',rowNo,k,'Must be 0 or greater.','必须大于等于 0。');
+   }
+   if(headers.includes('period_start')&&headers.includes('period_end')&&!isBlank(r.period_start)&&!isBlank(r.period_end)&&String(r.period_start)>String(r.period_end))addIssue('error',rowNo,'period_start+period_end','period_start must not be later than period_end.','period_start 不得晚于 period_end。');
+   const p25=Number(r.p25_price),median=Number(r.median_price),p75=Number(r.p75_price);
+   if(!isBlank(r.p25_price)&&!isBlank(r.median_price)&&!isBlank(r.p75_price)&&!(p25<=median&&median<=p75))addIssue('error',rowNo,'p25_price+p75_price','Prices must satisfy p25_price ≤ median_price ≤ p75_price.','价格必须满足 p25_price ≤ median_price ≤ p75_price。');
+ }
+ if(currentKey==='price_trend'){
+   for(const k of ['weekly_median','observation_count','premise_count']){
+     if(headers.includes(k)&&!isBlank(r[k])&&Number(r[k])<0)addIssue('error',rowNo,k,'Must be 0 or greater.','必须大于等于 0。');
+   }
+ }
+}
+function showResults(){$('resultSection').classList.remove('hidden');$('fileMeta').textContent=`${t('file')}: ${fileName||'-'} · ${rows.length} ${t('rows')}`;const e=issues.filter(x=>x.sev==='error').length,w=issues.filter(x=>x.sev==='warning').length;$('summary').innerHTML=`<span class="pill ${e?'err':'ok'}">${e} ${t('errors')}</span><span class="pill ${w?'warn':'ok'}">${w} ${t('warnings')}</span><span class="pill ${!e?'ok':''}">${!e?t('valid'):'—'}</span>`;$('issueList').innerHTML=issues.length?issues.map(x=>`<div class="issue ${x.sev}"><span class="sev">${x.sev}</span><div>${esc(x[lang])}</div><span class="loc">${esc(x.row)} · ${esc(x.col)}</span></div>`).join(''):`<div class="empty">${t('noIssues')}</div>`}
+function showPreview(){if(!headers.length){$('previewSection').classList.add('hidden');return}$('previewSection').classList.remove('hidden');$('previewTable').innerHTML=`<thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.slice(0,50).map(r=>`<tr>${headers.map(h=>`<td title="${esc(r[h]??'')}">${esc(r[h]??'')}</td>`).join('')}</tr>`).join('')}</tbody>`}
+function downloadNormalized(){if(!headers.length)return;downloadBlob(`${currentKey}_normalized.csv`,toCsv(headers,rows),'text/csv;charset=utf-8')}
+function toCsv(h,rs){const qq=v=>{const s=String(v??'');return /[",\n\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};return '\uFEFF'+h.map(qq).join(',')+'\r\n'+rs.map(r=>h.map(x=>qq(r[x])).join(',')).join('\r\n')}
+function downloadBlob(name,content,type){const b=new Blob([content],{type}),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),500)}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+init();
+</script>
+</body>
+</html>

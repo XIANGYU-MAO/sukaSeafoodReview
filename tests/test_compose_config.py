@@ -37,13 +37,29 @@ def test_only_api_and_web_join_external_edge_and_have_health_checks():
     assert "/tmp:size=32m,mode=1777" in services["review-web"]["tmpfs"]
 
 
-def test_web_build_context_contains_published_collector_zip():
-    web_context = compose("docker-compose.production.yml")["services"]["review-web"][
+def test_web_build_context_contains_portal_sources_and_published_collector_zip():
+    web_build = compose("docker-compose.production.yml")["services"]["review-web"][
         "build"
-    ]["context"]
-    assert web_context == "./web"
-    package = ROOT / web_context.removeprefix("./") / "public" / "downloads"
+    ]
+    assert web_build == {"context": ".", "dockerfile": "web/Dockerfile"}
+    assert (ROOT / "validator.html").is_file()
+    package = ROOT / "web" / "public" / "downloads"
     assert (package / "sukaseafood-collector.zip").is_file()
+
+
+def test_root_web_build_context_excludes_repository_and_generated_state():
+    ignored = (ROOT / ".dockerignore").read_text("utf-8").splitlines()
+    assert ignored[0] == "**"
+    for required in (
+        "!validator.html",
+        "!web/",
+        "!web/**",
+        "web/node_modules/",
+        "web/dist/",
+        "web/public/portal/",
+        "web/public/validator/",
+    ):
+        assert required in ignored
 
 
 def test_production_compose_uses_named_data_backup_and_import_storage():
@@ -106,10 +122,23 @@ def test_container_dependency_installs_use_the_ygf_china_mirrors():
 def test_nginx_spa_health_body_limit_and_image_csp_match_origin_policy():
     nginx = (ROOT / "web/nginx.conf").read_text("utf-8")
     assert "listen 8080" in nginx
+    for temp_path in (
+        "client_body_temp_path /tmp/client_temp",
+        "proxy_temp_path /tmp/proxy_temp",
+        "fastcgi_temp_path /tmp/fastcgi_temp",
+        "uwsgi_temp_path /tmp/uwsgi_temp",
+        "scgi_temp_path /tmp/scgi_temp",
+    ):
+        assert temp_path in nginx
     assert "location = /healthz" in nginx
     assert "try_files $uri $uri/ /index.html" in nginx
     assert "client_max_body_size 20m" in nginx
     assert "proxy_pass" not in nginx
+    assert "location /portal/" in nginx
+    assert "location /validator/" in nginx
+    assert nginx.count("try_files $uri $uri/ =404") == 2
+    assert nginx.index("location /portal/") < nginx.index("location / {")
+    assert nginx.index("location /validator/") < nginx.index("location / {")
     csp = next(line for line in nginx.splitlines() if "Content-Security-Policy" in line)
     # Exact image hosts can be approved at runtime, while API validation remains
     # the authority deciding which HTTPS URLs may enter the candidate catalog.
