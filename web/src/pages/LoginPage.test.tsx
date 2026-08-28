@@ -109,7 +109,7 @@ describe("login page", () => {
     );
     expect(new Headers(loginCalls[0][1]?.headers).has("X-CSRF-Token")).toBe(false);
     resolveLogin(jsonResponse({ ...authState, name: "Mao", role: "admin" }));
-    expect(await screen.findByRole("button", { name: "修改密码" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Mao 账户菜单" })).toBeInTheDocument();
     expect(screen.queryByText("Change password")).not.toBeInTheDocument();
   });
 
@@ -183,7 +183,7 @@ describe("login page", () => {
     await user.click(await screen.findByRole("radio", { name: "Hassan" }));
     await user.type(screen.getByLabelText("密码"), "storage-secret-password");
     await user.click(screen.getByRole("button", { name: "登录" }));
-    await screen.findByRole("button", { name: "修改密码" });
+    await screen.findByRole("button", { name: "Hassan 账户菜单" });
 
     expect(localSpy).not.toHaveBeenCalled();
     expect(localStorage).toHaveLength(0);
@@ -311,7 +311,7 @@ describe("login page", () => {
 
     expect(await screen.findByRole("link", { name: "Review" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "History" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Change password" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hassan Account menu" })).toBeInTheDocument();
   });
 
   it("uses a name input without exposing the account list in manual login mode", async () => {

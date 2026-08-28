@@ -68,7 +68,7 @@ export function AccessSettingsTab(props: AdminTabProps) {
             </div>
             <div>
               <strong>团队记录可见性</strong>
-              <p>隐藏后，审核员看不到菜单，也不能直接打开团队记录；管理员仍可查看。</p>
+              <p>隐藏后，所有账号都看不到顶部菜单，也不能直接打开团队记录；管理员仍可在“审核进度”查看团队进度。</p>
               <div className="command-pill-group" role="group" aria-label="团队记录可见性">
                 <button type="button" className={`pill-choice${settingsDraft.reviewer_team_progress_visible ? " pill-choice--selected" : ""}`} aria-pressed={settingsDraft.reviewer_team_progress_visible} onClick={() => setSettingsDraft({ ...settingsDraft, reviewer_team_progress_visible: true })}>显示团队记录</button>
                 <button type="button" className={`pill-choice${!settingsDraft.reviewer_team_progress_visible ? " pill-choice--selected" : ""}`} aria-pressed={!settingsDraft.reviewer_team_progress_visible} onClick={() => setSettingsDraft({ ...settingsDraft, reviewer_team_progress_visible: false })}>隐藏团队记录</button>

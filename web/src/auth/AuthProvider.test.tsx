@@ -32,7 +32,7 @@ describe("authentication bootstrap", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent("正在恢复会话");
     resolveMe(jsonResponse(authState));
-    expect(await screen.findByRole("button", { name: "修改密码" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /账户菜单$/ })).toBeInTheDocument();
     expect(screen.getByText("Hassan")).toBeInTheDocument();
   });
 
@@ -63,7 +63,7 @@ describe("authentication bootstrap", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("无法连接审核服务");
     expect(screen.queryByRole("heading", { name: "登录审核平台" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重试连接" }));
-    expect(await screen.findByRole("button", { name: "修改密码" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /账户菜单$/ })).toBeInTheDocument();
   });
 
   it.each([
@@ -79,7 +79,7 @@ describe("authentication bootstrap", () => {
     renderWithAuth(<App />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("无法连接审核服务");
-    expect(screen.queryByRole("button", { name: "修改密码" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /账户菜单$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "登录审核平台" })).not.toBeInTheDocument();
   });
 
@@ -108,13 +108,13 @@ describe("authentication bootstrap", () => {
     await user.click(await screen.findByRole("radio", { name: "Hassan" }));
     await user.type(screen.getByLabelText("密码"), "temporary-password");
     await user.click(screen.getByRole("button", { name: "登录" }));
-    expect(await screen.findByRole("button", { name: "修改密码" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /账户菜单$/ })).toBeInTheDocument();
 
     await act(async () => staleBootstrap.resolve(jsonResponse({}, 401)));
 
     expect(bootstrapSignals[0]).toBeInstanceOf(AbortSignal);
     expect(bootstrapSignals[0].aborted).toBe(true);
-    expect(screen.getByRole("button", { name: "修改密码" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /账户菜单$/ })).toBeInTheDocument();
   });
 
   it("resets guidelines only after a successful explicit login", async () => {
@@ -133,7 +133,7 @@ describe("authentication bootstrap", () => {
     await user.click(await screen.findByRole("radio", { name: "Hassan" }));
     await user.type(screen.getByLabelText("密码"), "temporary-password");
     await user.click(screen.getByRole("button", { name: "登录" }));
-    await screen.findByRole("button", { name: "修改密码" });
+    await screen.findByRole("button", { name: /账户菜单$/ });
     expect(hasSeenReviewGuidelines(authState.id)).toBe(false);
   });
 
@@ -147,7 +147,7 @@ describe("authentication bootstrap", () => {
     }));
     renderWithAuth(<App />);
 
-    await screen.findByRole("button", { name: "修改密码" });
+    await screen.findByRole("button", { name: /账户菜单$/ });
     expect(hasSeenReviewGuidelines(authState.id)).toBe(true);
   });
 

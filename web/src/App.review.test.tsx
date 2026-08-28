@@ -25,15 +25,16 @@ describe("authenticated review integration", () => {
     renderWithAuth(<App />);
 
     expect(await screen.findByRole("heading", { name: "图片审核" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "修改密码" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hassan 账户菜单" })).toBeInTheDocument();
     expect(screen.queryByText("Change password")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "退出登录" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "English" }));
+    expect(screen.queryByRole("menuitem", { name: "退出登录" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "切换到 English" }));
     expect(screen.getByRole("heading", { name: "Image review" })).toBeInTheDocument();
     expect(screen.getByText("Collaborative review")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Change password" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Log out" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "中文" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Hassan Account menu" }));
+    expect(screen.getByRole("menuitem", { name: "Change password" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Log out" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Switch to 中文" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Review" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "History" })).toHaveAttribute("href", "/history");
   });
@@ -51,7 +52,7 @@ describe("authenticated review integration", () => {
     expect(await screen.findByRole("heading", { name: "我的审核历史" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "历史记录" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "审核" })).not.toHaveAttribute("aria-current");
-    await user.click(screen.getByRole("button", { name: "English" }));
+    await user.click(screen.getByRole("button", { name: "切换到 English" }));
     expect(screen.getByRole("heading", { name: "My review history" })).toBeInTheDocument();
     expect(screen.getByText("Collaborative review")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "History" })).toHaveAttribute("aria-current", "page");
@@ -72,8 +73,9 @@ describe("authenticated review integration", () => {
     const user = userEvent.setup();
     renderWithAuth(<App />);
     await screen.findByRole("heading", { name: "图片审核" });
-    await user.click(screen.getByRole("button", { name: "English" }));
-    await user.click(screen.getByRole("button", { name: "Log out" }));
+    await user.click(screen.getByRole("button", { name: "切换到 English" }));
+    await user.click(screen.getByRole("button", { name: "Hassan Account menu" }));
+    await user.click(screen.getByRole("menuitem", { name: "Log out" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Log out failed");
     expect(screen.getByRole("button", { name: "Retry log out" })).toBeInTheDocument();

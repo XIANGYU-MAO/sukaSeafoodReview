@@ -54,6 +54,12 @@ def test_admin_can_switch_to_manual_login_and_hide_team_progress_from_reviewers(
         admin_progress = client.get(
             "/v1/progress", headers=admin_headers(seed, "Mao")
         )
+        reviewer_auth = client.get(
+            "/v1/auth/me", headers=admin_headers(seed, "Hassan")
+        )
+        admin_auth = client.get(
+            "/v1/auth/me", headers=admin_headers(seed, "Mao")
+        )
 
     assert updated.status_code == 200
     assert updated.json() == {
@@ -66,6 +72,8 @@ def test_admin_can_switch_to_manual_login_and_hide_team_progress_from_reviewers(
     }
     assert reviewer_progress.status_code == 403
     assert admin_progress.status_code == 200
+    assert reviewer_auth.json()["team_progress_visible"] is False
+    assert admin_auth.json()["team_progress_visible"] is False
 
 
 def test_only_completed_admin_with_csrf_can_update_system_settings(settings):

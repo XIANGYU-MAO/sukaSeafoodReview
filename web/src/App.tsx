@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 
 import { useAuth } from "./auth/AuthProvider";
@@ -48,7 +48,7 @@ export function App() {
     return <ChangePasswordPage forced={false} onCancel={() => setChangingPassword(false)} />;
   }
   const authenticatedUser = auth.user;
-  const showTeamProgress = authenticatedUser.role === "admin" || authenticatedUser.team_progress_visible;
+  const showTeamProgress = authenticatedUser.team_progress_visible;
 
   return (
     <Routes>
@@ -135,6 +135,24 @@ function AuthenticatedShell({ name, isAdmin, showTeamProgress, onChangePassword,
   const { locale, t, toggleLocale } = useI18n();
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+    function closeOnOutsideClick(event: PointerEvent) {
+      if (!accountMenuRef.current?.contains(event.target as Node)) setAccountMenuOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setAccountMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [accountMenuOpen]);
 
   async function handleLogout() {
     if (logoutPending) return;
@@ -163,15 +181,41 @@ function AuthenticatedShell({ name, isAdmin, showTeamProgress, onChangePassword,
           {isAdmin ? <NavLink to="/admin">{t("navAdmin")}</NavLink> : null}
         </nav>
         <div className="user-actions">
-          <span className="user-badge">{name}</span>
-          <button className="secondary-button language-toggle" type="button" onClick={toggleLocale}>
-            {locale === "zh" ? "English" : "中文"}
-          </button>
-          <button className="secondary-button" type="button" onClick={onChangePassword}>
-            {t("changePassword")}
-          </button>
-          <button className="secondary-button" type="button" disabled={logoutPending} onClick={() => void handleLogout()}>
-            {logoutPending ? t("loggingOut") : t("logout")}
+          <div className="account-menu" ref={accountMenuRef}>
+            <button
+              className="user-badge account-menu__trigger"
+              type="button"
+              aria-label={`${name} ${t("accountMenu")}`}
+              aria-haspopup="menu"
+              aria-expanded={accountMenuOpen}
+              aria-controls="account-menu-popover"
+              onClick={() => setAccountMenuOpen((open) => !open)}
+            >
+              <span>{name}</span>
+              <svg className="account-menu__chevron" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="m4 6 4 4 4-4" />
+              </svg>
+            </button>
+            {accountMenuOpen ? <div id="account-menu-popover" className="account-menu__popover" role="menu" aria-label={name}>
+              <button type="button" role="menuitem" onClick={() => { setAccountMenuOpen(false); onChangePassword(); }}>
+                {t("changePassword")}
+              </button>
+              <button type="button" role="menuitem" disabled={logoutPending} onClick={() => { setAccountMenuOpen(false); void handleLogout(); }}>
+                {logoutPending ? t("loggingOut") : t("logout")}
+              </button>
+            </div> : null}
+          </div>
+          <button
+            className="secondary-button language-toggle language-icon-button"
+            type="button"
+            aria-label={t("switchLanguage")}
+            title={t("switchLanguage")}
+            onClick={toggleLocale}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3Z" />
+            </svg>
           </button>
         </div>
       </header>

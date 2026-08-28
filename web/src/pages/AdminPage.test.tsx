@@ -73,7 +73,7 @@ describe("admin authorization and accessible shell", () => {
     expect(within(systemGroup).getByRole("tab", { name: "账号" })).toBeVisible();
     expect(within(systemGroup).getByRole("tab", { name: "访问设置" })).toBeVisible();
     for (const label of labels) expect(screen.getByRole("tab", { name: label })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "English" }));
+    await user.click(screen.getByRole("button", { name: "切换到 English" }));
     for (const label of labels) expect(screen.getByRole("tab", { name: label })).toBeVisible();
     const progress = screen.getByRole("tab", { name: "审核进度" });
     progress.focus();

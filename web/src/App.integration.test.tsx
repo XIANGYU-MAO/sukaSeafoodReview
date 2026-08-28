@@ -84,7 +84,7 @@ describe("production-shell integration", () => {
     const image = await screen.findByRole("img", { name: "测试鱼 (Piscis probatio)" });
     expect(screen.getByRole("status", { name: "正在加载图片" })).toBeInTheDocument();
     expect(screen.getByText("iNaturalist")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "English" }));
+    await user.click(screen.getByRole("button", { name: "切换到 English" }));
     expect(screen.getByRole("button", { name: "Keep (K)" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Reject (R)" }));
     expect(screen.getByRole("radio", { name: "Wrong species" })).toBeInTheDocument();
@@ -147,6 +147,57 @@ describe("production-shell integration", () => {
     expect(within(nav).queryByRole("link", { name: "团队记录" })).not.toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "图片审核" })).toBeInTheDocument();
     expect(fetchMock.mock.calls.every(([input]) => !pathOf(input).endsWith("/progress"))).toBe(true);
+  });
+
+  it("hides the standalone team progress page from an admin when disabled while keeping admin navigation", async () => {
+    markReviewGuidelinesSeen(maoAuth.id);
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = pathOf(input);
+      if (path.endsWith("/auth/me")) {
+        return Promise.resolve(jsonResponse({ ...maoAuth, team_progress_visible: false }));
+      }
+      if (path.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+      if (path.endsWith("/progress")) return Promise.resolve(jsonResponse(progressFixture));
+      return Promise.reject(new Error(`Unexpected request: ${String(input)}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderWithStrictAuth(<App />, "/progress");
+
+    const nav = await screen.findByRole("navigation", { name: "协作审核" });
+    expect(within(nav).queryByRole("link", { name: "团队记录" })).not.toBeInTheDocument();
+    expect(within(nav).getByRole("link", { name: "管理后台" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "图片审核" })).toBeInTheDocument();
+    expect(fetchMock.mock.calls.every(([input]) => !pathOf(input).endsWith("/progress"))).toBe(true);
+  });
+
+  it("puts account actions in the username menu and renders language switching as an icon button", async () => {
+    markReviewGuidelinesSeen(authState.id);
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const path = pathOf(input);
+      if (path.endsWith("/auth/me")) return Promise.resolve(jsonResponse(authState));
+      if (path.endsWith("/reviews/current")) return Promise.resolve(new Response(null, { status: 204 }));
+      return Promise.reject(new Error(`Unexpected request: ${String(input)}`));
+    }));
+    const user = userEvent.setup();
+    renderWithStrictAuth(<App />);
+
+    const accountButton = await screen.findByRole("button", { name: "Hassan 账户菜单" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "修改密码" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "退出登录" })).not.toBeInTheDocument();
+
+    const languageButton = screen.getByRole("button", { name: "切换到 English" });
+    expect(languageButton.querySelector("svg")).toBeInTheDocument();
+    expect(languageButton).not.toHaveTextContent("English");
+    await user.click(languageButton);
+    expect(screen.getByRole("button", { name: "Switch to 中文" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Hassan Account menu" }));
+    const menu = screen.getByRole("menu", { name: "Hassan" });
+    expect(within(menu).getByRole("menuitem", { name: "Change password" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "Log out" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
   it("opens aggregate progress at /progress without exposing review history details", async () => {

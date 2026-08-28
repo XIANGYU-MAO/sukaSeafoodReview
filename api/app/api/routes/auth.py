@@ -55,10 +55,7 @@ async def public_state(
         role=auth.user.role,
         must_change_password=auth.user.must_change_password,
         csrf_token=csrf_token(auth.session.token_hash, settings.CSRF_SECRET),
-        team_progress_visible=(
-            auth.user.role == "admin"
-            or system_settings.reviewer_team_progress_visible
-        ),
+        team_progress_visible=system_settings.reviewer_team_progress_visible,
     )
 
 
