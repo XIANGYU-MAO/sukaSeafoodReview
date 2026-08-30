@@ -45,9 +45,12 @@ it("guides collection through four steps with current downloads, copy, and speci
   }
   expect(screen.getByRole("link", { name: "下载采集器 ZIP" })).toHaveAttribute("href", "/sukaseafood/review/downloads/sukaseafood-collector.zip");
   expect(screen.getByRole("link", { name: "下载最新鱼种配置" })).toHaveAttribute("href", "/sukaseafood/api/v1/admin/collector/config");
+  expect(screen.getByRole("link", { name: "导出全部候选 CSV" })).toHaveAttribute("href", "/sukaseafood/api/v1/admin/collector/candidates.csv");
   const downloads = screen.getByRole("group", { name: "采集器下载" });
   expect(downloads).toHaveClass("equal-action-row");
-  expect(within(downloads).getAllByRole("link")).toHaveLength(2);
+  expect(within(downloads).getAllByRole("link")).toHaveLength(3);
+  expect(screen.getByText(/不会创建训练同步批次，也不会改服务器下载状态/)).toBeInTheDocument();
+  expect(screen.getByText(/python \.\\collect_fish_images\.py --download-manifest \.\\sukaseafood-all-candidates\.csv --output-dir "G:\\sukaseafood-candidate-archive"/)).toBeInTheDocument();
   expect(screen.getByRole("list", { name: "当前启用鱼种" })).toHaveTextContent("SF001 · 测试鱼");
   await user.click(screen.getByRole("button", { name: "复制命令" }));
   expect(await screen.findByRole("button", { name: "已复制" })).toBeInTheDocument();

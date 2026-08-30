@@ -85,6 +85,7 @@ export function ImportsTab(props: AdminTabProps) {
   const previewController = useRef<AbortController | null>(null);
   const packageUrl = `${WEB_BASE}downloads/sukaseafood-collector.zip`;
   const configUrl = `${API_BASE}/admin/collector/config`;
+  const candidateManifestUrl = `${API_BASE}/admin/collector/candidates.csv`;
   const hasActiveSpecies = props.species.some((species) => species.active);
   const activeSpecies = props.species.filter((species) => species.active);
   const command = useMemo(() => {
@@ -298,8 +299,15 @@ export function ImportsTab(props: AdminTabProps) {
       <div className="inline-actions equal-action-row" role="group" aria-label="采集器下载">
         <a className="primary-button compact-button" href={packageUrl} download>下载采集器 ZIP</a>
         {hasActiveSpecies ? <a className="secondary-button" href={configUrl}>下载最新鱼种配置</a> : <button type="button" className="secondary-button" disabled>下载最新鱼种配置</button>}
+        <a className="secondary-button" href={candidateManifestUrl} download>导出全部候选 CSV</a>
       </div>
       {hasActiveSpecies ? null : <p>请先在鱼种管理中新增并启用鱼种。</p>}
+      <div className="collector-command-panel">
+        <strong>归档服务器已有候选（可选）</strong>
+        <p>先导出全部候选 CSV，再在本地运行下面的命令。这个流程不会创建训练同步批次，也不会改服务器下载状态。</p>
+        <p className="collector-command"><code>python .\collect_fish_images.py --download-manifest .\sukaseafood-all-candidates.csv --output-dir "G:\sukaseafood-candidate-archive"</code></p>
+        <p>再次运行会校验已有文件的 SHA-256，只重试缺失、损坏或上次失败的图片。</p>
+      </div>
     </section>
     <section className="admin-card">
       <h3>3. 本地生成 CSV</h3>

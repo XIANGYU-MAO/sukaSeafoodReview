@@ -1,9 +1,12 @@
 import csv
+import hashlib
+import io
 import json
 from pathlib import Path
 
 import pytest
 import requests
+from PIL import Image
 
 import collector.collect_fish_images as collector_module
 from collector.collect_fish_images import (
@@ -332,6 +335,508 @@ def test_cli_accepts_repeated_sources_without_collecting_unselected_sources():
         ["--source", "inat", "--source", "ala", "--source", "noaa"]
     )
     assert parsed.sources == ["inat", "ala", "noaa"]
+
+
+def test_cli_accepts_existing_manifest_archive_mode():
+    parsed = collector_module.parse_args(
+        ["--download-manifest", "all-candidates.csv"]
+    )
+
+    assert parsed.download_manifest == Path("all-candidates.csv")
+
+
+def test_download_manifest_mode_does_not_load_config_or_collect_metadata(
+    monkeypatch, tmp_path
+):
+    manifest = tmp_path / "all-candidates.csv"
+    collector_module.write_manifest([], manifest)
+    output = tmp_path / "archive"
+    calls = []
+
+    monkeypatch.setattr(
+        collector_module,
+        "load_config",
+        lambda _path: pytest.fail("manifest-only mode loaded species config"),
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "Collector",
+        lambda **_kwargs: pytest.fail("manifest-only mode constructed Collector"),
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "download_manifest_archive",
+        lambda _session, input_path, output_dir: calls.append(
+            (input_path, output_dir)
+        ),
+        raising=False,
+    )
+
+    result = collector_module.main(
+        [
+            "--download-manifest",
+            str(manifest),
+            "--output-dir",
+            str(output),
+        ]
+    )
+
+    assert result == 0
+    assert calls == [(manifest, output)]
+
+
+class ArchiveResponse:
+    def __init__(self, status, *, content=b"", headers=None, payload=None):
+        self.status_code = status
+        self._content = content
+        self.headers = headers or {}
+        self._payload = payload
+
+    @property
+    def content(self):
+        return self._content
+
+    def iter_content(self, chunk_size=8192):
+        for offset in range(0, len(self._content), chunk_size):
+            yield self._content[offset : offset + chunk_size]
+
+    def json(self):
+        return self._payload
+
+    def close(self):
+        pass
+
+
+class ArchiveSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        if not self.responses:
+            raise AssertionError(f"unexpected request: {url}")
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def jpeg_bytes(color="red"):
+    payload = io.BytesIO()
+    Image.new("RGB", (12, 8), color).save(payload, format="JPEG")
+    return payload.getvalue()
+
+
+def archive_row(number=1, **overrides):
+    row = {column: "" for column in collector_module.MANIFEST_COLUMNS}
+    row.update(
+        {
+            "image_id": f"candidate-{number}",
+            "seafood_code": "SF001",
+            "app_label": "Test fish",
+            "scientific_name": "Piscis probatio",
+            "source_dataset": "INATURALIST",
+            "source_record_id": f"record-{number}",
+            "source_url": f"https://source.example.test/{number}",
+            "image_url": f"https://images.example.test/{number}/original.jpg",
+            "license": "CC-BY",
+            "attribution": "Test Creator",
+            "status": "CANDIDATE",
+        }
+    )
+    row.update(overrides)
+    return row
+
+
+def test_manifest_checkpoint_failure_preserves_previous_complete_file(tmp_path):
+    manifest = tmp_path / "candidates.csv"
+    collector_module.write_manifest([archive_row()], manifest)
+    previous = manifest.read_bytes()
+
+    class ExplodingRow(dict):
+        def get(self, key, default=None):
+            if key == "scientific_name":
+                raise OSError("simulated interrupted checkpoint")
+            return super().get(key, default)
+
+    with pytest.raises(OSError, match="interrupted checkpoint"):
+        collector_module.write_manifest([ExplodingRow(archive_row(2))], manifest)
+
+    assert manifest.read_bytes() == previous
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_manifest_archive_resumes_verified_files_and_retries_corruption(tmp_path):
+    manifest = tmp_path / "all-candidates.csv"
+    output = tmp_path / "archive"
+    collector_module.write_manifest(
+        [archive_row(rejection_reason="DOWNLOAD_ERROR:HTTP_429")], manifest
+    )
+    first_bytes = jpeg_bytes("red")
+    session = ArchiveSession([ArchiveResponse(200, content=first_bytes)])
+
+    first = collector_module.download_manifest_archive(session, manifest, output)
+    saved = collector_module.read_manifest(output / "candidates.csv")[0]
+    local = output / saved["local_path"]
+
+    assert (first.downloaded, first.skipped, first.failed) == (1, 0, 0)
+    assert saved["rejection_reason"] == ""
+    assert saved["sha256"] == hashlib.sha256(first_bytes).hexdigest()
+    assert local.read_bytes() == first_bytes
+
+    second = collector_module.download_manifest_archive(session, manifest, output)
+    assert (second.downloaded, second.skipped, second.failed) == (0, 1, 0)
+    assert len(session.calls) == 1
+
+    local.write_bytes(b"corrupt")
+    second_bytes = jpeg_bytes("blue")
+    session.responses.append(ArchiveResponse(200, content=second_bytes))
+    third = collector_module.download_manifest_archive(session, manifest, output)
+
+    assert (third.downloaded, third.skipped, third.failed) == (1, 0, 0)
+    assert local.read_bytes() == second_bytes
+    assert len(session.calls) == 2
+
+
+def test_manifest_archive_does_not_reuse_progress_after_source_identity_changes(
+    tmp_path,
+):
+    output = tmp_path / "archive"
+    old_bytes = jpeg_bytes("red")
+    old_local = output / "images" / "old.jpg"
+    old_local.parent.mkdir(parents=True)
+    old_local.write_bytes(old_bytes)
+    old = archive_row(
+        image_url="https://images.example.test/old/original.jpg",
+        local_path="images/old.jpg",
+        sha256=hashlib.sha256(old_bytes).hexdigest(),
+    )
+    collector_module.write_manifest([old], output / "candidates.csv")
+    fresh = archive_row(
+        image_url="https://images.example.test/new/original.jpg",
+        source_record_id="replacement-record",
+    )
+    manifest = tmp_path / "fresh.csv"
+    collector_module.write_manifest([fresh], manifest)
+    session = ArchiveSession([ArchiveResponse(200, content=jpeg_bytes("blue"))])
+
+    summary = collector_module.download_manifest_archive(session, manifest, output)
+
+    assert (summary.downloaded, summary.skipped) == (1, 0)
+    assert [call[0] for call in session.calls] == [fresh["image_url"]]
+
+
+def test_manifest_archive_checkpoints_every_ten_processed_rows(
+    monkeypatch, tmp_path
+):
+    manifest = tmp_path / "all-candidates.csv"
+    output = tmp_path / "archive"
+    collector_module.write_manifest(
+        [archive_row(number) for number in range(1, 21)], manifest
+    )
+    writes = []
+    real_write = collector_module.write_manifest
+
+    def record_write(rows, path):
+        writes.append((len(rows), path))
+        real_write(rows, path)
+
+    def fake_download(_session, row, _images_dir, **_kwargs):
+        row["sha256"] = "a" * 64
+        row["local_path"] = f"images/{row['image_id']}.jpg"
+        row["rejection_reason"] = ""
+        return row
+
+    monkeypatch.setattr(collector_module, "write_manifest", record_write)
+    monkeypatch.setattr(collector_module, "download_one", fake_download)
+
+    summary = collector_module.download_manifest_archive(
+        ArchiveSession([]), manifest, output
+    )
+
+    assert summary.downloaded == 20
+    assert writes == [
+        (20, output / "candidates.csv"),
+        (20, output / "candidates.csv"),
+        (20, output / "candidates.csv"),
+    ]
+
+
+def test_archive_download_retries_retry_after_and_records_terminal_http_status(
+    monkeypatch, tmp_path
+):
+    waits = []
+    monkeypatch.setattr(collector_module.time, "sleep", waits.append)
+    good = jpeg_bytes()
+    retrying = ArchiveSession(
+        [
+            ArchiveResponse(429, headers={"Retry-After": "3"}),
+            ArchiveResponse(200, content=good),
+        ]
+    )
+    row = archive_row()
+
+    collector_module.download_one(
+        retrying, row, tmp_path / "images", archive_mode=True
+    )
+
+    assert row["rejection_reason"] == ""
+    assert waits == [3.0]
+    failing = ArchiveSession([ArchiveResponse(503) for _ in range(4)])
+    failed = archive_row(2)
+    collector_module.download_one(
+        failing, failed, tmp_path / "images", archive_mode=True
+    )
+    assert failed["rejection_reason"] == "DOWNLOAD_ERROR:HTTP_503"
+
+
+def test_archive_download_streams_and_stops_at_the_size_limit(
+    monkeypatch, tmp_path
+):
+    class StreamingOnlyResponse(ArchiveResponse):
+        @property
+        def content(self):
+            raise AssertionError("archive downloader buffered response.content")
+
+    monkeypatch.setattr(collector_module, "ARCHIVE_MAX_IMAGE_BYTES", 100)
+    response = StreamingOnlyResponse(200, content=b"x" * 101)
+    session = ArchiveSession([response])
+    row = archive_row()
+
+    collector_module.download_one(
+        session, row, tmp_path / "images", archive_mode=True
+    )
+
+    assert row["rejection_reason"] == "DOWNLOAD_ERROR:IMAGE_TOO_LARGE"
+    assert session.calls[0][1]["stream"] is True
+    assert session.calls[0][1]["allow_redirects"] is False
+
+
+def test_archive_download_retries_a_broken_response_stream(
+    monkeypatch, tmp_path
+):
+    class BrokenStreamResponse(ArchiveResponse):
+        def iter_content(self, chunk_size=8192):
+            yield b"partial"
+            raise requests.ConnectionError("stream interrupted")
+
+    monkeypatch.setattr(collector_module.time, "sleep", lambda _delay: None)
+    session = ArchiveSession(
+        [BrokenStreamResponse(200), ArchiveResponse(200, content=jpeg_bytes())]
+    )
+    row = archive_row()
+
+    collector_module.download_one(
+        session, row, tmp_path / "images", archive_mode=True
+    )
+
+    assert row["rejection_reason"] == ""
+    assert len(session.calls) == 2
+
+
+def test_archive_download_shares_one_attempt_budget_across_status_and_body_failures(
+    monkeypatch, tmp_path
+):
+    class BrokenStreamResponse(ArchiveResponse):
+        def iter_content(self, chunk_size=8192):
+            yield b"partial"
+            raise requests.ConnectionError("stream interrupted")
+
+    monkeypatch.setattr(collector_module.time, "sleep", lambda _delay: None)
+    session = ArchiveSession(
+        [
+            ArchiveResponse(503),
+            ArchiveResponse(503),
+            ArchiveResponse(503),
+            BrokenStreamResponse(200),
+        ]
+    )
+    throttle = collector_module.ArchiveHostThrottle()
+    row = archive_row()
+
+    collector_module.download_one(
+        session,
+        row,
+        tmp_path / "images",
+        archive_mode=True,
+        throttle=throttle,
+    )
+
+    assert len(session.calls) == collector_module.ARCHIVE_ATTEMPTS
+    assert row["rejection_reason"] == "DOWNLOAD_ERROR:NETWORK"
+    assert throttle.pending_delays == {"images.example.test": 8.0}
+
+
+def test_archive_image_validation_rejects_pixel_limit_before_hashing(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(collector_module, "ARCHIVE_MAX_IMAGE_PIXELS", 50)
+    monkeypatch.setattr(
+        collector_module.imagehash,
+        "phash",
+        lambda _image: pytest.fail("oversized image was hashed"),
+    )
+    session = ArchiveSession([ArchiveResponse(200, content=jpeg_bytes())])
+    row = archive_row()
+
+    collector_module.download_one(
+        session, row, tmp_path / "images", archive_mode=True
+    )
+
+    assert row["rejection_reason"] == "DOWNLOAD_ERROR:INVALID_IMAGE"
+
+
+def test_archive_image_validation_treats_decompression_warning_as_error(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 80)
+    session = ArchiveSession([ArchiveResponse(200, content=jpeg_bytes())])
+    row = archive_row()
+
+    collector_module.download_one(
+        session, row, tmp_path / "images", archive_mode=True
+    )
+
+    assert row["rejection_reason"] == "DOWNLOAD_ERROR:INVALID_IMAGE"
+
+
+def test_archive_download_rejects_symlinked_output_ancestor(tmp_path):
+    archive = tmp_path / "archive"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    species_path = archive / "images" / "SF001"
+    species_path.parent.mkdir(parents=True)
+    try:
+        species_path.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this Windows host")
+    session = ArchiveSession([ArchiveResponse(200, content=jpeg_bytes())])
+    row = archive_row()
+
+    collector_module.download_one(
+        session, row, archive / "images", archive_mode=True
+    )
+
+    assert row["rejection_reason"] == "DOWNLOAD_ERROR:UNSAFE_PATH"
+    assert not list(outside.iterdir())
+    assert session.calls == []
+
+
+def test_archive_redirect_rate_limit_defers_the_effective_host(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(collector_module.time, "sleep", lambda _delay: None)
+    redirected = "https://cdn.example.test/fish.jpg"
+    session = ArchiveSession(
+        [
+            ArchiveResponse(302, headers={"Location": redirected}),
+            *[
+                ArchiveResponse(429, headers={"Retry-After": "3"})
+                for _ in range(4)
+            ],
+        ]
+    )
+    throttle = collector_module.ArchiveHostThrottle()
+    row = archive_row()
+
+    collector_module.download_one(
+        session,
+        row,
+        tmp_path / "images",
+        archive_mode=True,
+        throttle=throttle,
+    )
+
+    assert row["rejection_reason"] == "DOWNLOAD_ERROR:HTTP_429"
+    assert [call[0] for call in session.calls] == [row["image_url"]] + [
+        redirected
+    ] * 4
+    assert throttle.pending_delays == {"cdn.example.test": 3.0}
+
+
+def test_commons_archive_fallback_uses_official_thumbnail_without_rewriting_url(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(collector_module.time, "sleep", lambda _delay: None)
+    original = "https://upload.wikimedia.org/original/fish.jpg"
+    thumbnail = "https://upload.wikimedia.org/thumb/fish-1600px.jpg"
+    row = archive_row(
+        source_dataset="WIKIMEDIA_COMMONS",
+        source_url="https://commons.wikimedia.org/wiki/File:Example_fish.jpg",
+        image_url=original,
+    )
+    session = ArchiveSession(
+        [
+            ArchiveResponse(404),
+            ArchiveResponse(
+                200,
+                payload={
+                    "query": {
+                        "pages": {
+                            "1": {"imageinfo": [{"thumburl": thumbnail}]}
+                        }
+                    }
+                },
+            ),
+            ArchiveResponse(200, content=jpeg_bytes()),
+        ]
+    )
+
+    collector_module.download_one(
+        session, row, tmp_path / "images", archive_mode=True
+    )
+
+    assert row["image_url"] == original
+    assert row["rejection_reason"] == ""
+    assert [call[0] for call in session.calls] == [
+        original,
+        collector_module.COMMONS_API,
+        thumbnail,
+    ]
+
+
+def test_commons_svg_archive_uses_retried_official_thumbnail_fallback(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(collector_module.time, "sleep", lambda _delay: None)
+    original = "https://upload.wikimedia.org/original/fish.svg"
+    thumbnail = "https://upload.wikimedia.org/thumb/fish-1600px.jpg"
+    row = archive_row(
+        source_dataset="WIKIMEDIA_COMMONS",
+        source_url="https://commons.wikimedia.org/wiki/File:Example_fish.svg",
+        image_url=original,
+    )
+    session = ArchiveSession(
+        [
+            ArchiveResponse(200, content=b"<svg></svg>"),
+            ArchiveResponse(429, headers={"Retry-After": "0"}),
+            ArchiveResponse(
+                200,
+                payload={
+                    "query": {
+                        "pages": {
+                            "1": {"imageinfo": [{"thumburl": thumbnail}]}
+                        }
+                    }
+                },
+            ),
+            ArchiveResponse(200, content=jpeg_bytes()),
+        ]
+    )
+
+    collector_module.download_one(
+        session, row, tmp_path / "images", archive_mode=True
+    )
+
+    assert row["rejection_reason"] == ""
+    assert row["image_url"] == original
+    assert [call[0] for call in session.calls] == [
+        original,
+        collector_module.COMMONS_API,
+        collector_module.COMMONS_API,
+        thumbnail,
+    ]
 
 
 def test_local_dedupe_reports_only_unique_rows_and_resume_preserves_existing_state():

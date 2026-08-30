@@ -60,6 +60,27 @@ replenishment again.
 `--download-images` is optional; metadata
 collection is the default.
 
+## Archive candidates already on the server
+
+To archive every candidate that already exists on the review server, first use
+**Export all candidates CSV** in Admin > Collection and import, then run:
+
+```powershell
+python .\collect_fish_images.py --download-manifest .\sukaseafood-all-candidates.csv --output-dir "G:\sukaseafood-candidate-archive"
+```
+
+`--download-manifest` reads only that CSV. It does not recollect metadata,
+upload a receipt, create a training-sync batch, or change any server review or
+download state. Progress is checkpointed to `candidates.csv` in the output
+directory every 10 rows. Rerunning the command verifies `local_path` and
+SHA-256, skips valid files, and retries only missing, corrupted, or previously
+failed rows.
+
+Archive mode may use the official Wikimedia Commons API to obtain a 1600-pixel
+thumbnail when a Commons original is rate-limited or unavailable. It preserves
+the original image URL in the CSV. This fallback is archive-only; training sync
+never substitutes a thumbnail for an original.
+
 ## Source and license policy
 
 The collector keeps only media with `CC0`, Public Domain, `CC BY`, `CC BY-SA`,

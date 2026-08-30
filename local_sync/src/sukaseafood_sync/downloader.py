@@ -440,6 +440,8 @@ def download_image(
         raise DownloadError("original image URL is not safe HTTPS")
     target = Path(destination)
     staging = _prepare_paths(target)
+    last_http_status: int | None = None
+    last_retry_after: float | None = None
 
     for attempt in range(policy.attempts):
         response: requests.Response | None = None
@@ -448,11 +450,13 @@ def download_image(
         try:
             response = _request(session, original_url, effective_policy, cancel)
             status = response.status_code
+            last_http_status = status
             if status in _RETRY_STATUSES:
                 retry_delay = _retry_after(response, policy)
+                last_retry_after = retry_delay
             elif not 200 <= status < 300:
                 raise DownloadError(
-                    "image request failed with a non-retriable HTTP status",
+                    f"image request failed with HTTP {status} (non-retriable)",
                     code="NETWORK_ERROR",
                 )
             else:
@@ -510,8 +514,18 @@ def download_image(
                 raise DownloadError(
                     "image download failed after network retries", code="NETWORK_ERROR"
                 )
+            status_detail = (
+                f"HTTP {last_http_status}"
+                if last_http_status is not None
+                else "retriable HTTP statuses"
+            )
+            retry_after_detail = (
+                f"; Retry-After {last_retry_after:g} seconds"
+                if last_retry_after is not None
+                else ""
+            )
             raise DownloadError(
-                "image request failed after retriable HTTP statuses",
+                f"image request failed after {status_detail} retries{retry_after_detail}",
                 code="NETWORK_ERROR",
             )
         delay = (

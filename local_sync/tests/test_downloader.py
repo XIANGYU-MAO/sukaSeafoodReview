@@ -236,11 +236,35 @@ def test_server_exported_exact_origin_is_used_for_download(http, valid_jpeg, tmp
 def test_404_fails_immediately_without_retry(http, fake_sleep, tmp_path):
     http.add(responses.GET, IMAGE_URL, status=404)
 
-    with pytest.raises(DownloadError, match="HTTP"):
+    with pytest.raises(DownloadError, match="HTTP 404"):
         download_image(session(), add_row(), tmp_path / "fish.jpg", policy(), noop, never_cancel)
 
     assert len(http.calls) == 1
     fake_sleep.assert_not_called()
+    assert_no_output(tmp_path / "fish.jpg")
+
+
+def test_terminal_rate_limit_reports_safe_status_and_retry_after(
+    http, fake_sleep, tmp_path
+):
+    for _ in range(4):
+        http.add(
+            responses.GET,
+            IMAGE_URL,
+            status=429,
+            headers={"Retry-After": "3"},
+        )
+
+    with pytest.raises(
+        DownloadError, match=r"HTTP 429.*Retry-After 3(?:\.0)? seconds"
+    ) as caught:
+        download_image(
+            session(), add_row(), tmp_path / "fish.jpg", policy(), noop, never_cancel
+        )
+
+    assert len(http.calls) == 4
+    assert_bounded_wait(fake_sleep, 9.0)
+    assert_secret_free(caught.value)
     assert_no_output(tmp_path / "fish.jpg")
 
 
@@ -778,7 +802,7 @@ def test_network_failure_error_chain_does_not_expose_tokenized_url(
 def test_http_failure_error_chain_does_not_expose_tokenized_url(http, tmp_path):
     http.add(responses.GET, IMAGE_URL, status=404)
 
-    with pytest.raises(DownloadError, match="HTTP") as caught:
+    with pytest.raises(DownloadError, match="HTTP 404") as caught:
         download_image(session(), add_row(), tmp_path / "fish.jpg", policy(), noop, never_cancel)
 
     assert_secret_free(caught.value)

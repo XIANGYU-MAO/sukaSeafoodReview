@@ -54,6 +54,24 @@ Smithsonian 需要免费 API Key：勾选该来源后使用管理后台生成的
 最小值。每个来源仍受 `--max-per-species` 限制，所以来源图片不足或导入判重时，一次
 采集可能仍未达标；先导入 CSV，再从管理后台重新下载最新配置继续补采即可。
 
+## 归档服务器已有候选
+
+如需把服务器中已经存在的全部候选图片归档到本机，请先在管理后台“采集与导入”中
+下载“导出全部候选 CSV”，然后运行：
+
+```powershell
+python .\collect_fish_images.py --download-manifest .\sukaseafood-all-candidates.csv --output-dir "G:\sukaseafood-candidate-archive"
+```
+
+`--download-manifest` 只读取指定 CSV，不会重新采集 metadata，也不会向审核服务器上传
+回执或改变任何审核、下载状态。本地进度写入目标目录的 `candidates.csv`，每处理 10 行
+保存一次。再次运行同一命令时会校验 `local_path` 与 SHA-256；校验成功的文件直接跳过，
+仅重试缺失、损坏和上次失败的行。
+
+归档模式遇到 Wikimedia Commons 原图限流或失效时，可以通过 Commons 官方 API 获取
+1600 像素缩略图作为本地归档回退，但不会改写 CSV 中的原始图片地址。该回退只用于候选
+归档；训练原图同步绝不会用缩略图代替原图。
+
 ## 来源与许可证规则
 
 采集器只保留 `CC0`、Public Domain、`CC BY`、`CC BY-SA`、`CC BY-NC` 和

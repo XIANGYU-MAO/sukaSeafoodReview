@@ -23,12 +23,15 @@ import io
 import json
 import os
 import re
+import stat
 import sys
+import tempfile
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, unquote, urljoin, urlsplit
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 
@@ -1104,13 +1107,44 @@ def load_config(path: Path) -> dict[str, Any]:
     return normalize_species_config(json.loads(path.read_text(encoding="utf-8")))
 
 
+def _path_is_link_or_reparse(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & 0x400
+    )
+
+
 def write_manifest(rows: Iterable[dict[str, Any]], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=MANIFEST_COLUMNS, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({c: row.get(c, "") for c in MANIFEST_COLUMNS})
+    if _path_is_link_or_reparse(path):
+        raise RuntimeError(f"Refusing unsafe manifest path: {path}")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            newline="",
+            encoding="utf-8-sig",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".part",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            writer = csv.DictWriter(
+                handle, fieldnames=MANIFEST_COLUMNS, extrasaction="ignore"
+            )
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({c: row.get(c, "") for c in MANIFEST_COLUMNS})
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def read_manifest(path: Path) -> list[dict[str, str]]:
@@ -1132,7 +1166,376 @@ def extension_from_url(url: str) -> str:
     return ext if ext in {".jpg", ".jpeg", ".png", ".webp"} else ".jpg"
 
 
-def download_one(session: requests.Session, row: dict[str, str], images_dir: Path) -> dict[str, str]:
+ARCHIVE_RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+ARCHIVE_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+ARCHIVE_ATTEMPTS = 4
+ARCHIVE_MAX_REDIRECTS = 5
+ARCHIVE_BACKOFF_SECONDS = (2.0, 4.0, 8.0)
+ARCHIVE_MAX_RETRY_AFTER_SECONDS = 30.0
+ARCHIVE_MAX_IMAGE_BYTES = 100 * 1024 * 1024
+ARCHIVE_MAX_IMAGE_PIXELS = 40_000_000
+ARCHIVE_MAX_IMAGE_DIMENSION = 20_000
+ARCHIVE_HASH_IMAGE_DIMENSION = 1_024
+ARCHIVE_PROGRESS_FIELDS = (
+    "sha256",
+    "perceptual_hash",
+    "local_path",
+    "rejection_reason",
+)
+ARCHIVE_PROGRESS_IDENTITY_FIELDS = (
+    "image_id",
+    "seafood_code",
+    "source_dataset",
+    "source_record_id",
+    "image_url",
+)
+
+
+class ArchiveDownloadFailure(RuntimeError):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+@dataclass
+class ArchiveAttemptBudget:
+    """One shared request budget across status, connection, and body failures."""
+
+    remaining: int = ARCHIVE_ATTEMPTS
+    used: int = 0
+
+    def take(self) -> int | None:
+        if self.remaining <= 0:
+            return None
+        attempt = self.used
+        self.used += 1
+        self.remaining -= 1
+        return attempt
+
+
+@dataclass(frozen=True)
+class ArchiveSummary:
+    total: int
+    downloaded: int
+    skipped: int
+    failed: int
+
+
+@dataclass
+class ArchiveHostThrottle:
+    """Carry terminal host cooldowns across sequential archive rows."""
+
+    sleep_fn: Callable[[float], None] | None = None
+    pending_delays: dict[str, float] = field(default_factory=dict)
+
+    def wait(self, url: str) -> None:
+        host = (urlsplit(url).hostname or "").lower()
+        delay = self.pending_delays.pop(host, 0.0)
+        if delay > 0:
+            (self.sleep_fn or time.sleep)(delay)
+
+    def sleep_retry(self, url: str, delay: float) -> None:
+        (self.sleep_fn or time.sleep)(delay)
+        self.pending_delays.pop((urlsplit(url).hostname or "").lower(), None)
+
+    def defer(self, url: str, delay: float) -> None:
+        if delay <= 0:
+            return
+        host = (urlsplit(url).hostname or "").lower()
+        self.pending_delays[host] = max(delay, self.pending_delays.get(host, 0.0))
+
+
+def _archive_retry_delay(response: requests.Response, attempt: int) -> float:
+    raw = str(response.headers.get("Retry-After") or "").strip()
+    if raw:
+        try:
+            parsed = max(0.0, float(raw))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(raw)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                parsed = max(
+                    0.0,
+                    (retry_at - datetime.now(timezone.utc)).total_seconds(),
+                )
+            except (TypeError, ValueError, OverflowError):
+                parsed = ARCHIVE_BACKOFF_SECONDS[attempt]
+        return min(parsed, ARCHIVE_MAX_RETRY_AFTER_SECONDS)
+    return ARCHIVE_BACKOFF_SECONDS[attempt]
+
+
+def _safe_archive_url(value: str) -> str:
+    parts = urlsplit(value)
+    if (
+        parts.scheme.lower() != "https"
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+    ):
+        raise ArchiveDownloadFailure("UNSAFE_URL")
+    return value
+
+
+def _archive_response(
+    session: requests.Session,
+    url: str,
+    throttle: ArchiveHostThrottle,
+    *,
+    params: dict[str, Any] | None = None,
+    stream: bool,
+    timeout: int,
+    budget: ArchiveAttemptBudget | None = None,
+) -> tuple[requests.Response, str]:
+    budget = budget or ArchiveAttemptBudget()
+    current_url = _safe_archive_url(url)
+    current_params = params
+    redirects = 0
+    last_reason = "NETWORK"
+    retry_delay = ARCHIVE_BACKOFF_SECONDS[-1]
+    while True:
+        attempt = budget.take()
+        if attempt is None:
+            throttle.defer(current_url, retry_delay)
+            raise ArchiveDownloadFailure(last_reason)
+        response = None
+        retry_delay = ARCHIVE_BACKOFF_SECONDS[min(attempt, 2)]
+        try:
+            while True:
+                throttle.wait(current_url)
+                response = session.get(
+                    current_url,
+                    params=current_params,
+                    timeout=timeout,
+                    stream=stream,
+                    allow_redirects=False,
+                    headers={"Accept-Encoding": "identity"},
+                )
+                status = int(response.status_code)
+                if status not in ARCHIVE_REDIRECT_STATUSES:
+                    break
+                location = str(response.headers.get("Location") or "").strip()
+                response.close()
+                response = None
+                if not location or redirects >= ARCHIVE_MAX_REDIRECTS:
+                    raise ArchiveDownloadFailure("REDIRECT_REJECTED")
+                current_url = _safe_archive_url(urljoin(current_url, location))
+                current_params = None
+                redirects += 1
+            status = int(response.status_code)
+            last_reason = f"HTTP_{status}"
+            if 200 <= status < 300:
+                return response, current_url
+            if status not in ARCHIVE_RETRY_STATUSES:
+                raise ArchiveDownloadFailure(last_reason)
+            retry_delay = _archive_retry_delay(response, min(attempt, 2))
+        except requests.RequestException:
+            last_reason = "NETWORK"
+        except ArchiveDownloadFailure:
+            if response is not None:
+                response.close()
+            raise
+        if response is not None:
+            response.close()
+        if budget.remaining <= 0:
+            throttle.defer(current_url, retry_delay)
+            raise ArchiveDownloadFailure(last_reason)
+        throttle.sleep_retry(current_url, retry_delay)
+
+
+def _archive_image_file(
+    session: requests.Session,
+    url: str,
+    directory: Path,
+    throttle: ArchiveHostThrottle,
+) -> tuple[Path, str]:
+    budget = ArchiveAttemptBudget()
+    while budget.remaining > 0:
+        response, effective_url = _archive_response(
+            session,
+            url,
+            throttle,
+            stream=True,
+            timeout=60,
+            budget=budget,
+        )
+        temporary = None
+        try:
+            raw_length = str(response.headers.get("Content-Length") or "").strip()
+            if raw_length:
+                if not raw_length.isdigit():
+                    raise ArchiveDownloadFailure("INVALID_CONTENT_LENGTH")
+                if int(raw_length) > ARCHIVE_MAX_IMAGE_BYTES:
+                    raise ArchiveDownloadFailure("IMAGE_TOO_LARGE")
+            digest = hashlib.sha256()
+            size = 0
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=directory,
+                prefix=".candidate.",
+                suffix=".part",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                try:
+                    for chunk in response.iter_content(chunk_size=256 * 1024):
+                        if not chunk:
+                            continue
+                        size += len(chunk)
+                        if size > ARCHIVE_MAX_IMAGE_BYTES:
+                            raise ArchiveDownloadFailure("IMAGE_TOO_LARGE")
+                        handle.write(chunk)
+                        digest.update(chunk)
+                except requests.RequestException as exc:
+                    raise ArchiveDownloadFailure("NETWORK") from exc
+                handle.flush()
+                os.fsync(handle.fileno())
+            return temporary, digest.hexdigest()
+        except ArchiveDownloadFailure as exc:
+            if temporary is not None and temporary.exists():
+                temporary.unlink()
+            if exc.reason != "NETWORK":
+                raise
+            retry_delay = ARCHIVE_BACKOFF_SECONDS[min(budget.used - 1, 2)]
+            if budget.remaining <= 0:
+                throttle.defer(effective_url, retry_delay)
+                raise
+            throttle.sleep_retry(effective_url, retry_delay)
+        except BaseException:
+            if temporary is not None and temporary.exists():
+                temporary.unlink()
+            raise
+        finally:
+            response.close()
+    raise ArchiveDownloadFailure("NETWORK")
+
+
+def _commons_thumbnail_url(
+    session: requests.Session,
+    source_url: str,
+    throttle: ArchiveHostThrottle,
+) -> str | None:
+    parts = urlsplit(source_url)
+    marker = "/wiki/"
+    if parts.hostname not in {"commons.wikimedia.org", "www.commons.wikimedia.org"}:
+        return None
+    if marker not in parts.path:
+        return None
+    title = unquote(parts.path.split(marker, 1)[1])
+    if not title.startswith("File:"):
+        return None
+    response = None
+    try:
+        response, _effective_url = _archive_response(
+            session,
+            COMMONS_API,
+            throttle,
+            params={
+                "action": "query",
+                "format": "json",
+                "prop": "imageinfo",
+                "iiprop": "url",
+                "iiurlwidth": 1600,
+                "titles": title,
+            },
+            stream=False,
+            timeout=40,
+        )
+        payload = response.json()
+        pages = ((payload or {}).get("query") or {}).get("pages") or {}
+        for page in pages.values():
+            info = (page or {}).get("imageinfo") or []
+            if info and info[0].get("thumburl"):
+                return str(info[0]["thumburl"])
+    except (TypeError, ValueError, AttributeError):
+        return None
+    finally:
+        if response is not None:
+            response.close()
+    return None
+
+
+def _archive_component(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value or "").strip("._")
+    return cleaned[:128] or fallback
+
+
+def _safe_archive_directory(root: Path, *components: str) -> Path:
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    if _path_is_link_or_reparse(root) or not root.is_dir():
+        raise ArchiveDownloadFailure("UNSAFE_PATH")
+    resolved_root = root.resolve()
+    current = root
+    for component in components:
+        current = current / component
+        if current.exists():
+            if _path_is_link_or_reparse(current) or not current.is_dir():
+                raise ArchiveDownloadFailure("UNSAFE_PATH")
+        else:
+            current.mkdir()
+        try:
+            current.resolve().relative_to(resolved_root)
+        except ValueError as exc:
+            raise ArchiveDownloadFailure("UNSAFE_PATH") from exc
+    return current
+
+
+def _validate_archive_image(path: Path) -> str:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                width, height = image.size
+                if (
+                    width < 1
+                    or height < 1
+                    or width > ARCHIVE_MAX_IMAGE_DIMENSION
+                    or height > ARCHIVE_MAX_IMAGE_DIMENSION
+                    or width * height > ARCHIVE_MAX_IMAGE_PIXELS
+                ):
+                    raise ArchiveDownloadFailure("INVALID_IMAGE")
+                image.verify()
+            with Image.open(path) as image:
+                image.draft(
+                    "RGB",
+                    (ARCHIVE_HASH_IMAGE_DIMENSION, ARCHIVE_HASH_IMAGE_DIMENSION),
+                )
+                image.thumbnail(
+                    (ARCHIVE_HASH_IMAGE_DIMENSION, ARCHIVE_HASH_IMAGE_DIMENSION),
+                    Image.Resampling.LANCZOS,
+                )
+                return str(imagehash.phash(image))
+    except ArchiveDownloadFailure:
+        raise
+    except Exception as exc:
+        raise ArchiveDownloadFailure("INVALID_IMAGE") from exc
+
+
+def _download_valid_archive_image(
+    session: requests.Session,
+    url: str,
+    directory: Path,
+    throttle: ArchiveHostThrottle,
+) -> tuple[Path, str, str]:
+    temporary, sha256 = _archive_image_file(session, url, directory, throttle)
+    try:
+        phash = _validate_archive_image(temporary)
+        return temporary, sha256, phash
+    except BaseException:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+
+
+def download_one(
+    session: requests.Session,
+    row: dict[str, str],
+    images_dir: Path,
+    *,
+    archive_mode: bool = False,
+    throttle: ArchiveHostThrottle | None = None,
+) -> dict[str, str]:
     if Image is None or imagehash is None:
         raise RuntimeError(
             "Image downloading requires Pillow and ImageHash. Run: "
@@ -1142,24 +1545,165 @@ def download_one(session: requests.Session, row: dict[str, str], images_dir: Pat
     if not url:
         row["rejection_reason"] = "NO_IMAGE_URL"
         return row
-    species_dir = images_dir / row["seafood_code"] / row["source_dataset"].lower()
-    species_dir.mkdir(parents=True, exist_ok=True)
-    local = species_dir / f"{row['image_id']}{extension_from_url(url)}"
+    active_throttle = throttle or ArchiveHostThrottle()
+    temporary = None
     try:
-        r = session.get(url, timeout=60, stream=True)
-        r.raise_for_status()
-        content = r.content
-        with Image.open(io.BytesIO(content)) as im:
-            im.verify()
-        with Image.open(io.BytesIO(content)) as im:
-            phash = str(imagehash.phash(im.convert("RGB")))
-        local.write_bytes(content)
-        row["sha256"] = hashlib.sha256(content).hexdigest()
+        species_dir = _safe_archive_directory(
+            images_dir.parent,
+            images_dir.name,
+            _archive_component(row.get("seafood_code", ""), "unknown-species"),
+            _archive_component(
+                row.get("source_dataset", "").lower(), "unknown-source"
+            ),
+        )
+        local = species_dir / (
+            f"{_archive_component(row.get('image_id', ''), 'candidate')}"
+            f"{extension_from_url(url)}"
+        )
+        if _path_is_link_or_reparse(local):
+            raise ArchiveDownloadFailure("UNSAFE_PATH")
+        try:
+            temporary, sha256, phash = _download_valid_archive_image(
+                session, url, species_dir, active_throttle
+            )
+        except ArchiveDownloadFailure as original_error:
+            eligible_fallback = (
+                original_error.reason.startswith("HTTP_")
+                or original_error.reason
+                in {"NETWORK", "IMAGE_TOO_LARGE", "INVALID_IMAGE"}
+            )
+            if (
+                archive_mode
+                and eligible_fallback
+                and row.get("source_dataset") == "WIKIMEDIA_COMMONS"
+            ):
+                thumbnail = _commons_thumbnail_url(
+                    session, row.get("source_url", ""), active_throttle
+                )
+                if thumbnail:
+                    temporary, sha256, phash = _download_valid_archive_image(
+                        session, thumbnail, species_dir, active_throttle
+                    )
+                else:
+                    raise original_error
+            else:
+                raise
+        temporary.replace(local)
+        temporary = None
+        row["sha256"] = sha256
         row["perceptual_hash"] = phash
         row["local_path"] = str(local.relative_to(images_dir.parent))
+        row["rejection_reason"] = ""
+    except ArchiveDownloadFailure as exc:
+        row["rejection_reason"] = f"DOWNLOAD_ERROR:{exc.reason}"
     except Exception as exc:  # network/decoding errors remain reviewable in the manifest
         row["rejection_reason"] = f"DOWNLOAD_ERROR:{type(exc).__name__}"
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
     return row
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verified_archive_path(row: dict[str, str], output_dir: Path) -> Path | None:
+    relative = row.get("local_path", "").strip()
+    expected = row.get("sha256", "").strip().lower()
+    if not relative or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        return None
+    candidate_relative = Path(relative)
+    if candidate_relative.is_absolute():
+        return None
+    root = output_dir.resolve()
+    candidate = (root / candidate_relative).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    if not candidate.is_file():
+        return None
+    try:
+        return candidate if _sha256_path(candidate) == expected else None
+    except OSError:
+        return None
+
+
+def _merge_archive_progress(
+    rows: list[dict[str, str]], previous: list[dict[str, str]]
+) -> None:
+    by_id = {row.get("image_id", ""): row for row in previous if row.get("image_id")}
+    for row in rows:
+        old = by_id.get(row.get("image_id", ""))
+        if old is None:
+            continue
+        if any(
+            row.get(field_name, "") != old.get(field_name, "")
+            for field_name in ARCHIVE_PROGRESS_IDENTITY_FIELDS
+        ):
+            continue
+        for field_name in ARCHIVE_PROGRESS_FIELDS:
+            row[field_name] = old.get(field_name, "")
+
+
+def download_manifest_archive(
+    session: requests.Session,
+    input_path: Path,
+    output_dir: Path,
+    *,
+    checkpoint_every: int = 10,
+) -> ArchiveSummary:
+    if checkpoint_every < 1:
+        raise ValueError("checkpoint_every must be >= 1")
+    input_path = Path(input_path)
+    output_dir = Path(output_dir)
+    if not input_path.is_file():
+        raise SystemExit(f"Candidate manifest not found: {input_path}")
+    rows = read_manifest(input_path)
+    _safe_archive_directory(output_dir)
+    output_manifest = output_dir / "candidates.csv"
+    if output_manifest.is_file() and output_manifest.resolve() != input_path.resolve():
+        _merge_archive_progress(rows, read_manifest(output_manifest))
+
+    downloaded = skipped = failed = 0
+    throttle = ArchiveHostThrottle()
+    for index, row in enumerate(rows, start=1):
+        if verified_archive_path(row, output_dir) is not None:
+            skipped += 1
+        else:
+            download_one(
+                session,
+                row,
+                output_dir / "images",
+                archive_mode=True,
+                throttle=throttle,
+            )
+            if row.get("rejection_reason"):
+                failed += 1
+            else:
+                downloaded += 1
+        if index % checkpoint_every == 0:
+            write_manifest(rows, output_manifest)
+        if index % 25 == 0:
+            print(f"archiving {index}/{len(rows)}...", file=sys.stderr)
+    write_manifest(rows, output_manifest)
+    summary = ArchiveSummary(
+        total=len(rows),
+        downloaded=downloaded,
+        skipped=skipped,
+        failed=failed,
+    )
+    print(
+        f"Archive complete: total={summary.total}, downloaded={summary.downloaded}, "
+        f"verified-and-skipped={summary.skipped}, failed={summary.failed}. "
+        f"Progress manifest: {output_manifest}"
+    )
+    return summary
 
 
 def dedupe_metadata(rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
@@ -1194,6 +1738,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--minimum-total-per-species", type=int, help="Collect only the shortfall needed for each species to reach this server candidate total.")
     p.add_argument("--maximum-total-per-species", type=int, help="When collection is needed, stop before the server candidate total would exceed this value.")
     p.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    p.add_argument(
+        "--download-manifest",
+        type=Path,
+        help=(
+            "Download only the images listed in an existing candidate CSV. "
+            "This does not collect metadata or contact the review server."
+        ),
+    )
     p.add_argument("--download-images", action="store_true", help="Download image bytes after metadata collection. Default is metadata-only.")
     p.add_argument("--resume", action="store_true", help="Merge newly collected rows into an existing output/candidates.csv instead of overwriting it.")
     return p.parse_args(argv)
@@ -1201,6 +1753,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json,text/csv,*/*"})
+    if args.download_manifest is not None:
+        download_manifest_archive(session, args.download_manifest, args.output_dir)
+        return 0
     if args.max_per_species < 1:
         raise SystemExit("--max-per-species must be >= 1")
     if args.minimum_total_per_species is not None and args.minimum_total_per_species < 1:
@@ -1220,8 +1777,6 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         raise SystemExit(f"Unknown seafood code(s): {', '.join(sorted(unknown))}")
 
-    session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json,text/csv,*/*"})
     collector = Collector(
         session=session,
         smithsonian_api_key=args.smithsonian_api_key,
