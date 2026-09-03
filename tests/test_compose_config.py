@@ -142,7 +142,9 @@ def test_nginx_spa_health_body_limit_and_image_csp_match_origin_policy():
     csp = next(line for line in nginx.splitlines() if "Content-Security-Policy" in line)
     # Exact image hosts can be approved at runtime, while API validation remains
     # the authority deciding which HTTPS URLs may enter the candidate catalog.
-    assert "img-src 'self' data: https:" in csp
+    assert "script-src 'self' 'wasm-unsafe-eval';" in csp
+    assert "img-src 'self' blob: data: https:" in csp
+    assert "application/javascript mjs;" in nginx
 
 
 def test_batch_and_receipt_envelope_constants_agree_across_layers():

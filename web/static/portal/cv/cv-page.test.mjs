@@ -4,7 +4,9 @@ import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
 import { expect, test } from "vitest";
 
-import { applyLocale, errorKeyForStage, runtimeAssetBase, validateFile } from "./cv.js";
+import {
+  applyLocale, errorKeyForStage, isActiveRun, runtimeAssetBase, setI18nText, validateFile,
+} from "./cv.js";
 
 const html = readFileSync(resolve("static/portal/cv/index.html"), "utf8");
 const css = readFileSync(resolve("static/portal/cv/cv.css"), "utf8");
@@ -46,6 +48,13 @@ test("switches all primary controls to English", () => {
   expect(document.querySelector("#photo-input")?.getAttribute("aria-label")).toBe("Upload or take a fish photo");
   expect(document.querySelector("#photo-preview")?.getAttribute("alt")).toBe("Fish photo to identify");
   expect(css).toContain(".upload-control:has(+ input:focus-visible)");
+
+  const modelState = document.querySelector("#model-state");
+  setI18nText(modelState, "modelReady", "en");
+  expect(modelState?.dataset.i18n).toBe("modelReady");
+  expect(modelState?.textContent).toBe("Model config ready");
+  applyLocale("zh", document);
+  expect(modelState?.textContent).toBe("模型配置就绪");
 });
 
 test("rejects unsupported and oversized photos before inference", () => {
@@ -55,4 +64,7 @@ test("rejects unsupported and oversized photos before inference", () => {
   expect(errorKeyForStage("decode")).toBe("decodeFailed");
   expect(errorKeyForStage("model")).toBe("inferenceFailed");
   expect(runtimeAssetBase("https://example.test/portal/cv/cv.js")).toBe("https://example.test/portal/cv/vendor/");
+  const run = {};
+  expect(isActiveRun(run, run)).toBe(true);
+  expect(isActiveRun(run, {})).toBe(false);
 });

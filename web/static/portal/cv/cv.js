@@ -62,8 +62,18 @@ let metadataPromise = null;
 let metadata = null;
 let sessionPromise = null;
 let currentResult = null;
+let inferenceRun = null;
 
 const text = (key) => messages[locale][key] ?? key;
+
+export function setI18nText(element, key, activeLocale = locale) {
+  element.dataset.i18n = key;
+  element.textContent = messages[activeLocale]?.[key] ?? key;
+}
+
+export function isActiveRun(currentRun, expectedRun) {
+  return currentRun === expectedRun;
+}
 
 export function applyLocale(nextLocale, root = document) {
   const active = nextLocale === "en" ? "en" : "zh";
@@ -112,10 +122,10 @@ async function fetchJson(path) {
 function setPanel(statusKey, titleKey, copyKey, tone = "") {
   currentResult = null;
   const status = document.querySelector("#result-status");
-  status.textContent = text(statusKey);
+  setI18nText(status, statusKey);
   status.className = `result-status ${tone}`.trim();
-  document.querySelector("#result-message").textContent = text(titleKey);
-  document.querySelector("#result-copy").textContent = text(copyKey);
+  setI18nText(document.querySelector("#result-message"), titleKey);
+  setI18nText(document.querySelector("#result-copy"), copyKey);
   document.querySelector("#result-empty").hidden = false;
   document.querySelector("#prediction-list").hidden = true;
   document.querySelector("#confirmation-note").hidden = true;
@@ -135,7 +145,7 @@ function renderResult(result) {
   currentResult = result;
   const low = result.status === "LOW_CONFIDENCE";
   const status = document.querySelector("#result-status");
-  status.textContent = text(low ? "lowConfidence" : "candidates");
+  setI18nText(status, low ? "lowConfidence" : "candidates");
   status.className = `result-status ${low ? "is-warning" : "is-ready"}`;
   document.querySelector("#result-empty").hidden = true;
   const list = document.querySelector("#prediction-list");
@@ -172,7 +182,7 @@ async function loadMetadata() {
   document.querySelector("#metric-f1").textContent = `${(testMetrics.macro_f1 * 100).toFixed(2)}%`;
   document.querySelector("#metric-top3").textContent = `${(testMetrics.top3_hit_rate * 100).toFixed(2)}%`;
   const state = document.querySelector("#model-state");
-  state.textContent = text("modelReady");
+  setI18nText(state, "modelReady");
   state.classList.add("is-ready");
   renderSpecies();
   return metadata;
@@ -229,40 +239,50 @@ function prepareTensor(source, config) {
 
 async function identify() {
   if (!selectedFile) return;
+  const run = { file: selectedFile };
+  inferenceRun = run;
   const button = document.querySelector("#identify-button");
   button.disabled = true;
-  button.textContent = text("analysing");
+  setI18nText(button, "analysing");
   document.querySelector("#error-message").hidden = true;
   setPanel("waiting", "loadingTitle", "loadingCopy");
   let source;
   let stage = "model";
   try {
     const session = await ensureSession();
+    if (!isActiveRun(inferenceRun, run)) return;
     setPanel("waiting", "analysingTitle", "analysingCopy");
     stage = "decode";
-    source = await decodeImage(selectedFile);
+    source = await decodeImage(run.file);
+    if (!isActiveRun(inferenceRun, run)) return;
     stage = "inference";
     const tensorData = prepareTensor(source, metadata.preprocessing);
     const inputName = session.inputNames[0];
     const outputName = session.outputNames[0];
     const feeds = { [inputName]: new globalThis.ort.Tensor("float32", tensorData, [1, 3, 224, 224]) };
     const outputs = await session.run(feeds);
+    if (!isActiveRun(inferenceRun, run)) return;
     renderResult(rankPredictions(outputs[outputName].data, metadata.classes, metadata.modelCard.confidence_threshold, 3));
   } catch (error) {
+    if (!isActiveRun(inferenceRun, run)) return;
     console.error(error);
     const errorKey = errorKeyForStage(stage);
     const message = document.querySelector("#error-message");
-    message.textContent = text(errorKey);
+    setI18nText(message, errorKey);
     message.hidden = false;
     setPanel("modelFailed", "lowTitle", errorKey, "is-error");
   } finally {
     source?.close?.();
-    button.disabled = false;
-    button.textContent = text("identify");
+    if (isActiveRun(inferenceRun, run)) {
+      inferenceRun = null;
+      button.disabled = !selectedFile;
+      setI18nText(button, "identify");
+    }
   }
 }
 
 function clearPhoto() {
+  inferenceRun = null;
   selectedFile = null;
   if (previewUrl) URL.revokeObjectURL(previewUrl);
   previewUrl = null;
@@ -273,8 +293,10 @@ function clearPhoto() {
   preview.hidden = true;
   document.querySelector("#preview-empty").hidden = false;
   document.querySelector("#preview-frame").classList.remove("has-image");
-  document.querySelector("#file-name").textContent = text("noFile");
-  document.querySelector("#identify-button").disabled = true;
+  setI18nText(document.querySelector("#file-name"), "noFile");
+  const identifyButton = document.querySelector("#identify-button");
+  identifyButton.disabled = true;
+  setI18nText(identifyButton, "identify");
   document.querySelector("#clear-button").hidden = true;
   document.querySelector("#error-message").hidden = true;
   setPanel("waiting", "resultEmptyTitle", "resultEmptyCopy");
@@ -285,10 +307,11 @@ function choosePhoto(file) {
   if (errorKey) {
     clearPhoto();
     const message = document.querySelector("#error-message");
-    message.textContent = text(errorKey);
+    setI18nText(message, errorKey);
     message.hidden = false;
     return;
   }
+  inferenceRun = null;
   if (previewUrl) URL.revokeObjectURL(previewUrl);
   selectedFile = file;
   previewUrl = URL.createObjectURL(file);
@@ -297,8 +320,12 @@ function choosePhoto(file) {
   preview.hidden = false;
   document.querySelector("#preview-empty").hidden = true;
   document.querySelector("#preview-frame").classList.add("has-image");
-  document.querySelector("#file-name").textContent = file.name;
-  document.querySelector("#identify-button").disabled = false;
+  const fileName = document.querySelector("#file-name");
+  fileName.removeAttribute("data-i18n");
+  fileName.textContent = file.name;
+  const identifyButton = document.querySelector("#identify-button");
+  identifyButton.disabled = false;
+  setI18nText(identifyButton, "identify");
   document.querySelector("#clear-button").hidden = false;
   document.querySelector("#error-message").hidden = true;
   setPanel("waiting", "resultEmptyTitle", "resultEmptyCopy");
@@ -311,7 +338,7 @@ function initialize() {
   metadataPromise = loadMetadata().catch((error) => {
     console.error(error);
     const state = document.querySelector("#model-state");
-    state.textContent = text("modelFailed");
+    setI18nText(state, "modelFailed");
     state.classList.add("is-error");
     throw error;
   });
