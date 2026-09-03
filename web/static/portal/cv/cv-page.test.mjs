@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
 import { expect, test } from "vitest";
 
-import { applyLocale, errorKeyForStage, validateFile } from "./cv.js";
+import { applyLocale, errorKeyForStage, runtimeAssetBase, validateFile } from "./cv.js";
 
 const html = readFileSync(resolve("static/portal/cv/index.html"), "utf8");
 const css = readFileSync(resolve("static/portal/cv/cv.css"), "utf8");
@@ -53,4 +53,5 @@ test("rejects unsupported and oversized photos before inference", () => {
   expect(validateFile({ type: "image/webp", size: 1000 }, 1000)).toBeNull();
   expect(errorKeyForStage("decode")).toBe("decodeFailed");
   expect(errorKeyForStage("model")).toBe("inferenceFailed");
+  expect(runtimeAssetBase("https://example.test/portal/cv/cv.js")).toBe("https://example.test/portal/cv/vendor/");
 });

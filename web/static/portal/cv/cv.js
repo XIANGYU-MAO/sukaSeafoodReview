@@ -99,6 +99,10 @@ export function errorKeyForStage(stage) {
   return stage === "decode" ? "decodeFailed" : "inferenceFailed";
 }
 
+export function runtimeAssetBase(moduleUrl = import.meta.url) {
+  return new URL("./vendor/", moduleUrl).href;
+}
+
 async function fetchJson(path) {
   const response = await fetch(path);
   if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
@@ -178,7 +182,7 @@ async function ensureSession() {
   await metadataPromise;
   if (!globalThis.ort) throw new Error("ONNX Runtime did not load");
   if (!sessionPromise) {
-    globalThis.ort.env.wasm.wasmPaths = "./vendor/";
+    globalThis.ort.env.wasm.wasmPaths = runtimeAssetBase();
     globalThis.ort.env.wasm.numThreads = 1;
     globalThis.ort.env.wasm.proxy = false;
     sessionPromise = globalThis.ort.InferenceSession.create("./model.onnx", {
