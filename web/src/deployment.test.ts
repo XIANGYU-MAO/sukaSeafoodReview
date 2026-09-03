@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 
 import packageJson from "../package.json";
 import viteConfig from "../vite.config";
@@ -31,5 +32,18 @@ describe("deployment paths", () => {
     expect(proxy.rewrite("/sukaseafood/api")).toBe("/");
     expect(proxy.rewrite("/sukaseafood/apifoo")).toBe("/sukaseafood/apifoo");
     expect(proxy.rewrite("/sukaseafood/review/")).toBe("/sukaseafood/review/");
+  });
+
+  it("keeps the public CV path when adding the trailing slash", () => {
+    const nginx = readFileSync("nginx.conf", "utf8");
+    expect(nginx).toContain("location = /portal/cv {");
+    expect(nginx).toContain("return 308 /sukaseafood/cv/;");
+  });
+
+  it("allows the local ONNX runtime, module worker, and photo preview", () => {
+    const nginx = readFileSync("nginx.conf", "utf8");
+    expect(nginx).toContain("application/javascript mjs;");
+    expect(nginx).toContain("script-src 'self' 'wasm-unsafe-eval';");
+    expect(nginx).toContain("img-src 'self' blob: data: https:;");
   });
 });

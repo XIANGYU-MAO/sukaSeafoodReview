@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="SukaSeafood five-class fish identification proof of concept.">
+  <title>SukaSeafood · 鱼类识别演示</title>
+  <link rel="stylesheet" href="./cv.css">
+  <script src="./vendor/ort.min.js" defer></script>
+  <script src="./cv.js" type="module"></script>
+</head>
+<body>
+  <div class="page-shell" id="cv-app">
+    <header class="site-header">
+      <a class="brand" href="/sukaseafood/" aria-label="SukaSeafood 项目主页" data-i18n-aria-label="brandAria">
+        <span class="brand-mark" aria-hidden="true">S</span>
+        <span><strong>SukaSeafood</strong><small data-i18n="brandTagline">五分类视觉识别 · I1</small></span>
+      </a>
+      <nav aria-label="页面导航" data-i18n-aria-label="navAria">
+        <a href="#technology" data-i18n="navTechnology">技术</a>
+        <a href="#configuration" data-i18n="navConfiguration">配置</a>
+        <button type="button" class="language-toggle" data-locale-toggle>English</button>
+      </nav>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow" data-i18n="eyebrow">COMPUTER VISION PROOF OF CONCEPT</p>
+          <h1 id="page-title" data-i18n="pageTitle">鱼类识别演示</h1>
+          <p data-i18n="intro">上传照片或使用手机后置相机拍摄。模型会给出五个已审核鱼种中的前三个候选。</p>
+        </div>
+        <div class="privacy-note"><span aria-hidden="true">●</span><span data-i18n="privacy">照片只在当前浏览器中处理，不会上传或保存。</span></div>
+      </section>
+
+      <section class="workspace" aria-label="鱼类识别工作区" data-i18n-aria-label="workspaceAria">
+        <div class="capture-card">
+          <div class="card-heading">
+            <div><span class="step">01</span><h2 data-i18n="photoHeading">选择鱼类照片</h2></div>
+            <span class="model-state" id="model-state" data-i18n="metadataLoading">读取模型配置</span>
+          </div>
+
+          <label class="upload-control" for="photo-input">
+            <span class="upload-symbol" aria-hidden="true">＋</span>
+            <span><strong id="pick-label" data-i18n="pickLabel">上传或拍摄照片</strong><small data-i18n="pickHelp">JPEG、PNG 或 WebP，最大 10 MB</small></span>
+          </label>
+          <input class="visually-hidden" id="photo-input" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" aria-label="上传或拍摄鱼类照片" data-i18n-aria-label="photoInputAria">
+
+          <div class="preview-frame" id="preview-frame">
+            <div class="preview-empty" id="preview-empty">
+              <span class="preview-index">IMG</span>
+              <p data-i18n="previewEmpty">尽量让整条鱼清晰可见，并减少遮挡。</p>
+            </div>
+            <img id="photo-preview" alt="待识别的鱼类照片" data-i18n-alt="previewAlt" hidden>
+            <div class="scan-line" aria-hidden="true"></div>
+          </div>
+
+          <p class="file-name" id="file-name" aria-live="polite" data-i18n="noFile">尚未选择照片</p>
+          <p class="error-message" id="error-message" role="alert" hidden></p>
+          <div class="capture-actions">
+            <button class="primary-button" id="identify-button" type="button" disabled data-i18n="identify">识别鱼种</button>
+            <button class="text-button" id="clear-button" type="button" hidden data-i18n="clear">清除</button>
+          </div>
+        </div>
+
+        <aside class="result-card" id="result-panel" aria-live="polite" aria-labelledby="result-title">
+          <div class="card-heading">
+            <div><span class="step">02</span><h2 id="result-title" data-i18n="resultHeading">模型结论</h2></div>
+            <span class="result-status" id="result-status" data-i18n="waiting">等待图片</span>
+          </div>
+          <div class="result-empty" id="result-empty">
+            <span class="result-crosshair" aria-hidden="true">＋</span>
+            <h3 id="result-message" data-i18n="resultEmptyTitle">还没有识别结果</h3>
+            <p id="result-copy" data-i18n="resultEmptyCopy">选择照片后点击“识别鱼种”，这里会显示 Top-3 候选。</p>
+          </div>
+          <div class="prediction-list" id="prediction-list" hidden></div>
+          <p class="confirmation-note" id="confirmation-note" hidden data-i18n="confirmation">这是模型建议，不是最终鉴定。请人工确认，也可能五个候选都不正确。</p>
+        </aside>
+      </section>
+
+      <section class="species-strip" aria-labelledby="species-title">
+        <div><p class="eyebrow" data-i18n="scopeEyebrow">MODEL SCOPE</p><h2 id="species-title" data-i18n="scopeTitle">本次只识别 5 个鱼种</h2></div>
+        <div class="species-list" id="species-list"><span data-i18n="metadataLoading">读取模型配置</span></div>
+      </section>
+
+      <section class="information" id="technology" aria-labelledby="technology-title">
+        <div class="section-heading"><p class="eyebrow" data-i18n="technologyEyebrow">TECHNOLOGY</p><h2 id="technology-title" data-i18n="technologyTitle">技术方案</h2></div>
+        <div class="info-grid">
+          <article><span>01</span><h3 data-i18n="modelTitle">轻量分类模型</h3><p data-i18n="modelCopy">MobileNetV3 Small 使用 ImageNet 预训练权重，在审核后的五分类数据上迁移学习。</p></article>
+          <article><span>02</span><h3 data-i18n="runtimeTitle">浏览器本地推理</h3><p data-i18n="runtimeCopy">ONNX Runtime Web 通过 WebAssembly 在设备上运行；服务器只提供静态文件。</p></article>
+          <article><span>03</span><h3 data-i18n="decisionTitle">Top-3 + 人工确认</h3><p data-i18n="decisionCopy">阈值为 0.30。即使超过阈值也只是候选，不能自动写入业务数据。</p></article>
+        </div>
+      </section>
+
+      <section class="metrics" aria-labelledby="metrics-title">
+        <div class="section-heading"><p class="eyebrow" data-i18n="evaluationEyebrow">CLEAN TEST SET · N=82</p><h2 id="metrics-title" data-i18n="evaluationTitle">独立测试结果</h2></div>
+        <div class="metric-grid">
+          <div><strong id="metric-accuracy">90.24%</strong><span data-i18n="accuracy">准确率</span></div>
+          <div><strong id="metric-f1">90.30%</strong><span>Macro-F1</span></div>
+          <div><strong id="metric-top3">100.00%</strong><span data-i18n="top3">Top-3 命中率</span></div>
+        </div>
+        <p class="metric-note" data-i18n="metricNote">这些数字来自清洗后的内部测试集，不代表真实零售场景的生产准确率。</p>
+      </section>
+
+      <section class="configuration" id="configuration" aria-labelledby="configuration-title">
+        <div class="section-heading"><p class="eyebrow" data-i18n="configurationEyebrow">MODEL CONTRACT</p><h2 id="configuration-title" data-i18n="configurationTitle">运行配置</h2></div>
+        <dl class="config-list">
+          <div><dt data-i18n="version">模型版本</dt><dd id="config-version">—</dd></div>
+          <div><dt data-i18n="input">模型输入</dt><dd>1 × 3 × 224 × 224 · float32 · RGB</dd></div>
+          <div><dt data-i18n="resize">图像处理</dt><dd data-i18n="resizeValue">短边缩放至 256，中心裁剪至 224</dd></div>
+          <div><dt data-i18n="normalize">标准化</dt><dd>ImageNet mean / std · NCHW</dd></div>
+          <div><dt data-i18n="threshold">候选阈值</dt><dd id="config-threshold">0.30</dd></div>
+          <div><dt data-i18n="runtime">运行环境</dt><dd>ONNX opset 17 · WASM · 1 thread</dd></div>
+        </dl>
+      </section>
+
+      <section class="limitations" aria-labelledby="limitations-title">
+        <div class="section-heading"><p class="eyebrow" data-i18n="limitationsEyebrow">READ BEFORE USE</p><h2 id="limitations-title" data-i18n="limitationsTitle">已知限制</h2></div>
+        <ul>
+          <li data-i18n="limitScope">模型只能在五个已知类别中选择，遇到其他鱼也会尝试给出候选。</li>
+          <li data-i18n="limitData">训练数据量较小，且主要不是零售冰台现场照片。</li>
+          <li data-i18n="limitConfusion">Kembung 与 Cencaru 是当前最主要的混淆组合。</li>
+          <li data-i18n="limitLicence">部分训练图片仍需完成商业许可核查，本版本仅用于 I1 概念验证。</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer><a href="/sukaseafood/">SukaSeafood</a><span data-i18n="footer">CV I1 演示 · 结果必须人工确认</span></footer>
+  </div>
+</body>
+</html>
