@@ -10,7 +10,6 @@ import {
 
 const html = readFileSync(resolve("static/portal/cv/index.html"), "utf8");
 const css = readFileSync(resolve("static/portal/cv/cv.css"), "utf8");
-const js = readFileSync(resolve("static/portal/cv/cv.js"), "utf8");
 
 test("offers same-origin upload, camera and inference controls", () => {
   const document = new JSDOM(html).window.document;
@@ -30,7 +29,6 @@ test("offers same-origin upload, camera and inference controls", () => {
   for (const selector of ["privacy-note", "error-message", "confirmation-note"]) {
     expect(css).toMatch(new RegExp(`\\.${selector}\\s*\\{[^}]*font-size:\\s*1rem`));
   }
-  expect(js).toContain('imageSmoothingQuality = "low"');
 
   const assetUrls = [
     ...Array.from(document.querySelectorAll("script[src]"), (node) => node.getAttribute("src")),

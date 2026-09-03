@@ -225,7 +225,7 @@ function prepareTensor(source, config) {
   resized.height = resizedSize.height;
   const resizedContext = resized.getContext("2d", { alpha: false });
   resizedContext.imageSmoothingEnabled = true;
-  resizedContext.imageSmoothingQuality = "low";
+  resizedContext.imageSmoothingQuality = "high";
   resizedContext.drawImage(source, 0, 0, resized.width, resized.height);
 
   const size = config.image_size;
