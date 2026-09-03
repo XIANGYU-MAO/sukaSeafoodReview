@@ -36,6 +36,7 @@ describe("deployment paths", () => {
 
   it("keeps the public CV path when adding the trailing slash", () => {
     const nginx = readFileSync("nginx.conf", "utf8");
+    expect(nginx).toContain("absolute_redirect off;");
     expect(nginx).toContain("location = /portal/cv {");
     expect(nginx).toContain("return 308 /sukaseafood/cv/;");
   });

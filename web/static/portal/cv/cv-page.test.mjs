@@ -17,7 +17,7 @@ test("offers same-origin upload, camera and inference controls", () => {
 
   expect(input?.getAttribute("type")).toBe("file");
   expect(input?.getAttribute("accept")).toBe("image/jpeg,image/png,image/webp");
-  expect(input?.getAttribute("capture")).toBe("environment");
+  expect(input?.hasAttribute("capture")).toBe(false);
   expect(document.querySelector("#photo-preview")).not.toBeNull();
   expect(document.querySelector("#identify-button")?.hasAttribute("disabled")).toBe(true);
   expect(document.querySelector("#result-panel")?.getAttribute("aria-live")).toBe("polite");
