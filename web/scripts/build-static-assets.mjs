@@ -12,6 +12,11 @@ import { fileURLToPath } from "node:url";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const webRoot = resolve(scriptDirectory, "..");
 const repositoryRoot = resolve(webRoot, "..");
+const ORT_ASSETS = [
+  "ort.min.js",
+  "ort-wasm-simd-threaded.mjs",
+  "ort-wasm-simd-threaded.wasm",
+];
 
 function assertOutputInside(publicRoot, outputDirectory) {
   const relativePath = relative(resolve(publicRoot), resolve(outputDirectory));
@@ -35,6 +40,7 @@ function singleInlineBlock(source, tagName) {
 export function buildStaticAssets({
   validatorSource = join(repositoryRoot, "validator.html"),
   portalSource = join(webRoot, "static", "portal"),
+  ortSource = join(webRoot, "node_modules", "onnxruntime-web", "dist"),
   publicRoot = join(webRoot, "public"),
   skipPortal = false,
 } = {}) {
@@ -62,6 +68,13 @@ export function buildStaticAssets({
       recursive: true,
       filter: (sourcePath) => !sourcePath.endsWith(".test.mjs"),
     });
+    if (existsSync(join(portalSource, "cv"))) {
+      const cvVendorOutput = join(portalOutput, "cv", "vendor");
+      mkdirSync(cvVendorOutput, { recursive: true });
+      for (const asset of ORT_ASSETS) {
+        cpSync(join(ortSource, asset), join(cvVendorOutput, asset));
+      }
+    }
   }
 }
 
@@ -76,6 +89,7 @@ function parseArguments(argumentsList) {
     const key = {
       "--validator-source": "validatorSource",
       "--portal-source": "portalSource",
+      "--ort-source": "ortSource",
       "--public-root": "publicRoot",
     }[argument];
     if (!key || !argumentsList[index + 1]) {

@@ -35,7 +35,10 @@
 
 **Interfaces:**
 - Consumes: the verified handoff ZIP and `onnxruntime-web@1.20.1/dist`.
-- Produces: `/portal/cv/model.onnx`, JSON metadata, `/portal/cv/vendor/ort.min.js` and `/portal/cv/vendor/ort-wasm-simd-threaded.wasm` in the built static output.
+- Produces: `/portal/cv/model.onnx`, JSON metadata,
+  `/portal/cv/vendor/ort.min.js`,
+  `/portal/cv/vendor/ort-wasm-simd-threaded.mjs`, and
+  `/portal/cv/vendor/ort-wasm-simd-threaded.wasm` in the built static output.
 
 - [ ] **Step 1: Add the exact build-time runtime dependency**
 
@@ -50,6 +53,7 @@ npm install --save-dev --save-exact onnxruntime-web@1.20.1
 Add a test that creates fake portal and ORT directories, runs the real static
 builder with `--ort-source`, and asserts literal runtime bytes appear at
 `public/portal/cv/vendor/ort.min.js` and
+`public/portal/cv/vendor/ort-wasm-simd-threaded.mjs` and
 `public/portal/cv/vendor/ort-wasm-simd-threaded.wasm`.
 
 - [ ] **Step 3: Run the focused test and verify RED**
@@ -68,7 +72,11 @@ Add an `ortSource` option, copy only these two files after the portal copy, and
 raise an error if either file is absent:
 
 ```js
-const ORT_ASSETS = ["ort.min.js", "ort-wasm-simd-threaded.wasm"];
+const ORT_ASSETS = [
+  "ort.min.js",
+  "ort-wasm-simd-threaded.mjs",
+  "ort-wasm-simd-threaded.wasm",
+];
 for (const asset of ORT_ASSETS) {
   cpSync(join(ortSource, asset), join(cvVendorOutput, asset));
 }
@@ -226,4 +234,3 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy/scripts/deploy_from_w
 
 Verify `https://findai.top/sukaseafood/cv/` and its model/runtime assets return
 HTTP 200 before reporting completion.
-
