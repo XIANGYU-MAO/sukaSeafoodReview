@@ -22,6 +22,7 @@ test("offers same-origin upload, camera and inference controls", () => {
   expect(document.querySelector("[data-locale-toggle]")).not.toBeNull();
   expect(document.querySelector("#technology")).not.toBeNull();
   expect(document.querySelector("#configuration")).not.toBeNull();
+  expect(css).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important;/);
 
   const assetUrls = [
     ...Array.from(document.querySelectorAll("script[src]"), (node) => node.getAttribute("src")),
