@@ -10,6 +10,7 @@ import {
 
 const html = readFileSync(resolve("static/portal/cv/index.html"), "utf8");
 const css = readFileSync(resolve("static/portal/cv/cv.css"), "utf8");
+const js = readFileSync(resolve("static/portal/cv/cv.js"), "utf8");
 
 test("offers same-origin upload, camera and inference controls", () => {
   const document = new JSDOM(html).window.document;
@@ -24,7 +25,12 @@ test("offers same-origin upload, camera and inference controls", () => {
   expect(document.querySelector("[data-locale-toggle]")).not.toBeNull();
   expect(document.querySelector("#technology")).not.toBeNull();
   expect(document.querySelector("#configuration")).not.toBeNull();
+  expect(document.querySelector('[data-i18n="limitTask"]')).not.toBeNull();
   expect(css).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important;/);
+  for (const selector of ["privacy-note", "error-message", "confirmation-note"]) {
+    expect(css).toMatch(new RegExp(`\\.${selector}\\s*\\{[^}]*font-size:\\s*1rem`));
+  }
+  expect(js).toContain('imageSmoothingQuality = "low"');
 
   const assetUrls = [
     ...Array.from(document.querySelectorAll("script[src]"), (node) => node.getAttribute("src")),
@@ -47,6 +53,8 @@ test("switches all primary controls to English", () => {
   expect(document.querySelector(".workspace")?.getAttribute("aria-label")).toBe("Fish identification workspace");
   expect(document.querySelector("#photo-input")?.getAttribute("aria-label")).toBe("Upload or take a fish photo");
   expect(document.querySelector("#photo-preview")?.getAttribute("alt")).toBe("Fish photo to identify");
+  expect(document.querySelector('[data-i18n="decisionCopy"]')?.textContent).toContain("uncalibrated softmax");
+  expect(document.querySelector('[data-i18n="limitTask"]')?.textContent).toContain("single-label classifier");
   expect(css).toContain(".upload-control:has(+ input:focus-visible)");
 
   const modelState = document.querySelector("#model-state");

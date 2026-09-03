@@ -21,11 +21,11 @@ const messages = {
     scopeEyebrow: "模型范围", scopeTitle: "本次只识别 5 个鱼种", technologyEyebrow: "技术", technologyTitle: "技术方案",
     modelTitle: "轻量分类模型", modelCopy: "MobileNetV3 Small 使用 ImageNet 预训练权重，在审核后的五分类数据上迁移学习。",
     runtimeTitle: "浏览器本地推理", runtimeCopy: "ONNX Runtime Web 通过 WebAssembly 在设备上运行；服务器只提供静态文件。",
-    decisionTitle: "Top-3 + 人工确认", decisionCopy: "阈值为 0.30。即使超过阈值也只是候选，不能自动写入业务数据。",
+    decisionTitle: "Top-3 + 人工确认", decisionCopy: "页面显示的是未经校准的 softmax 分数，阈值为 0.30；超过阈值仍只是候选，不能自动写入业务数据。",
     evaluationEyebrow: "清洗测试集 · N=82", evaluationTitle: "独立测试结果", accuracy: "准确率", top3: "Top-3 命中率",
     metricNote: "这些数字来自清洗后的内部测试集，不代表真实零售场景的生产准确率。", configurationEyebrow: "模型契约", configurationTitle: "运行配置",
     version: "模型版本", input: "模型输入", resize: "图像处理", resizeValue: "短边缩放至 256，中心裁剪至 224", normalize: "标准化", threshold: "候选阈值", runtime: "运行环境",
-    limitationsEyebrow: "使用前须知", limitationsTitle: "已知限制", limitScope: "模型只能在五个已知类别中选择，遇到其他鱼也会尝试给出候选。",
+    limitationsEyebrow: "使用前须知", limitationsTitle: "已知限制", limitTask: "这是整图单标签分类器，不做目标检测或计数；一张图包含多种鱼时不适用。", limitScope: "模型只能在五个已知类别中选择，遇到其他鱼也会尝试给出候选。",
     limitData: "训练数据量较小，且主要不是零售冰台现场照片。", limitConfusion: "Kembung 与 Cencaru 是当前最主要的混淆组合。",
     limitLicence: "部分训练图片仍需完成商业许可核查，本版本仅用于 I1 概念验证。", footer: "CV I1 演示 · 结果必须人工确认",
   },
@@ -45,11 +45,11 @@ const messages = {
     scopeEyebrow: "Model scope", scopeTitle: "This version recognizes 5 fish classes", technologyEyebrow: "Technology", technologyTitle: "Technical approach",
     modelTitle: "Lightweight classifier", modelCopy: "MobileNetV3 Small starts from ImageNet weights and is transfer-learned on the reviewed five-class dataset.",
     runtimeTitle: "On-device browser inference", runtimeCopy: "ONNX Runtime Web runs through WebAssembly on the device; the server only serves static files.",
-    decisionTitle: "Top-3 + human confirmation", decisionCopy: "The threshold is 0.30. A score above it is still only a candidate and must not update business data automatically.",
+    decisionTitle: "Top-3 + human confirmation", decisionCopy: "The page shows uncalibrated softmax scores. The threshold is 0.30; a score above it is still only a candidate and must not update business data automatically.",
     evaluationEyebrow: "Clean test set · N=82", evaluationTitle: "Independent test results", accuracy: "Accuracy", top3: "Top-3 hit rate",
     metricNote: "These figures come from a cleaned internal test set; they are not proof of production accuracy in retail conditions.", configurationEyebrow: "Model contract", configurationTitle: "Runtime configuration",
     version: "Model version", input: "Model input", resize: "Image transform", resizeValue: "Resize short side to 256, then centre-crop to 224", normalize: "Normalization", threshold: "Candidate threshold", runtime: "Runtime",
-    limitationsEyebrow: "Read before use", limitationsTitle: "Known limitations", limitScope: "The model must choose among five known classes and will still suggest candidates for an unknown fish.",
+    limitationsEyebrow: "Read before use", limitationsTitle: "Known limitations", limitTask: "This is a whole-image, single-label classifier; it does not detect or count fish and is not suitable for mixed-species photos.", limitScope: "The model must choose among five known classes and will still suggest candidates for an unknown fish.",
     limitData: "The training set is small and is not mainly made of real retail ice-counter photos.", limitConfusion: "Kembung and Cencaru are the main confusion pair in the current test set.",
     limitLicence: "Some training-image licences still require commercial clearance. This release is an I1 proof of concept only.", footer: "CV I1 demo · Every result requires human confirmation",
   },
@@ -225,7 +225,7 @@ function prepareTensor(source, config) {
   resized.height = resizedSize.height;
   const resizedContext = resized.getContext("2d", { alpha: false });
   resizedContext.imageSmoothingEnabled = true;
-  resizedContext.imageSmoothingQuality = "high";
+  resizedContext.imageSmoothingQuality = "low";
   resizedContext.drawImage(source, 0, 0, resized.width, resized.height);
 
   const size = config.image_size;
